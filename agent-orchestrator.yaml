@@ -1,0 +1,36 @@
+port: 3000
+
+defaults:
+  runtime: tmux
+  agent: claude-code
+  workspace: worktree
+  notifiers: [desktop]
+
+projects:
+  zapbot-test:
+    repo: chughtapan/zapbot-test
+    path: /Users/tapanc/dev/zapbot
+    defaultBranch: main
+    sessionPrefix: zap
+    agentRulesFile: .agent-rules.md
+
+    scm:
+      plugin: github
+      webhook:
+        path: /api/webhooks/github
+        secretEnvVar: GITHUB_WEBHOOK_SECRET
+        signatureHeader: x-hub-signature-256
+        eventHeader: x-github-event
+
+reactions:
+  ci-failed:
+    auto: true
+    action: send-to-agent
+    retries: 2
+  changes-requested:
+    auto: true
+    action: send-to-agent
+    escalateAfter: 30m
+  approved-and-green:
+    auto: false
+    action: notify
