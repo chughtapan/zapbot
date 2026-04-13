@@ -27,12 +27,13 @@ show_help() {
 # Parse args
 PLAN_FILE=""
 KEY=""
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --help) show_help ;;
-    --key) shift; KEY="${1:-}"; shift || true ;;
-    *) [ -z "$PLAN_FILE" ] && PLAN_FILE="$arg" ;;
+    --key) shift; KEY="${1:-}" ;;
+    *) [ -z "$PLAN_FILE" ] && PLAN_FILE="$1" ;;
   esac
+  shift
 done
 
 if [ -z "$PLAN_FILE" ] || [ ! -f "$PLAN_FILE" ]; then
@@ -113,7 +114,7 @@ if [ -n "$ISSUE_NUM" ] && [ "$ISSUE_NUM" != "null" ]; then
   # Update existing issue
   # Fix callback URL with real issue number
   if [ -n "$SHARE_LINK" ]; then
-    ISSUE_BODY=$(echo "$ISSUE_BODY" | sed "s/ISSUE_NUM_PLACEHOLDER/${ISSUE_NUM}/g")
+    ISSUE_BODY=$(echo "$ISSUE_BODY" | sed "s|ISSUE_NUM_PLACEHOLDER|${ISSUE_NUM}|g")
   fi
   gh issue edit "$ISSUE_NUM" --repo "$REPO" --body "$ISSUE_BODY" >/dev/null
   gh issue comment "$ISSUE_NUM" --repo "$REPO" --body "Plan updated at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
@@ -130,7 +131,7 @@ else
   ISSUE_NUM=$(echo "$ISSUE_URL" | grep -o '[0-9]*$')
 
   # Fix callback URL with real issue number
-  ISSUE_BODY=$(echo "$ISSUE_BODY" | sed "s/ISSUE_NUM_PLACEHOLDER/${ISSUE_NUM}/g")
+  ISSUE_BODY=$(echo "$ISSUE_BODY" | sed "s|ISSUE_NUM_PLACEHOLDER|${ISSUE_NUM}|g")
   gh issue edit "$ISSUE_NUM" --repo "$REPO" --body "$ISSUE_BODY" >/dev/null
 
   echo "Created issue #${ISSUE_NUM}: ${ISSUE_URL}"
@@ -142,7 +143,7 @@ if [ -n "$CB_TOKEN" ] && [ -n "$BRIDGE_URL" ]; then
   if [ -n "$SHARE_LINK" ]; then
     SHARE_LINK=$(echo "$SHARE_LINK" | sed "s/ISSUE_NUM_PLACEHOLDER/${ISSUE_NUM}/g")
     # Re-update issue body with correct callback URL
-    ISSUE_BODY=$(echo "$ISSUE_BODY" | sed "s/ISSUE_NUM_PLACEHOLDER/${ISSUE_NUM}/g")
+    ISSUE_BODY=$(echo "$ISSUE_BODY" | sed "s|ISSUE_NUM_PLACEHOLDER|${ISSUE_NUM}|g")
     gh issue edit "$ISSUE_NUM" --repo "$REPO" --body "$ISSUE_BODY" >/dev/null 2>&1 || true
   fi
 

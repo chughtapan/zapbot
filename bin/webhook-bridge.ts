@@ -87,7 +87,12 @@ async function handleGitHubWebhook(req: Request, body: string): Promise<Response
   }
 
   const event = req.headers.get("x-github-event");
-  const payload = JSON.parse(body);
+  let payload: any;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return jsonError("invalid_json", "Webhook body is not valid JSON", 400);
+  }
 
   if (event === "issues" && payload.action === "labeled") {
     const label = payload.label?.name;
