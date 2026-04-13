@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 import { createHmac } from "crypto";
 
+// Prevent crashes from unhandled stream errors (DecompressionStream on bad input)
+process.on("unhandledRejection", (err) => {
+  console.error("[bridge] Unhandled rejection (non-fatal):", err instanceof Error ? err.message : err);
+});
+
 const BRIDGE_PORT = Number(process.env.ZAPBOT_BRIDGE_PORT) || 3000;
 const AO_PORT = Number(process.env.ZAPBOT_AO_PORT) || 3001;
 const SECRET = process.env.GITHUB_WEBHOOK_SECRET;
@@ -41,14 +46,23 @@ function jsonError(code: string, message: string, status: number): Response {
 
 async function decompress(b64: string): Promise<unknown> {
   const base64 = b64.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(base64);
+  let binary: string;
+  try {
+    binary = atob(base64);
+  } catch {
+    throw new Error("Invalid base64 in annotated URL");
+  }
   const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
   const stream = new DecompressionStream("deflate-raw");
   const writer = stream.writable.getWriter();
   writer.write(bytes);
   writer.close();
-  const buffer = await new Response(stream.readable).arrayBuffer();
-  return JSON.parse(new TextDecoder().decode(buffer));
+  try {
+    const buffer = await new Response(stream.readable).arrayBuffer();
+    return JSON.parse(new TextDecoder().decode(buffer));
+  } catch (err) {
+    throw new Error("Failed to decompress annotated URL: " + (err instanceof Error ? err.message : String(err)));
+  }
 }
 
 function formatAnnotations(annotations: any[]): string {

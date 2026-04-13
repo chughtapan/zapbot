@@ -83,12 +83,13 @@ fi
 # --- Test 4: Issue content verification ---
 echo ""
 echo "Test 4: Issue content verification"
-ISSUE_DATA=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json body,labels)
-ISSUE_BODY=$(echo "$ISSUE_DATA" | jq -r '.body')
-ISSUE_LABELS=$(echo "$ISSUE_DATA" | jq -r '[.labels[].name] | join(",")')
-assert_cmd "Issue body contains plan goal" "echo \"$ISSUE_BODY\" | grep -q 'hello endpoint'"
-assert_cmd "Issue body contains acceptance criteria" "echo \"$ISSUE_BODY\" | grep -q 'Acceptance Criteria'"
-assert_cmd "Issue has zapbot-plan label" "echo \"$ISSUE_LABELS\" | grep -q 'zapbot-plan'"
+ISSUE_BODY_FILE=$(mktemp /tmp/zapbot-test-body-XXXXXX)
+gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json body --jq '.body' > "$ISSUE_BODY_FILE"
+ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
+assert_cmd "Issue body contains plan goal" "grep -q 'hello endpoint' '$ISSUE_BODY_FILE'"
+assert_cmd "Issue body contains acceptance criteria" "grep -q 'Acceptance Criteria' '$ISSUE_BODY_FILE'"
+assert_cmd "Issue has zapbot-plan label" "echo '$ISSUE_LABELS' | grep -q 'zapbot-plan'"
+rm -f "$ISSUE_BODY_FILE"
 
 # --- Test 5: Plan update removes approval ---
 echo ""
