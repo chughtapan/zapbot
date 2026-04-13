@@ -4,13 +4,14 @@ set -euo pipefail
 # Publish a plan to a GitHub issue with plannotator share link.
 # Usage: zapbot-publish.sh <plan-file> [--key <feature-key>]
 
+# Load .env from the project directory FIRST (before reading env vars)
+PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+[ -f "$PROJECT_ROOT/.env" ] && set -a && source "$PROJECT_ROOT/.env" && set +a
+
+# THEN read env vars (values from .env take precedence)
 REPO="${ZAPBOT_REPO:-}"
 BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-}"
 APPROVE_LABEL="${ZAPBOT_APPROVE_LABEL:-plan-approved}"
-
-# Load .env from the project directory (not the zapbot tool dir)
-PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-[ -f "$PROJECT_ROOT/.env" ] && set -a && source "$PROJECT_ROOT/.env" && set +a
 
 show_help() {
   cat <<HELP
