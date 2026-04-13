@@ -125,16 +125,55 @@ async function handleGitHubWebhook(req: Request, body: string): Promise<Response
       console.log(`[bridge] ${APPROVE_LABEL} on issue #${issueNum}, spawning...`);
       spawnedIssues.set(issueNum, Date.now());
 
+      const repo = process.env.ZAPBOT_REPO;
       const proc = Bun.spawn(["ao", "spawn", String(issueNum)], {
         stdout: "pipe",
         stderr: "pipe",
       });
-      proc.exited.then((code) => {
+
+      // Post "Agent spawning" comment and add in-progress label
+      if (repo) {
+        Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body",
+          "🤖 **Agent spawning** — working on this plan now.\n\nFollow progress in the AO dashboard or wait for a PR."], {
+          stdout: "ignore", stderr: "ignore",
+        });
+        Bun.spawn(["gh", "issue", "edit", String(issueNum), "--repo", repo,
+          "--add-label", "in-progress"], {
+          stdout: "ignore", stderr: "ignore",
+        });
+      }
+
+      proc.exited.then(async (code) => {
         if (code !== 0) {
           console.error(`[bridge] ao spawn ${issueNum} failed with code ${code}`);
           spawnedIssues.delete(issueNum);
+          if (repo) {
+            let stderrText = "";
+            try {
+              stderrText = await new Response(proc.stderr).text();
+              if (stderrText.length > 500) stderrText = stderrText.slice(0, 500) + "…";
+            } catch {}
+            const body = `❌ **Agent failed** (exit code ${code})\n\n${stderrText ? "```\n" + stderrText + "\n```" : ""}`;
+            Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body", body], {
+              stdout: "ignore", stderr: "ignore",
+            });
+            Bun.spawn(["gh", "issue", "edit", String(issueNum), "--repo", repo,
+              "--remove-label", "in-progress", "--add-label", "agent-failed"], {
+              stdout: "ignore", stderr: "ignore",
+            });
+          }
         } else {
           console.log(`[bridge] ao spawn ${issueNum} succeeded`);
+          if (repo) {
+            Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body",
+              "✅ **Agent completed** — check for a new PR on this repo."], {
+              stdout: "ignore", stderr: "ignore",
+            });
+            Bun.spawn(["gh", "issue", "edit", String(issueNum), "--repo", repo,
+              "--remove-label", "in-progress"], {
+              stdout: "ignore", stderr: "ignore",
+            });
+          }
         }
       });
 
