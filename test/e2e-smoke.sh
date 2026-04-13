@@ -12,10 +12,10 @@ ZAPBOT_REPO="zapbot-test"
 PASS=0
 FAIL=0
 
-assert() {
+assert_cmd() {
   local desc="$1"
-  shift
-  if "$@" >/dev/null 2>&1; then
+  local cmd="$2"
+  if eval "$cmd" >/dev/null 2>&1; then
     echo "  ✓ $desc"
     PASS=$((PASS + 1))
   else
@@ -47,7 +47,7 @@ Add a simple /hello endpoint that returns "Hello, World!" for testing.
 - [ ] `hello()` returns "Hello, World!"
 - [ ] Test passes
 PLAN
-assert "Plan file created" test -f "$REPO_DIR/plan.md"
+assert_cmd "Plan file created" "test -f '$REPO_DIR/plan.md'"
 
 # --- Test 2: Publish plan as GitHub issue ---
 echo ""
@@ -65,7 +65,6 @@ if [ -n "$ISSUE_NUM" ]; then
 else
   echo "  ✗ Issue creation failed"
   FAIL=$((FAIL + 1))
-  # Cleanup and exit early
   rm -f "$REPO_DIR/plan.md"
   echo ""
   echo "=== Results: $PASS passed, $FAIL failed ==="
@@ -76,22 +75,22 @@ fi
 echo ""
 echo "Test 3: Issue content verification"
 ISSUE_BODY=$(gh issue view "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --json body --jq '.body')
-assert "Issue body contains plan goal" echo "$ISSUE_BODY" | grep -q "hello endpoint"
-assert "Issue body contains acceptance criteria" echo "$ISSUE_BODY" | grep -q "Acceptance Criteria"
+assert_cmd "Issue body contains plan goal" "echo '$ISSUE_BODY' | grep -q 'hello endpoint'"
+assert_cmd "Issue body contains acceptance criteria" "echo '$ISSUE_BODY' | grep -q 'Acceptance Criteria'"
 
 ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --json labels --jq '[.labels[].name] | join(",")')
-assert "Issue has zapbot-plan label" echo "$ISSUE_LABELS" | grep -q "zapbot-plan"
+assert_cmd "Issue has zapbot-plan label" "echo '$ISSUE_LABELS' | grep -q 'zapbot-plan'"
 
 # --- Test 4: Plan update removes approval ---
 echo ""
 echo "Test 4: Plan update invalidates approval"
-# Add plan-approved first
 gh issue edit "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --add-label "plan-approved" >/dev/null 2>&1 || true
-sleep 1
-# Simulate plan update by removing label (as the skill would)
+sleep 2
+# Simulate what the skill does: remove label on plan update
 gh issue edit "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --remove-label "plan-approved" >/dev/null 2>&1 || true
+sleep 1
 LABELS_AFTER=$(gh issue view "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --json labels --jq '[.labels[].name] | join(",")')
-assert "plan-approved label removed after update" test "$(echo "$LABELS_AFTER" | grep -c "plan-approved")" -eq 0
+assert_cmd "plan-approved label removed after update" "echo '$LABELS_AFTER' | grep -v 'plan-approved'"
 
 # --- Cleanup ---
 echo ""
