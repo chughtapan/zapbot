@@ -1,383 +1,829 @@
-#!/usr/bin/env bun
-import { createHmac } from "crypto";
+import { Kysely } from "kysely";
+import { initDatabase, type Database } from "../src/store/database.js";
+import {
+  getWorkflow,
+  getWorkflowByIssue,
+  upsertWorkflow,
+  updateWorkflowState,
+  getSubWorkflows,
+  addTransition,
+  getTransitionHistory,
+  getAgentSessions,
+  getAgentSession,
+  updateAgentHeartbeat,
+  updateAgentStatus,
+  hasDeliveryBeenProcessed,
+  withTransaction,
+} from "../src/store/queries.js";
+import { apply } from "../src/state-machine/engine.js";
+import { LABEL_TO_STATE, TERMINAL_STATES, STATE_TO_LABEL } from "../src/state-machine/states.js";
+import type { WorkflowEvent } from "../src/state-machine/events.js";
+import type { SideEffect } from "../src/state-machine/effects.js";
+import type { Workflow } from "../src/state-machine/transitions.js";
+import { spawnAgent, type AgentRole } from "../src/agents/spawner.js";
+import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heartbeat.js";
+import { createLogger } from "../src/logger.js";
 
-// Prevent crashes from unhandled stream errors (DecompressionStream on bad input)
+// Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
   console.error("[bridge] Unhandled rejection (non-fatal):", err instanceof Error ? err.message : err);
 });
 
-const BRIDGE_PORT = Number(process.env.ZAPBOT_BRIDGE_PORT) || 3000;
-const AO_PORT = Number(process.env.ZAPBOT_AO_PORT) || 3001;
-const SECRET = process.env.GITHUB_WEBHOOK_SECRET;
-const APPROVE_LABEL = process.env.ZAPBOT_APPROVE_LABEL || "plan-approved";
+const log = createLogger("bridge");
 
-if (!SECRET) {
+// ── Configuration ───────────────────────────────────────────────────
+
+const PORT = parseInt(process.env.ZAPBOT_PORT || "3000", 10);
+const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
+if (!WEBHOOK_SECRET) {
   console.error("[bridge] GITHUB_WEBHOOK_SECRET is required. Set it in .env or export it.");
   process.exit(1);
 }
+const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
+const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
-// --- Token store (in-memory, one-time use, 24h expiry) ---
-const tokens = new Map<string, { issueNumber: number; createdAt: number }>();
-const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+// ── HMAC verification ───────────────────────────────────────────────
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, val] of tokens) {
-    if (now - val.createdAt > TOKEN_TTL_MS) tokens.delete(key);
-  }
-  for (const [num, ts] of spawnedIssues) {
-    if (now - ts > SPAWN_TTL_MS) spawnedIssues.delete(num);
-  }
-}, 60 * 60 * 1000);
+async function verifySignature(
+  payload: string,
+  signature: string | null
+): Promise<boolean> {
+  if (!signature) return false;
 
-// --- Spawned issues tracker (dedup with 1h TTL) ---
-const spawnedIssues = new Map<number, number>();
-const SPAWN_TTL_MS = 60 * 60 * 1000;
-
-function verifyHmac(payload: string, signature: string): boolean {
-  const expected = "sha256=" + createHmac("sha256", SECRET!).update(payload).digest("hex");
-  return expected.length === signature.length &&
-    Buffer.from(expected).equals(Buffer.from(signature));
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+  const expected = `sha256=${Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+  // Constant-time comparison to prevent timing attacks
+  if (expected.length !== signature.length) return false;
+  return Buffer.from(expected).equals(Buffer.from(signature));
 }
 
-function jsonError(code: string, message: string, status: number): Response {
-  return Response.json({ error: code, message }, { status });
-}
+// ── Database ────────────────────────────────────────────────────────
 
-async function decompress(b64: string): Promise<unknown> {
-  const base64 = b64.replace(/-/g, "+").replace(/_/g, "/");
-  let binary: string;
-  try {
-    binary = atob(base64);
-  } catch {
-    throw new Error("Invalid base64 in annotated URL");
-  }
-  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-  const stream = new DecompressionStream("deflate-raw");
-  const writer = stream.writable.getWriter();
-  writer.write(bytes);
-  writer.close();
-  try {
-    const buffer = await new Response(stream.readable).arrayBuffer();
-    return JSON.parse(new TextDecoder().decode(buffer));
-  } catch (err) {
-    throw new Error("Failed to decompress annotated URL: " + (err instanceof Error ? err.message : String(err)));
-  }
-}
+let db: Kysely<Database>;
 
-function formatAnnotations(annotations: any[]): string {
-  if (!annotations || annotations.length === 0) return "No annotations.";
-  return annotations
-    .map((a: any, i: number) => {
-      const type = a.type || a.action || "comment";
-      const text = a.text || a.content || a.body || JSON.stringify(a);
-      const line = a.line != null ? ` (line ${a.line})` : "";
-      return `${i + 1}. **[${type}]**${line}: ${text}`;
-    })
-    .join("\n");
-}
+// ── Webhook event mapping ───────────────────────────────────────────
 
-async function proxyToAO(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const target = `http://localhost:${AO_PORT}${url.pathname}${url.search}`;
-  try {
-    const headers = new Headers(req.headers);
-    headers.delete("host");
-    const resp = await fetch(target, {
-      method: req.method,
-      headers,
-      body: req.method !== "GET" && req.method !== "HEAD" ? await req.arrayBuffer() : undefined,
-      signal: AbortSignal.timeout(10000),
-    });
-    return new Response(resp.body, {
-      status: resp.status,
-      headers: resp.headers,
-    });
-  } catch {
-    return jsonError("ao_unreachable", `AO not responding on port ${AO_PORT}`, 502);
-  }
-}
+function mapWebhookToEvent(
+  eventType: string,
+  payload: any
+): { event: WorkflowEvent; issueNumber: number; repo: string } | null {
+  const repo: string = payload.repository?.full_name || "";
 
-async function handleGitHubWebhook(req: Request, body: string): Promise<Response> {
-  const sig = req.headers.get("x-hub-signature-256") || "";
-  if (!verifyHmac(body, sig)) {
-    return jsonError("hmac_invalid", "HMAC signature mismatch. Check GITHUB_WEBHOOK_SECRET.", 401);
+  if (eventType === "issues" && payload.action === "labeled") {
+    const label: string = payload.label?.name || "";
+    const actor: string = payload.sender?.login || "";
+    const issueNumber: number = payload.issue?.number;
+
+    // Self-label loop prevention
+    if (actor === BOT_USERNAME) {
+      log.debug("Ignoring self-authored label event", { label, actor });
+      return null;
+    }
+
+    if (label === "abandoned") {
+      return { event: { type: "label_abandoned", triggeredBy: actor }, issueNumber, repo };
+    }
+
+    if (label === "plan-approved") {
+      return { event: { type: "label_added", label, triggeredBy: actor }, issueNumber, repo };
+    }
+
+    if (label === "triage") {
+      return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
+    }
+
+    return null;
   }
 
-  const event = req.headers.get("x-github-event");
-  let payload: any;
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    return jsonError("invalid_json", "Webhook body is not valid JSON", 400);
+  if (eventType === "issues" && payload.action === "opened") {
+    const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
+    const issueNumber: number = payload.issue?.number;
+    const actor: string = payload.sender?.login || "";
+
+    if (labels.includes("triage")) {
+      // New parent issue with triage label -> will create workflow in TRIAGE state
+      return null; // Handled specially below
+    }
+
+    return null;
   }
 
-  if (event === "issues" && payload.action === "labeled") {
-    const label = payload.label?.name;
-    const issueNum = payload.issue?.number;
+  if (eventType === "issue_comment" && payload.action === "created") {
+    // Could be agent status updates or slash commands
+    return null;
+  }
 
-    if (label === APPROVE_LABEL && typeof issueNum === "number" && issueNum > 0) {
-      if (spawnedIssues.has(issueNum)) {
-        console.log(`[bridge] Issue #${issueNum} already spawned, skipping`);
-        return Response.json({ ok: true, action: "skipped", reason: "already_spawned" }, { status: 200 });
-      }
+  if (eventType === "pull_request" && payload.action === "opened") {
+    const prNumber: number = payload.pull_request?.number;
+    const isDraft: boolean = payload.pull_request?.draft || false;
+    const body: string = payload.pull_request?.body || "";
+    const actor: string = payload.sender?.login || "";
 
-      console.log(`[bridge] ${APPROVE_LABEL} on issue #${issueNum}, spawning...`);
-      spawnedIssues.set(issueNum, Date.now());
+    // Look for linked issue in PR body (e.g., "Closes #11", "Part of #10")
+    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
+    if (!issueMatch) return null;
+    const issueNumber = parseInt(issueMatch[1], 10);
 
-      const repo = process.env.ZAPBOT_REPO;
-      const proc = Bun.spawn(["ao", "spawn", String(issueNum)], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-
-      // Post "Agent spawning" comment and add in-progress label
-      if (repo) {
-        Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body",
-          "🤖 **Agent spawning** — working on this plan now.\n\nFollow progress in the AO dashboard or wait for a PR."], {
-          stdout: "ignore", stderr: "ignore",
-        });
-        Bun.spawn(["gh", "issue", "edit", String(issueNum), "--repo", repo,
-          "--add-label", "in-progress"], {
-          stdout: "ignore", stderr: "ignore",
-        });
-      }
-
-      proc.exited.then(async (code) => {
-        let stdoutText = "";
-        try {
-          stdoutText = await new Response(proc.stdout).text();
-        } catch {}
-
-        if (code !== 0) {
-          console.error(`[bridge] ao spawn ${issueNum} failed with code ${code}`);
-          spawnedIssues.delete(issueNum);
-          if (repo) {
-            let stderrText = "";
-            try {
-              stderrText = await new Response(proc.stderr).text();
-              if (stderrText.length > 500) stderrText = stderrText.slice(0, 500) + "…";
-            } catch {}
-            const body = `❌ **Agent failed** (exit code ${code})\n\n${stderrText ? "```\n" + stderrText + "\n```" : ""}`;
-            Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body", body], {
-              stdout: "ignore", stderr: "ignore",
-            });
-            Bun.spawn(["gh", "issue", "edit", String(issueNum), "--repo", repo,
-              "--remove-label", "in-progress", "--add-label", "agent-failed"], {
-              stdout: "ignore", stderr: "ignore",
-            });
-          }
-        } else {
-          console.log(`[bridge] ao spawn ${issueNum} succeeded`);
-
-          // Check if prompt delivery failed despite successful spawn
-          const promptFailed = /Prompt delivery failed/i.test(stdoutText)
-            || /promptDelivered.*false/i.test(stdoutText);
-
-          if (promptFailed && repo) {
-            const sessionMatch = stdoutText.match(/SESSION=([\w-]+)/);
-            if (sessionMatch) {
-              const sessionId = sessionMatch[1];
-              console.log(`[bridge] Prompt delivery failed for issue #${issueNum}, retrying via ao send (session: ${sessionId})...`);
-
-              // Wait for Claude Code to finish loading before sending
-              await Bun.sleep(15_000);
-
-              try {
-                const ghProc = Bun.spawn(
-                  ["gh", "issue", "view", String(issueNum), "--repo", repo, "--json", "body", "-q", ".body"],
-                  { stdout: "pipe", stderr: "pipe" },
-                );
-                const ghCode = await ghProc.exited;
-                const issueBody = await new Response(ghProc.stdout).text();
-
-                if (ghCode === 0 && issueBody.trim()) {
-                  const prompt = `Read this plan and implement it:\n\n${issueBody.trim()}`;
-                  const sendProc = Bun.spawn(["ao", "send", sessionId, prompt], {
-                    stdout: "pipe",
-                    stderr: "pipe",
-                  });
-                  const sendCode = await sendProc.exited;
-                  if (sendCode === 0) {
-                    console.log(`[bridge] Prompt delivery retry for issue #${issueNum} via ao send succeeded`);
-                  } else {
-                    const sendErr = await new Response(sendProc.stderr).text();
-                    console.error(`[bridge] Prompt delivery retry for issue #${issueNum} failed: ${sendErr}`);
-                  }
-                } else {
-                  console.error(`[bridge] Could not fetch issue body for #${issueNum}, skipping prompt retry`);
-                }
-              } catch (err) {
-                console.error(`[bridge] Prompt delivery retry error for issue #${issueNum}:`, err);
-              }
-            } else {
-              console.warn(`[bridge] Prompt delivery failed for issue #${issueNum} but could not extract session ID from spawn output`);
-            }
-          }
-
-          if (repo) {
-            Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body",
-              "✅ **Agent completed** — check for a new PR on this repo."], {
-              stdout: "ignore", stderr: "ignore",
-            });
-            Bun.spawn(["gh", "issue", "edit", String(issueNum), "--repo", repo,
-              "--remove-label", "in-progress"], {
-              stdout: "ignore", stderr: "ignore",
-            });
-          }
-        }
-      });
-
-      return Response.json({ ok: true, action: "spawning", issue: issueNum }, { status: 202 });
+    if (isDraft) {
+      return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
+    } else {
+      // Non-draft PR: skip DRAFT_REVIEW (fallback per plan edge case)
+      return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
     }
   }
 
-  // Forward all other GitHub events to AO
-  const target = `http://localhost:${AO_PORT}/api/webhooks/github`;
-  try {
-    const resp = await fetch(target, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-hub-signature-256": sig,
-        "x-github-event": event || "",
-        "x-github-delivery": req.headers.get("x-github-delivery") || "",
-      },
-      body,
-      signal: AbortSignal.timeout(10000),
-    });
-    return new Response(resp.body, { status: resp.status, headers: resp.headers });
-  } catch {
-    return jsonError("ao_unreachable", "Could not forward event to AO", 502);
+  if (eventType === "pull_request" && payload.action === "ready_for_review") {
+    const prNumber: number = payload.pull_request?.number;
+    const body: string = payload.pull_request?.body || "";
+    const actor: string = payload.sender?.login || "";
+
+    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
+    if (!issueMatch) return null;
+    const issueNumber = parseInt(issueMatch[1], 10);
+
+    return { event: { type: "pr_ready_for_review", triggeredBy: actor, prNumber }, issueNumber, repo };
   }
+
+  if (eventType === "pull_request" && payload.action === "closed" && payload.pull_request?.merged) {
+    const body: string = payload.pull_request?.body || "";
+    const actor: string = payload.sender?.login || "";
+
+    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
+    if (!issueMatch) return null;
+    const issueNumber = parseInt(issueMatch[1], 10);
+
+    return { event: { type: "verified_and_shipped", triggeredBy: actor }, issueNumber, repo };
+  }
+
+  if (eventType === "pull_request_review" && payload.action === "submitted") {
+    const state: string = payload.review?.state || "";
+    const body: string = payload.pull_request?.body || "";
+    const actor: string = payload.sender?.login || "";
+
+    if (state !== "changes_requested") return null;
+
+    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
+    if (!issueMatch) return null;
+    const issueNumber = parseInt(issueMatch[1], 10);
+
+    return { event: { type: "changes_requested", triggeredBy: actor }, issueNumber, repo };
+  }
+
+  return null;
 }
 
-async function handlePlannotatorCallback(req: Request, issueNum: number): Promise<Response> {
-  let payload: any;
-  try {
-    payload = await req.json();
-  } catch {
-    return jsonError("invalid_body", "Request body must be valid JSON", 400);
-  }
+// ── Side effect execution ───────────────────────────────────────────
 
-  const { token, annotated_url, action } = payload;
-  if (!token || typeof token !== "string") {
-    return jsonError("missing_token", "callback token (ct) is required", 400);
-  }
-
-  const stored = tokens.get(token);
-  if (!stored) {
-    return jsonError("invalid_token", "Token is invalid or already used", 403);
-  }
-  if (stored.issueNumber !== issueNum) {
-    return jsonError("token_mismatch", "Token does not match this issue", 403);
-  }
-  tokens.delete(token);
-
-  // Decompress annotations from the annotated URL
-  let commentBody = `**Plannotator review feedback** (${action || "feedback"})`;
-  if (annotated_url && typeof annotated_url === "string") {
+async function executeSideEffects(
+  effects: SideEffect[],
+  repo: string
+): Promise<void> {
+  for (const effect of effects) {
     try {
-      const hashIdx = annotated_url.indexOf("#");
-      if (hashIdx !== -1) {
-        let hash = annotated_url.slice(hashIdx + 1);
-        const qIdx = hash.indexOf("?");
-        if (qIdx !== -1) hash = hash.slice(0, qIdx);
-        const data = (await decompress(hash)) as { p?: string; a?: any[] };
-        if (data.a && data.a.length > 0) {
-          commentBody += `\n\n### Annotations\n\n${formatAnnotations(data.a)}`;
-        } else {
-          commentBody += "\n\n_No specific annotations. Plan was reviewed visually._";
+      switch (effect.type) {
+        case "spawn_agent": {
+          const wf = await getWorkflowByIssue(db, effect.issueNumber, repo);
+          if (wf) {
+            await spawnAgent(db, {
+              issueNumber: effect.issueNumber,
+              repo,
+              role: effect.role as AgentRole,
+              workflowId: wf.id,
+            });
+          }
+          break;
+        }
+        case "add_label": {
+          log.info(`Adding label '${effect.label}' to #${effect.issueNumber}`, {
+            issueNumber: effect.issueNumber,
+            label: effect.label,
+          });
+          await runGh(["issue", "edit", String(effect.issueNumber), "--repo", repo, "--add-label", effect.label]);
+          break;
+        }
+        case "remove_label": {
+          log.info(`Removing label '${effect.label}' from #${effect.issueNumber}`, {
+            issueNumber: effect.issueNumber,
+            label: effect.label,
+          });
+          await runGh(["issue", "edit", String(effect.issueNumber), "--repo", repo, "--remove-label", effect.label]);
+          break;
+        }
+        case "post_comment": {
+          log.info(`Posting comment on #${effect.issueNumber}`, { issueNumber: effect.issueNumber });
+          await runGh(["issue", "comment", String(effect.issueNumber), "--repo", repo, "--body", effect.body]);
+          break;
+        }
+        case "close_issue": {
+          log.info(`Closing issue #${effect.issueNumber}`, { issueNumber: effect.issueNumber });
+          await runGh(["issue", "close", String(effect.issueNumber), "--repo", repo]);
+          break;
+        }
+        case "check_parent_completion": {
+          await checkParentCompletion(effect.parentWorkflowId, repo);
+          break;
+        }
+        case "abandon_children": {
+          await abandonChildren(effect.parentWorkflowId, repo);
+          break;
+        }
+        case "convert_pr_to_draft": {
+          log.info(`Converting PR #${effect.prNumber} to draft`, { prNumber: effect.prNumber });
+          await runGh(["pr", "ready", String(effect.prNumber), "--repo", repo, "--undo"]);
+          break;
+        }
+        case "create_sub_issue": {
+          log.info(`Creating sub-issue for parent #${effect.parentIssueNumber}`, {
+            parentIssue: effect.parentIssueNumber,
+          });
+          await runGh([
+            "issue", "create", "--repo", repo,
+            "--title", effect.title,
+            "--body", `${effect.body}\n\nPart of #${effect.parentIssueNumber}`,
+            "--label", "planning",
+          ]);
+          break;
+        }
+        case "notify_human": {
+          log.warn(`HUMAN NOTIFICATION: ${effect.message}`);
+          break;
         }
       }
     } catch (err) {
-      commentBody += `\n\n_Could not parse annotations. [View in Plannotator](${annotated_url})_`;
+      log.error(`Failed to execute side effect ${effect.type}: ${err}`, { effect: effect.type });
     }
-    commentBody += `\n\n[View annotated plan in Plannotator](${annotated_url})`;
   }
-
-  // Post as GitHub issue comment
-  const repo = process.env.ZAPBOT_REPO;
-  if (!repo) {
-    return jsonError("no_repo", "ZAPBOT_REPO env var is required", 500);
-  }
-  try {
-    const proc = Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body", commentBody], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const code = await proc.exited;
-    if (code !== 0) {
-      const stderr = await new Response(proc.stderr).text();
-      console.error(`[bridge] gh issue comment failed: ${stderr}`);
-      return jsonError("comment_failed", "Failed to post issue comment", 500);
-    }
-  } catch (err: any) {
-    return jsonError("comment_error", err.message, 500);
-  }
-
-  console.log(`[bridge] Posted annotation feedback on issue #${issueNum}`);
-  return Response.json({ ok: true, action: "comment_posted", issue: issueNum });
 }
 
-Bun.serve({
-  port: BRIDGE_PORT,
-  async fetch(req) {
-    const url = new URL(req.url);
+async function runGh(args: string[]): Promise<string> {
+  const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
+  const output = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    log.error(`gh command failed: gh ${args.join(" ")} → ${stderr}`);
+  }
+  return output.trim();
+}
 
-    // Health check
-    if (url.pathname === "/healthz") {
-      return Response.json({ ok: true, bridge: true, ao_port: AO_PORT });
+// ── Parent completion check ─────────────────────────────────────────
+
+async function checkParentCompletion(parentWorkflowId: string, repo: string): Promise<void> {
+  const parent = await getWorkflow(db, parentWorkflowId);
+  if (!parent || TERMINAL_STATES.has(parent.state)) return;
+
+  const subs = await getSubWorkflows(db, parentWorkflowId);
+  const allTerminal = subs.length > 0 && subs.every((s) => TERMINAL_STATES.has(s.state));
+
+  if (allTerminal) {
+    const parentWf: Workflow = {
+      id: parent.id,
+      issueNumber: parent.issue_number,
+      state: parent.state,
+      level: parent.level as "parent" | "sub",
+      parentWorkflowId: parent.parent_workflow_id,
+      draftReviewCycles: parent.draft_review_cycles,
+    };
+    const result = apply(parentWf, { type: "all_subs_done", triggeredBy: "system" });
+    if (result) {
+      await withTransaction(db, async (trx) => {
+        await updateWorkflowState(trx, parent.id, result.newState);
+        await addTransition(trx, {
+          id: `t-${crypto.randomUUID()}`,
+          workflow_id: parent.id,
+          from_state: result.transition.from,
+          to_state: result.transition.to,
+          event_type: result.transition.event,
+          triggered_by: result.transition.triggeredBy,
+          metadata: null,
+          github_delivery_id: null,
+        });
+      });
+      log.info(`Parent ${parent.id}: ${result.transition.from} → ${result.transition.to}`, {
+        trigger: "all_subs_done",
+      });
+      await executeSideEffects(result.sideEffects, repo);
     }
+  }
+}
 
-    // Token registration (called by zapbot-publish.sh, requires webhook secret as bearer token)
-    if (req.method === "POST" && url.pathname === "/api/tokens") {
-      const auth = req.headers.get("authorization") || "";
-      if (auth !== `Bearer ${SECRET}`) {
-        return jsonError("unauthorized", "Bearer token required (use GITHUB_WEBHOOK_SECRET)", 401);
-      }
-      try {
-        const { token, issueNumber } = (await req.json()) as any;
-        if (!token || !issueNumber) {
-          return jsonError("missing_fields", "token and issueNumber required", 400);
-        }
-        tokens.set(token, { issueNumber, createdAt: Date.now() });
-        return Response.json({ ok: true, registered: true });
-      } catch {
-        return jsonError("invalid_body", "Request body must be valid JSON", 400);
-      }
+// ── Abandon children ────────────────────────────────────────────────
+
+async function abandonChildren(parentWorkflowId: string, repo: string): Promise<void> {
+  const subs = await getSubWorkflows(db, parentWorkflowId);
+  for (const sub of subs) {
+    if (TERMINAL_STATES.has(sub.state)) continue;
+
+    const subWf: Workflow = {
+      id: sub.id,
+      issueNumber: sub.issue_number,
+      state: sub.state,
+      level: "sub",
+      parentWorkflowId: sub.parent_workflow_id,
+      draftReviewCycles: sub.draft_review_cycles,
+    };
+    const result = apply(subWf, { type: "label_abandoned", triggeredBy: "system" });
+    if (result) {
+      await withTransaction(db, async (trx) => {
+        await updateWorkflowState(trx, sub.id, result.newState);
+        await addTransition(trx, {
+          id: `t-${crypto.randomUUID()}`,
+          workflow_id: sub.id,
+          from_state: result.transition.from,
+          to_state: result.transition.to,
+          event_type: "label_abandoned",
+          triggered_by: "system",
+          metadata: JSON.stringify({ reason: "parent abandoned" }),
+          github_delivery_id: null,
+        });
+      });
+      log.info(`Sub-issue ${sub.id} abandoned (parent abandoned)`, {
+        subIssue: sub.issue_number,
+      });
+      // Execute label/comment effects but skip recursive check_parent_completion
+      const safeEffects = result.sideEffects.filter((e) => e.type !== "check_parent_completion");
+      await executeSideEffects(safeEffects, repo);
     }
+  }
+}
 
-    // GitHub webhooks
-    if (req.method === "POST" && url.pathname === "/api/webhooks/github") {
-      const body = await req.text();
-      return handleGitHubWebhook(req, body);
+// ── Core webhook handler ────────────────────────────────────────────
+
+async function handleWebhook(
+  eventType: string,
+  deliveryId: string,
+  payload: any
+): Promise<{ status: number; body: string }> {
+  const repo: string = payload.repository?.full_name || "";
+
+  // Dedup by delivery ID
+  if (deliveryId && await hasDeliveryBeenProcessed(db, deliveryId)) {
+    log.debug("Duplicate delivery, skipping", { deliveryId });
+    return { status: 200, body: "duplicate" };
+  }
+
+  log.info(`Webhook: ${eventType}.${payload.action}`, {
+    deliveryId,
+    repo,
+    sender: payload.sender?.login,
+  });
+
+  // Special handling: new issue with triage label creates parent workflow
+  if (eventType === "issues" && payload.action === "opened") {
+    const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
+    if (labels.includes("triage")) {
+      const issueNumber = payload.issue.number;
+      const author = payload.sender?.login || "";
+      const intent = payload.issue?.title || "";
+      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: issueNumber,
+        repo,
+        state: "TRIAGE",
+        level: "parent",
+        parent_workflow_id: null,
+        author,
+        intent,
+      });
+
+      log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
+      await executeSideEffects([
+        { type: "spawn_agent", role: "triage", issueNumber },
+      ], repo);
+      return { status: 200, body: "parent workflow created" };
     }
+  }
 
-    // Plannotator callbacks: /api/callbacks/plannotator/:issueNumber
-    const cbMatch = url.pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/);
-    if (cbMatch) {
-      const corsHeaders = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+  // Special handling: new issue with planning label creates sub workflow
+  if (eventType === "issues" && payload.action === "opened") {
+    const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
+    if (labels.includes("planning")) {
+      const issueNumber = payload.issue.number;
+      const author = payload.sender?.login || "";
+      const intent = payload.issue?.title || "";
+      const body: string = payload.issue?.body || "";
+      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+
+      // Extract parent reference from body
+      const parentMatch = body.match(/Part of #(\d+)/i);
+      const parentWorkflowId = parentMatch ? `wf-${parentMatch[1]}` : null;
+
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: issueNumber,
+        repo,
+        state: "PLANNING",
+        level: "sub",
+        parent_workflow_id: parentWorkflowId,
+        author,
+        intent,
+      });
+
+      log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
+      return { status: 200, body: "sub workflow created" };
+    }
+  }
+
+  // Handle triage label on existing issue (creates parent workflow if none exists)
+  const mapped_pre = mapWebhookToEvent(eventType, payload);
+  if (mapped_pre && mapped_pre.event.type === "triage_label_added") {
+    const existingWf = await getWorkflowByIssue(db, mapped_pre.issueNumber, repo);
+    if (!existingWf) {
+      const author = payload.sender?.login || "";
+      const intent = payload.issue?.title || "";
+      const wfId = `wf-${repo.replace("/", "-")}-${mapped_pre.issueNumber}`;
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: mapped_pre.issueNumber,
+        repo,
+        state: "TRIAGE",
+        level: "parent",
+        parent_workflow_id: null,
+        author,
+        intent,
+      });
+      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped_pre.issueNumber });
+      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
+      return { status: 200, body: "parent workflow created" };
+    }
+    // If workflow exists, fall through to normal processing
+  }
+
+  // Map webhook to state machine event
+  const mapped = mapWebhookToEvent(eventType, payload);
+  if (!mapped) {
+    log.debug("No state machine event for this webhook", { eventType, action: payload.action });
+    return { status: 200, body: "no-op" };
+  }
+
+  const { event, issueNumber } = mapped;
+
+  // Load workflow
+  let wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+  if (!wfRow) {
+    // Backward compat: plan-approved label on an issue with no workflow
+    if (event.type === "label_added" && (event as any).label === "plan-approved") {
+      const author = payload.sender?.login || "";
+      const intent = payload.issue?.title || "";
+      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: issueNumber,
+        repo,
+        state: "REVIEW",
+        level: "sub",
+        parent_workflow_id: null,
+        author,
+        intent,
+      });
+
+      log.info(`Created ad-hoc workflow ${wfId} in REVIEW for backward compat`, { issueNumber });
+      wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    }
+  }
+
+  if (!wfRow) {
+    log.warn("No workflow found for issue", { issueNumber, event: event.type });
+    return { status: 200, body: "no workflow" };
+  }
+
+  const workflow: Workflow = {
+    id: wfRow.id,
+    issueNumber: wfRow.issue_number,
+    state: wfRow.state,
+    level: wfRow.level as "parent" | "sub",
+    parentWorkflowId: wfRow.parent_workflow_id,
+    draftReviewCycles: wfRow.draft_review_cycles,
+  };
+
+  // Apply state machine
+  const result = apply(workflow, event);
+
+  if (!result) {
+    const msg = `Cannot apply '${event.type}' — issue #${issueNumber} is in ${workflow.state} state.`;
+    log.warn(`REJECTED: ${msg}`, { issueNumber, state: workflow.state, event: event.type });
+    // Post a comment explaining the rejection
+    await executeSideEffects([
+      { type: "post_comment", issueNumber, body: `Zapbot: ${msg}` },
+    ], repo);
+    return { status: 200, body: "rejected" };
+  }
+
+  // Apply transition atomically
+  await withTransaction(db, async (trx) => {
+    const stateUpdates: { draft_review_cycles?: number } = {};
+    if (result.newState === "DRAFT_REVIEW" && workflow.state === "VERIFYING") {
+      stateUpdates.draft_review_cycles = workflow.draftReviewCycles + 1;
+    }
+    await updateWorkflowState(trx, workflow.id, result.newState, stateUpdates);
+    await addTransition(trx, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: workflow.id,
+      from_state: result.transition.from,
+      to_state: result.transition.to,
+      event_type: result.transition.event,
+      triggered_by: result.transition.triggeredBy,
+      metadata: null,
+      github_delivery_id: deliveryId || null,
+    });
+  });
+
+  log.info(`${workflow.id}: ${result.transition.from} → ${result.transition.to}`, {
+    trigger: event.type,
+    by: event.triggeredBy,
+  });
+
+  // Handle non-draft PR fallback: if implementer opened a non-draft PR,
+  // also fire pr_ready_for_review to skip DRAFT_REVIEW
+  if (event.type === "draft_pr_opened" && result.newState === "DRAFT_REVIEW") {
+    const prPayload = payload.pull_request;
+    if (prPayload && !prPayload.draft) {
+      log.info("Non-draft PR detected, auto-transitioning to VERIFYING", { issueNumber });
+      const readyEvent: WorkflowEvent = {
+        type: "pr_ready_for_review",
+        triggeredBy: event.triggeredBy,
+        prNumber: (event as any).prNumber,
       };
-      if (req.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders });
+      const updatedWf: Workflow = { ...workflow, state: "DRAFT_REVIEW" };
+      const readyResult = apply(updatedWf, readyEvent);
+      if (readyResult) {
+        await withTransaction(db, async (trx) => {
+          await updateWorkflowState(trx, workflow.id, readyResult.newState);
+          await addTransition(trx, {
+            id: `t-${crypto.randomUUID()}`,
+            workflow_id: workflow.id,
+            from_state: "DRAFT_REVIEW",
+            to_state: readyResult.newState,
+            event_type: "pr_ready_for_review",
+            triggered_by: "system",
+            metadata: JSON.stringify({ reason: "non-draft PR fallback" }),
+            github_delivery_id: null,
+          });
+        });
+        await executeSideEffects(readyResult.sideEffects, repo);
+        return { status: 200, body: `${result.transition.from} → ${readyResult.newState} (non-draft fallback)` };
       }
-      if (req.method === "POST") {
-        const issueNum = parseInt(cbMatch[1], 10);
-        const resp = await handlePlannotatorCallback(req, issueNum);
+    }
+  }
+
+  // Execute side effects
+  await executeSideEffects(result.sideEffects, repo);
+
+  return { status: 200, body: `${result.transition.from} → ${result.transition.to}` };
+}
+
+// ── AO proxy ────────────────────────────────────────────────────────
+
+async function proxyToAO(req: Request, path: string): Promise<Response> {
+  try {
+    const url = `${AO_URL}${path}`;
+    const resp = await fetch(url, {
+      method: req.method,
+      headers: req.headers,
+      body: req.method !== "GET" ? await req.text() : undefined,
+    });
+    return new Response(resp.body, { status: resp.status, headers: resp.headers });
+  } catch (err) {
+    return new Response(`AO proxy error: ${err}`, { status: 502 });
+  }
+}
+
+// ── HTTP server ─────────────────────────────────────────────────────
+
+async function main() {
+  db = await initDatabase();
+  startHeartbeatChecker(db);
+
+  log.info(`Webhook bridge starting on port ${PORT}`);
+
+  const server = Bun.serve({
+    port: PORT,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const pathname = url.pathname;
+
+      // Health check
+      if (pathname === "/healthz") {
+        return new Response("ok", { status: 200 });
+      }
+
+      // GitHub webhook
+      if (pathname === "/api/webhooks/github" && req.method === "POST") {
+        const body = await req.text();
+        const signature = req.headers.get("x-hub-signature-256");
+        const eventType = req.headers.get("x-github-event") || "";
+        const deliveryId = req.headers.get("x-github-delivery") || "";
+
+        if (!(await verifySignature(body, signature))) {
+          return new Response("invalid signature", { status: 401 });
+        }
+
+        let payload: any;
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          return new Response("invalid JSON", { status: 400 });
+        }
+        const result = await handleWebhook(eventType, deliveryId, payload);
+        return new Response(result.body, { status: result.status });
+      }
+
+      // Workflow state API
+      if (pathname.match(/^\/api\/workflows\/(\d+)$/) && req.method === "GET") {
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        const issueNumber = parseInt(pathname.split("/").pop()!, 10);
+        const repo = url.searchParams.get("repo") || "";
+        const wf = await getWorkflowByIssue(db, issueNumber, repo);
+        if (!wf) return new Response("not found", { status: 404 });
+
+        const subs = wf.level === "parent" ? await getSubWorkflows(db, wf.id) : [];
+        const agents = await getAgentSessions(db, wf.id);
+
+        return Response.json({ workflow: wf, subWorkflows: subs, agents });
+      }
+
+      // Workflow history API
+      if (pathname.match(/^\/api\/workflows\/(\d+)\/history$/) && req.method === "GET") {
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        const issueNumber = parseInt(pathname.split("/")[3], 10);
+        const repo = url.searchParams.get("repo") || "";
+        const wf = await getWorkflowByIssue(db, issueNumber, repo);
+        if (!wf) return new Response("not found", { status: 404 });
+
+        const history = await getTransitionHistory(db, wf.id);
+        return Response.json({ history });
+      }
+
+      // Agent heartbeat
+      if (pathname.match(/^\/api\/agents\/[\w-]+\/heartbeat$/) && req.method === "POST") {
+        const agentId = pathname.split("/")[3];
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        const session = await getAgentSession(db, agentId);
+        if (!session) return new Response("not found", { status: 404 });
+        await updateAgentHeartbeat(db, agentId);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Agent complete
+      if (pathname.match(/^\/api\/agents\/[\w-]+\/complete$/) && req.method === "POST") {
+        const agentId = pathname.split("/")[3];
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        const session = await getAgentSession(db, agentId);
+        if (!session) return new Response("not found", { status: 404 });
+
+        const body = await req.json().catch(() => ({}));
+        await updateAgentStatus(db, agentId, body.status || "completed", body.prNumber);
+        log.info(`Agent ${agentId} completed`, { agentId, status: body.status });
+        return new Response("ok", { status: 200 });
+      }
+
+      // Plannotator callback
+      if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "POST") {
+        // CORS headers for browser-based plannotator callbacks
+        const corsHeaders = {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        };
+        if (req.method === "OPTIONS") {
+          return new Response(null, { status: 204, headers: corsHeaders });
+        }
+
+        const issueNumber = parseInt(pathname.split("/").pop()!, 10);
+        const body = await req.json().catch(() => ({}));
+        const repo = body.repo || "";
+
+        log.info(`Plannotator callback for #${issueNumber}`, { issueNumber });
+
+        // Handle plan_published event from zapbot-publish.sh
+        if (body.event === "plan_published") {
+          const wf = await getWorkflowByIssue(db, issueNumber, repo);
+          if (wf && wf.state === "PLANNING") {
+            const mapped: WorkflowEvent = { type: "plan_published", triggeredBy: body.author || "author" };
+            const workflow: Workflow = {
+              id: wf.id,
+              issueNumber: wf.issue_number,
+              state: wf.state,
+              level: wf.level as "parent" | "sub",
+              parentWorkflowId: wf.parent_workflow_id,
+              draftReviewCycles: wf.draft_review_cycles,
+            };
+            const result = apply(workflow, mapped);
+            if (result) {
+              await withTransaction(db, async (trx) => {
+                await updateWorkflowState(trx, wf.id, result.newState);
+                await addTransition(trx, {
+                  id: `t-${crypto.randomUUID()}`,
+                  workflow_id: wf.id,
+                  from_state: result.transition.from,
+                  to_state: result.transition.to,
+                  event_type: "plan_published",
+                  triggered_by: body.author || "author",
+                  metadata: null,
+                  github_delivery_id: null,
+                });
+              });
+              await executeSideEffects(result.sideEffects, repo);
+              log.info(`Plan published: ${wf.id} PLANNING → REVIEW`, { issueNumber });
+            }
+          }
+          const resp = new Response("ok", { status: 200 });
+          for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+          return resp;
+        }
+
+        // Check if this has "revise" annotations
+        const hasRevisions = body.annotations?.some((a: any) => a.type === "revise");
+        if (hasRevisions) {
+          const wf = await getWorkflowByIssue(db, issueNumber, repo);
+          if (wf && wf.state === "REVIEW") {
+            const mapped: WorkflowEvent = { type: "annotation_feedback", triggeredBy: body.reviewer || "reviewer" };
+            const workflow: Workflow = {
+              id: wf.id,
+              issueNumber: wf.issue_number,
+              state: wf.state,
+              level: wf.level as "parent" | "sub",
+              parentWorkflowId: wf.parent_workflow_id,
+              draftReviewCycles: wf.draft_review_cycles,
+            };
+            const result = apply(workflow, mapped);
+            if (result) {
+              await withTransaction(db, async (trx) => {
+                await updateWorkflowState(trx, wf.id, result.newState);
+                await addTransition(trx, {
+                  id: `t-${crypto.randomUUID()}`,
+                  workflow_id: wf.id,
+                  from_state: result.transition.from,
+                  to_state: result.transition.to,
+                  event_type: "annotation_feedback",
+                  triggered_by: body.reviewer || "reviewer",
+                  metadata: JSON.stringify(body.annotations),
+                  github_delivery_id: null,
+                });
+              });
+              await executeSideEffects(result.sideEffects, repo);
+            }
+          }
+        }
+
+        const resp = new Response("ok", { status: 200 });
         for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
         return resp;
       }
-    }
 
-    // Proxy everything else to AO
-    return proxyToAO(req);
-  },
+      // Token management (passthrough to AO)
+      if (pathname === "/api/tokens" && req.method === "POST") {
+        return proxyToAO(req, pathname);
+      }
+
+      return new Response("not found", { status: 404 });
+    },
+  });
+
+  log.info(`Webhook bridge listening on http://localhost:${PORT}`);
+
+  // Graceful shutdown
+  process.on("SIGINT", async () => {
+    log.info("Shutting down...");
+    stopHeartbeatChecker();
+    server.stop();
+    await db.destroy();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", async () => {
+    log.info("Shutting down...");
+    stopHeartbeatChecker();
+    server.stop();
+    await db.destroy();
+    process.exit(0);
+  });
+}
+
+main().catch((err) => {
+  log.error(`Fatal: ${err}`);
+  process.exit(1);
 });
-
-console.log(`[bridge] Zapbot webhook bridge listening on port ${BRIDGE_PORT}`);
-console.log(`[bridge] Proxying to AO on port ${AO_PORT}`);
-console.log(`[bridge] Trigger label: ${APPROVE_LABEL}`);

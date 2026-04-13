@@ -1,17 +1,18 @@
-port: 3001
+port: 3000
 
 defaults:
   runtime: tmux
   agent: claude-code
   workspace: worktree
   notifiers: [desktop]
+  maxAgentsPerRepo: 5
 
 projects:
-  project:
+  {{REPO_NAME}}:
     repo: {{REPO}}
-    path: {{PATH}}
+    path: {{REPO_PATH}}
     defaultBranch: main
-    sessionPrefix: {{PREFIX}}
+    sessionPrefix: zap
     agentRulesFile: .agent-rules.md
 
     scm:

@@ -1,153 +1,117 @@
 #!/usr/bin/env bash
-# zapbot-team-init — onboard a repo for zapbot workflow
-#
-# Usage: zapbot-team-init [--repo owner/name]
-#
-# Run from the root of any project repo. Creates:
-# - .agent-rules.md (agent implementation instructions)
-# - agent-orchestrator.yaml (AO config with correct repo/path)
-# - CLAUDE.md additions (skill routing rules)
-# - GitHub labels (zapbot-plan, plan-approved)
-
 set -euo pipefail
 
-ZAPBOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-REPO_OVERRIDE=""
+# zapbot-team-init — Configure a GitHub repo for the zapbot workflow.
+# Creates required labels, initializes SQLite database, and generates
+# agent-orchestrator config from templates.
 
-show_help() {
-  cat <<HELP
-Usage: zapbot-team-init [--repo owner/name]
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+GITHUB_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+ZAPBOT_REPO="${1:-}"
 
-  Onboard a repository for the zapbot plan-to-code workflow.
-  Run from the root of your project repo.
+if [ -z "$ZAPBOT_REPO" ]; then
+  echo "Usage: zapbot-team-init <owner/repo>"
+  echo "  Example: zapbot-team-init chughtapan/my-project"
+  exit 1
+fi
 
-Creates:
-  .agent-rules.md         Agent implementation instructions
-  agent-orchestrator.yaml AO config (templated for this repo)
-  GitHub labels           zapbot-plan, plan-approved
+if [ -z "$GITHUB_USER" ]; then
+  echo "ERROR: Not authenticated with GitHub. Run: gh auth login"
+  exit 1
+fi
 
-Updates:
-  CLAUDE.md               Adds zapbot skill routing (if not already present)
+echo "=== Zapbot Team Init ==="
+echo "Repo: $ZAPBOT_REPO"
+echo ""
 
-Options:
-  --repo owner/name   Override auto-detected GitHub repo
-  --help              Show this help
-HELP
-  exit 0
-}
+# ── 1. Create GitHub labels ─────────────────────────────────────────
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --help) show_help ;;
-    --repo) shift; REPO_OVERRIDE="${1:-}" ;;
-  esac
-  shift
+echo "--- Creating labels ---"
+LABELS=(
+  "triage:D93F0B:Parent issue in triage"
+  "triaged:FBCA04:Triage complete, sub-issues in progress"
+  "planning:BFD4F2:Plan in progress"
+  "review:0E8A16:Plan under review"
+  "plan-approved:1D76DB:Plan approved for implementation"
+  "implementing:5319E7:Agent implementing code"
+  "draft-review:C2E0C6:Draft PR under human review"
+  "verifying:006B75:QE agent verifying"
+  "abandoned:E4E669:Workflow abandoned"
+  "zapbot-plan:0E8A16:Plan published via zapbot"
+)
+
+for entry in "${LABELS[@]}"; do
+  IFS=: read -r name color desc <<< "$entry"
+  gh label create "$name" \
+    --repo "$ZAPBOT_REPO" \
+    --color "$color" \
+    --description "$desc" \
+    --force 2>/dev/null || true
+  echo "  Label: $name"
 done
 
-# Detect repo
-if [ -n "$REPO_OVERRIDE" ]; then
-  REPO="$REPO_OVERRIDE"
-else
-  REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-  if [ -z "$REPO" ]; then
-    echo "ERROR: Could not detect repo. Use --repo owner/name or run from a GitHub-connected repo."
-    exit 1
-  fi
-fi
+# ── 2. Initialize SQLite database ───────────────────────────────────
 
-REPO_NAME=$(echo "$REPO" | cut -d/ -f2)
-echo "=== Zapbot Team Init ==="
-echo "Repo: $REPO"
-echo "Path: $REPO_ROOT"
 echo ""
+echo "--- Initializing database ---"
+ZAPBOT_DIR="$HOME/.zapbot"
+mkdir -p "$ZAPBOT_DIR/logs"
 
-# --- .agent-rules.md ---
-if [ -f "$REPO_ROOT/.agent-rules.md" ]; then
-  echo ".agent-rules.md: already exists (skipping)"
+if [ -f "$ZAPBOT_DIR/state.db" ]; then
+  echo "  Database already exists at $ZAPBOT_DIR/state.db"
 else
-  cp "$ZAPBOT_DIR/templates/agent-rules.md.tmpl" "$REPO_ROOT/.agent-rules.md"
-  echo ".agent-rules.md: created"
+  echo "  Database will be created on first bridge start at $ZAPBOT_DIR/state.db"
 fi
 
-# --- agent-orchestrator.yaml ---
-if [ -f "$REPO_ROOT/agent-orchestrator.yaml" ]; then
-  echo "agent-orchestrator.yaml: already exists (skipping)"
-else
+# ── 3. Generate agent-orchestrator.yaml from template ────────────────
+
+echo ""
+echo "--- Generating agent-orchestrator.yaml ---"
+TEMPLATE="$REPO_DIR/templates/agent-orchestrator.yaml.tmpl"
+if [ -f "$TEMPLATE" ]; then
+  REPO_PATH=$(pwd)
+  REPO_NAME=$(basename "$ZAPBOT_REPO")
   sed \
-    -e "s|{{REPO}}|${REPO}|g" \
-    -e "s|{{PATH}}|${REPO_ROOT}|g" \
-    -e "s|{{PREFIX}}|$(echo "$REPO_NAME" | cut -c1-3)|g" \
-    "$ZAPBOT_DIR/templates/agent-orchestrator.yaml.tmpl" > "$REPO_ROOT/agent-orchestrator.yaml"
-  echo "agent-orchestrator.yaml: created (repo: $REPO, path: $REPO_ROOT)"
-fi
-
-# --- CLAUDE.md routing ---
-if [ -f "$REPO_ROOT/CLAUDE.md" ]; then
-  if grep -q "zapbot-publish" "$REPO_ROOT/CLAUDE.md" 2>/dev/null; then
-    echo "CLAUDE.md: zapbot routing already present (skipping)"
-  else
-    cat >> "$REPO_ROOT/CLAUDE.md" << 'ROUTING'
-
-## Zapbot
-
-Plan-to-code workflow. When the user asks to publish, share, or sync a plan, invoke zapbot-publish.
-
-Key routing rules:
-- "publish plan", "share plan", "sync plan" → invoke zapbot-publish
-ROUTING
-    echo "CLAUDE.md: added zapbot routing rules"
-  fi
+    -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
+    -e "s|{{REPO_PATH}}|$REPO_PATH|g" \
+    -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
+    "$TEMPLATE" > "$REPO_DIR/agent-orchestrator.yaml"
+  echo "  Generated agent-orchestrator.yaml"
 else
-  cat > "$REPO_ROOT/CLAUDE.md" << 'CLAUDE'
-# Project
-
-## Zapbot
-
-Plan-to-code workflow. When the user asks to publish, share, or sync a plan, invoke zapbot-publish.
-
-Key routing rules:
-- "publish plan", "share plan", "sync plan" → invoke zapbot-publish
-CLAUDE
-  echo "CLAUDE.md: created with zapbot routing"
+  echo "  Template not found at $TEMPLATE, skipping"
 fi
 
-# --- GitHub labels ---
+# ── 4. Generate agent rules from template ────────────────────────────
+
 echo ""
-echo "Creating GitHub labels..."
-gh label create "zapbot-plan" --repo "$REPO" --color "0E8A16" --description "Plan published via zapbot" --force 2>/dev/null || true
-gh label create "plan-approved" --repo "$REPO" --color "1D76DB" --description "Plan approved for agent implementation" --force 2>/dev/null || true
-gh label create "in-progress" --repo "$REPO" --color "FBCA04" --description "Agent is working on this plan" --force 2>/dev/null || true
-gh label create "agent-failed" --repo "$REPO" --color "D93F0B" --description "Agent errored out" --force 2>/dev/null || true
-echo "Labels ready"
-
-# --- .env ---
-if [ ! -f "$REPO_ROOT/.env" ]; then
-  WEBHOOK_SECRET=$(openssl rand -hex 32)
-  cat > "$REPO_ROOT/.env" << ENV_EOF
-GITHUB_WEBHOOK_SECRET=${WEBHOOK_SECRET}
-ZAPBOT_REPO=${REPO}
-ENV_EOF
-  chmod 600 "$REPO_ROOT/.env"
-  echo ".env: created with random webhook secret (mode 600)"
+echo "--- Generating .agent-rules.md ---"
+RULES_TEMPLATE="$REPO_DIR/templates/agent-rules.md.tmpl"
+if [ -f "$RULES_TEMPLATE" ]; then
+  cp "$RULES_TEMPLATE" "$REPO_DIR/.agent-rules.md"
+  echo "  Generated .agent-rules.md"
 else
-  echo ".env: already exists (keeping existing secrets)"
+  echo "  Template not found at $RULES_TEMPLATE, skipping"
 fi
 
-# --- .gitignore ---
-if [ -f "$REPO_ROOT/.gitignore" ]; then
-  grep -q "^\.env$" "$REPO_ROOT/.gitignore" 2>/dev/null || echo ".env" >> "$REPO_ROOT/.gitignore"
-  grep -q "^agent-orchestrator.yaml$" "$REPO_ROOT/.gitignore" 2>/dev/null || echo "agent-orchestrator.yaml" >> "$REPO_ROOT/.gitignore"
-else
-  printf ".env\nagent-orchestrator.yaml\n" > "$REPO_ROOT/.gitignore"
-fi
+# ── 5. Configure webhook ────────────────────────────────────────────
+
+echo ""
+echo "--- Webhook setup ---"
+echo "  To set up the webhook, run ./start.sh which handles ngrok + webhook automatically."
+echo "  Or manually create a webhook at:"
+echo "    https://github.com/$ZAPBOT_REPO/settings/hooks/new"
+echo "  Payload URL: <your-ngrok-url>/api/webhooks/github"
+echo "  Content type: application/json"
+echo "  Events: Issues, Pull requests, Pull request reviews"
+
+# ── Done ─────────────────────────────────────────────────────────────
 
 echo ""
 echo "================================================"
-echo "  Repo onboarded for zapbot!"
+echo "  Team init complete for $ZAPBOT_REPO!"
 echo "================================================"
 echo ""
 echo "Next steps:"
-echo "  1. Start zapbot: ~/.claude/skills/zapbot/start.sh"
-echo "  2. In Claude Code: /plan → create plan → /zapbot-publish"
+echo "  1. Run ./start.sh to start the bridge"
+echo "  2. Create an issue with the 'triage' label to kick off a workflow"
 echo ""
