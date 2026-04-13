@@ -266,9 +266,21 @@ Bun.serve({
 
     // Plannotator callbacks: /api/callbacks/plannotator/:issueNumber
     const cbMatch = url.pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/);
-    if (req.method === "POST" && cbMatch) {
-      const issueNum = parseInt(cbMatch[1], 10);
-      return handlePlannotatorCallback(req, issueNum);
+    if (cbMatch) {
+      const corsHeaders = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      };
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+      if (req.method === "POST") {
+        const issueNum = parseInt(cbMatch[1], 10);
+        const resp = await handlePlannotatorCallback(req, issueNum);
+        for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+        return resp;
+      }
     }
 
     // Proxy everything else to AO
