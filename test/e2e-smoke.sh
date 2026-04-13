@@ -123,12 +123,19 @@ if curl -s "http://localhost:${BRIDGE_PORT}/healthz" >/dev/null 2>&1; then
     -d '{"action":"labeled","label":{"name":"test"},"issue":{"number":999}}' 2>/dev/null)
   assert_cmd "Invalid HMAC returns 401" "test '$REJECT_STATUS' = '401'"
 
-  # Test token registration
-  TOKEN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  # Test token registration (requires bearer auth)
+  UNAUTH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     "http://localhost:${BRIDGE_PORT}/api/tokens" \
     -H "Content-Type: application/json" \
     -d '{"token":"test-tok-123","issueNumber":999}' 2>/dev/null)
-  assert_cmd "Token registration returns 200" "test '$TOKEN_STATUS' = '200'"
+  assert_cmd "Token registration without auth returns 401" "test '$UNAUTH_STATUS' = '401'"
+
+  TOKEN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "http://localhost:${BRIDGE_PORT}/api/tokens" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${GITHUB_WEBHOOK_SECRET:-}" \
+    -d '{"token":"test-tok-123","issueNumber":999}' 2>/dev/null)
+  assert_cmd "Token registration with auth returns 200" "test '$TOKEN_STATUS' = '200'"
 
   # Test callback with invalid token
   CB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \

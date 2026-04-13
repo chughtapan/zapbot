@@ -113,7 +113,8 @@ ZAPBOT_AO_PORT=3001
 ZAPBOT_APPROVE_LABEL=plan-approved
 ENV_EOF
   echo ".env" >> "$REPO_DIR/.gitignore" 2>/dev/null || true
-  echo "Created .env with random webhook secret"
+  chmod 600 "$REPO_DIR/.env"
+  echo "Created .env with random webhook secret (mode 600)"
 else
   echo ".env: already exists (keeping existing secrets)"
 fi

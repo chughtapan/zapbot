@@ -222,8 +222,12 @@ Bun.serve({
       return Response.json({ ok: true, bridge: true, ao_port: AO_PORT });
     }
 
-    // Token registration (called by zapbot-publish.sh)
+    // Token registration (called by zapbot-publish.sh, requires webhook secret as bearer token)
     if (req.method === "POST" && url.pathname === "/api/tokens") {
+      const auth = req.headers.get("authorization") || "";
+      if (auth !== `Bearer ${SECRET}`) {
+        return jsonError("unauthorized", "Bearer token required (use GITHUB_WEBHOOK_SECRET)", 401);
+      }
       try {
         const { token, issueNumber } = (await req.json()) as any;
         if (!token || !issueNumber) {

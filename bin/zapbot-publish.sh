@@ -149,6 +149,7 @@ if [ -n "$CB_TOKEN" ] && [ -n "$BRIDGE_URL" ]; then
 
   curl -s -X POST "${BRIDGE_URL}/api/tokens" \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${GITHUB_WEBHOOK_SECRET:-}" \
     -d "{\"token\":\"${CB_TOKEN}\",\"issueNumber\":${ISSUE_NUM}}" >/dev/null 2>&1 || \
     echo "WARNING: Could not register callback token with bridge at ${BRIDGE_URL}"
 fi
