@@ -20,8 +20,9 @@ import { LABEL_TO_STATE, TERMINAL_STATES, STATE_TO_LABEL } from "../src/state-ma
 import type { WorkflowEvent } from "../src/state-machine/events.js";
 import type { SideEffect } from "../src/state-machine/effects.js";
 import type { Workflow } from "../src/state-machine/transitions.js";
-import { spawnAgent, setOnAgentFailed, type AgentRole } from "../src/agents/spawner.js";
-import { startHeartbeatChecker, setHeartbeatFailureHandler, stopHeartbeatChecker } from "../src/agents/heartbeat.js";
+import { spawnAgent, cancelPendingRetries, type AgentRole, type AgentFailureHandler } from "../src/agents/spawner.js";
+import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heartbeat.js";
+import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 
 // Prevent crashes from unhandled async errors
@@ -30,6 +31,23 @@ process.on("unhandledRejection", (err) => {
 });
 
 const log = createLogger("bridge");
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+function toWorkflow(row: WorkflowTable): Workflow {
+  return {
+    id: row.id,
+    issueNumber: row.issue_number,
+    state: row.state,
+    level: row.level as "parent" | "sub",
+    parentWorkflowId: row.parent_workflow_id,
+    draftReviewCycles: row.draft_review_cycles,
+  };
+}
+
+function allAgentsDead(agents: { status: string }[]): boolean {
+  return agents.length > 0 && agents.every((a) => a.status === "failed" || a.status === "timeout");
+}
 
 // ── Agent failure recovery ─────────────────────────────────────────
 
@@ -40,9 +58,8 @@ async function onAgentFailed(database: Kysely<Database>, agentId: string): Promi
   const wf = await getWorkflow(database, agent.workflow_id);
   if (!wf || TERMINAL_STATES.has(wf.state)) return;
 
-  const allAgents = await getAgentSessions(database, wf.id);
-  const allDead = allAgents.every((a) => a.status === "failed" || a.status === "timeout");
-  if (!allDead) return;
+  const agents = await getAgentSessions(database, wf.id);
+  if (!allAgentsDead(agents)) return;
 
   log.warn(`All agents failed for ${wf.id} in state ${wf.state}`, { workflow: wf.id, state: wf.state });
 
@@ -219,7 +236,7 @@ async function executeSideEffects(
               repo,
               role: effect.role as AgentRole,
               workflowId: wf.id,
-            });
+            }, { onFailed: onAgentFailed });
           }
           break;
         }
@@ -478,17 +495,19 @@ async function handleWebhook(
       await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
       return { status: 200, body: "parent workflow created" };
     }
-    // If workflow exists in TRIAGE with all agents failed, re-spawn
     if (existingWf && existingWf.state === "TRIAGE") {
       const agents = await getAgentSessions(db, existingWf.id);
-      const allDead = agents.length > 0 && agents.every((a) => a.status === "failed" || a.status === "timeout");
-      if (allDead) {
+      if (allAgentsDead(agents)) {
+        // All agents failed, re-spawn
         log.info(`Re-spawning triage agent for stuck workflow ${existingWf.id}`, { issueNumber: mapped_pre.issueNumber });
         await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
         return { status: 200, body: "triage agent re-spawned" };
       }
+      // Active agent exists, suppress the duplicate label event silently
+      log.debug("Triage workflow already active, ignoring duplicate label event", { issueNumber: mapped_pre.issueNumber });
+      return { status: 200, body: "triage already active" };
     }
-    // Otherwise fall through to normal processing
+    // Workflow exists but not in TRIAGE, fall through to normal processing
   }
 
   // Map webhook to state machine event
@@ -636,11 +655,7 @@ async function proxyToAO(req: Request, path: string): Promise<Response> {
 async function main() {
   db = await initDatabase();
 
-  // Wire up failure recovery callbacks
-  setOnAgentFailed(onAgentFailed);
-  setHeartbeatFailureHandler(onAgentFailed);
-
-  startHeartbeatChecker(db);
+  startHeartbeatChecker(db, onAgentFailed);
 
   log.info(`Webhook bridge starting on port ${PORT}`);
 
@@ -846,6 +861,7 @@ async function main() {
   process.on("SIGINT", async () => {
     log.info("Shutting down...");
     stopHeartbeatChecker();
+    cancelPendingRetries();
     server.stop();
     await db.destroy();
     process.exit(0);
@@ -854,6 +870,7 @@ async function main() {
   process.on("SIGTERM", async () => {
     log.info("Shutting down...");
     stopHeartbeatChecker();
+    cancelPendingRetries();
     server.stop();
     await db.destroy();
     process.exit(0);

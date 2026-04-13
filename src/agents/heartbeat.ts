@@ -1,6 +1,7 @@
 import { Kysely } from "kysely";
 import type { Database } from "../store/database.js";
 import { getStaleAgents, updateAgentStatus } from "../store/queries.js";
+import type { AgentFailureHandler } from "./spawner.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("heartbeat");
@@ -10,19 +11,15 @@ const TIMEOUT_SECONDS = 15 * 60; // 15 minutes
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
-// Callback for agent failure recovery, set by bridge at startup
-let _onAgentFailed: ((db: Kysely<Database>, agentId: string) => Promise<void>) | null = null;
-
-export function setHeartbeatFailureHandler(fn: (db: Kysely<Database>, agentId: string) => Promise<void>): void {
-  _onAgentFailed = fn;
-}
-
 /**
  * Start periodic checks for stale agents.
  * Agents with no heartbeat in 15 minutes are marked as timed out
- * and their workflows are notified via the failure handler.
+ * and the failure handler is called.
  */
-export function startHeartbeatChecker(db: Kysely<Database>): void {
+export function startHeartbeatChecker(
+  db: Kysely<Database>,
+  onAgentFailed?: AgentFailureHandler
+): void {
   if (intervalHandle) return;
 
   log.info("Starting heartbeat checker", { intervalMs: CHECK_INTERVAL_MS, timeoutSec: TIMEOUT_SECONDS });
@@ -38,9 +35,8 @@ export function startHeartbeatChecker(db: Kysely<Database>): void {
         });
         await updateAgentStatus(db, agent.id, "timeout");
 
-        // Notify workflow about the failure
-        if (_onAgentFailed) {
-          await _onAgentFailed(db, agent.id);
+        if (onAgentFailed) {
+          await onAgentFailed(db, agent.id);
         }
       }
       if (stale.length > 0) {
