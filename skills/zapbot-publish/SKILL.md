@@ -14,8 +14,13 @@ _UPD=$(~/.claude/skills/zapbot/bin/zapbot-update-check 2>/dev/null || true)
 [ -n "$_UPD" ] && echo "$_UPD" || true
 ```
 
-If output shows `UPGRADE_AVAILABLE <old> <new>`: tell the user
-"Zapbot v{new} is available (you're on v{old}). Upgrade: `cd ~/.claude/skills/zapbot && git pull && ./setup`"
+If output shows `UPGRADE_AVAILABLE <old> <new>`:
+  1. Run: `cd ~/.claude/skills/zapbot && git pull origin main && ./setup`
+  2. Tell user: "Zapbot upgraded v{old} → v{new}."
+  3. Continue with the skill.
+
+If output shows `JUST_UPGRADED <old> <new>`:
+  Tell user: "Running zapbot v{new} (just updated!)" and continue.
 
 # /zapbot-publish
 
