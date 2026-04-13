@@ -3,3 +3,6 @@ dist/
 *.db
 *.db-journal
 ~/.zapbot/
+.env
+agent-orchestrator.yaml
+.agent-rules.md

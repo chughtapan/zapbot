@@ -51,7 +51,9 @@ async function verifySignature(
   );
   const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
   const expected = `sha256=${Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-  return signature === expected;
+  // Constant-time comparison to prevent timing attacks
+  if (expected.length !== signature.length) return false;
+  return Buffer.from(expected).equals(Buffer.from(signature));
 }
 
 // ── Database ────────────────────────────────────────────────────────
