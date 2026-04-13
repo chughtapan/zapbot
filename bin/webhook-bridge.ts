@@ -144,6 +144,11 @@ async function handleGitHubWebhook(req: Request, body: string): Promise<Response
       }
 
       proc.exited.then(async (code) => {
+        let stdoutText = "";
+        try {
+          stdoutText = await new Response(proc.stdout).text();
+        } catch {}
+
         if (code !== 0) {
           console.error(`[bridge] ao spawn ${issueNum} failed with code ${code}`);
           spawnedIssues.delete(issueNum);
@@ -164,6 +169,52 @@ async function handleGitHubWebhook(req: Request, body: string): Promise<Response
           }
         } else {
           console.log(`[bridge] ao spawn ${issueNum} succeeded`);
+
+          // Check if prompt delivery failed despite successful spawn
+          const promptFailed = /Prompt delivery failed/i.test(stdoutText)
+            || /promptDelivered.*false/i.test(stdoutText);
+
+          if (promptFailed && repo) {
+            const sessionMatch = stdoutText.match(/SESSION=([\w-]+)/);
+            if (sessionMatch) {
+              const sessionId = sessionMatch[1];
+              console.log(`[bridge] Prompt delivery failed for issue #${issueNum}, retrying via ao send (session: ${sessionId})...`);
+
+              // Wait for Claude Code to finish loading before sending
+              await Bun.sleep(15_000);
+
+              try {
+                const ghProc = Bun.spawn(
+                  ["gh", "issue", "view", String(issueNum), "--repo", repo, "--json", "body", "-q", ".body"],
+                  { stdout: "pipe", stderr: "pipe" },
+                );
+                const ghCode = await ghProc.exited;
+                const issueBody = await new Response(ghProc.stdout).text();
+
+                if (ghCode === 0 && issueBody.trim()) {
+                  const prompt = `Read this plan and implement it:\n\n${issueBody.trim()}`;
+                  const sendProc = Bun.spawn(["ao", "send", sessionId, prompt], {
+                    stdout: "pipe",
+                    stderr: "pipe",
+                  });
+                  const sendCode = await sendProc.exited;
+                  if (sendCode === 0) {
+                    console.log(`[bridge] Prompt delivery retry for issue #${issueNum} via ao send succeeded`);
+                  } else {
+                    const sendErr = await new Response(sendProc.stderr).text();
+                    console.error(`[bridge] Prompt delivery retry for issue #${issueNum} failed: ${sendErr}`);
+                  }
+                } else {
+                  console.error(`[bridge] Could not fetch issue body for #${issueNum}, skipping prompt retry`);
+                }
+              } catch (err) {
+                console.error(`[bridge] Prompt delivery retry error for issue #${issueNum}:`, err);
+              }
+            } else {
+              console.warn(`[bridge] Prompt delivery failed for issue #${issueNum} but could not extract session ID from spawn output`);
+            }
+          }
+
           if (repo) {
             Bun.spawn(["gh", "issue", "comment", String(issueNum), "--repo", repo, "--body",
               "✅ **Agent completed** — check for a new PR on this repo."], {
