@@ -160,6 +160,17 @@ export async function updateAgentStatus(
     .execute();
 }
 
+export async function incrementRetryCount(
+  db: Kysely<Database>,
+  agentId: string
+): Promise<void> {
+  await db
+    .updateTable("agent_sessions")
+    .set((eb) => ({ retry_count: eb("retry_count", "+", 1) }))
+    .where("id", "=", agentId)
+    .execute();
+}
+
 export async function getStaleAgents(
   db: Kysely<Database>,
   timeoutSeconds: number = 900 // 15 minutes
