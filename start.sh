@@ -1,125 +1,142 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-click zapbot startup: webhook-bridge + AO + ngrok
-# Prerequisites: ./install.sh has been run once
+# Start zapbot: webhook-bridge + agent-orchestrator + optional ngrok
+# Usage: start.sh [project-dir] [--no-ngrok]
+#
+# Run from a project directory that has agent-orchestrator.yaml (created by zapbot-team-init).
+# Or pass the project path as the first argument.
 
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Parse args
+PROJECT_DIR=""
+USE_NGROK=true
+for arg in "$@"; do
+  case "$arg" in
+    --no-ngrok) USE_NGROK=false ;;
+    --help) echo "Usage: start.sh [project-dir] [--no-ngrok]"; exit 0 ;;
+    *) [ -z "$PROJECT_DIR" ] && PROJECT_DIR="$arg" ;;
+  esac
+done
+PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
+
+# Validate project dir
+if [ ! -f "$PROJECT_DIR/agent-orchestrator.yaml" ]; then
+  echo "ERROR: No agent-orchestrator.yaml in $PROJECT_DIR"
+  echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' in your project first."
+  exit 1
+fi
+
+# Load .env FIRST (from project dir)
+[ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
+
+# THEN set defaults (env vars from .env take precedence)
 BRIDGE_PORT="${ZAPBOT_BRIDGE_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
 APPROVE_LABEL="${ZAPBOT_APPROVE_LABEL:-plan-approved}"
 
-# Load .env if exists
-[ -f "$REPO_DIR/.env" ] && set -a && source "$REPO_DIR/.env" && set +a
-
 if [ -z "${GITHUB_WEBHOOK_SECRET:-}" ]; then
   echo "ERROR: GITHUB_WEBHOOK_SECRET is not set."
-  echo "FIX: Run ./install.sh to generate one, or set it in .env"
+  echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env, or set it manually."
   exit 1
 fi
 
-GITHUB_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
-ZAPBOT_REPO="${ZAPBOT_REPO:-${GITHUB_USER}/zapbot-test}"
+# Auto-detect repo from config
+ZAPBOT_REPO="${ZAPBOT_REPO:-$(grep 'repo:' "$PROJECT_DIR/agent-orchestrator.yaml" | head -1 | awk '{print $2}')}"
+if [ -z "$ZAPBOT_REPO" ]; then
+  echo "ERROR: Could not detect repo from agent-orchestrator.yaml"
+  exit 1
+fi
 
 echo "=== Starting Zapbot ==="
+echo "Project: $PROJECT_DIR"
+echo "Repo:    $ZAPBOT_REPO"
 echo ""
 
-# Kill any existing processes
+# Kill any existing zapbot processes
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 pkill -f "ngrok http" 2>/dev/null || true
 
-# Start AO on port $AO_PORT (background)
+# Start AO from the project directory
 echo "Starting agent-orchestrator on port ${AO_PORT}..."
-(cd "$REPO_DIR" && ao start > /tmp/zapbot-ao.log 2>&1) &
+(cd "$PROJECT_DIR" && ao start > /tmp/zapbot-ao.log 2>&1) &
 AO_PID=$!
 
-# Wait for AO to be ready
 for i in $(seq 1 20); do
-  if curl -s "http://localhost:${AO_PORT}" >/dev/null 2>&1; then
-    echo "AO ready on port ${AO_PORT}"
-    break
-  fi
-  if [ "$i" -eq 20 ]; then
-    echo "ERROR: AO failed to start on port ${AO_PORT}"
-    echo "FIX: Check /tmp/zapbot-ao.log and verify nothing is using port ${AO_PORT} (lsof -i :${AO_PORT})"
-    kill $AO_PID 2>/dev/null || true
-    exit 1
-  fi
+  curl -s "http://localhost:${AO_PORT}" >/dev/null 2>&1 && break
+  [ "$i" -eq 20 ] && { echo "ERROR: AO failed to start. Check /tmp/zapbot-ao.log"; kill $AO_PID 2>/dev/null; exit 1; }
   sleep 1
 done
+echo "AO ready on port ${AO_PORT}"
 
-# Start webhook bridge on port $BRIDGE_PORT (background)
+# Start webhook bridge
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
 export GITHUB_WEBHOOK_SECRET ZAPBOT_REPO ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
-bun "$REPO_DIR/bin/webhook-bridge.ts" > /tmp/zapbot-bridge.log 2>&1 &
+bun "$ZAPBOT_DIR/bin/webhook-bridge.ts" > /tmp/zapbot-bridge.log 2>&1 &
 BRIDGE_PID=$!
 
-# Wait for bridge health
 for i in $(seq 1 10); do
-  if curl -s "http://localhost:${BRIDGE_PORT}/healthz" >/dev/null 2>&1; then
-    echo "Bridge ready on port ${BRIDGE_PORT}"
-    break
-  fi
-  if [ "$i" -eq 10 ]; then
-    echo "ERROR: Webhook bridge failed to start on port ${BRIDGE_PORT}"
-    echo "FIX: Check /tmp/zapbot-bridge.log"
+  curl -s "http://localhost:${BRIDGE_PORT}/healthz" >/dev/null 2>&1 && break
+  [ "$i" -eq 10 ] && { echo "ERROR: Bridge failed to start. Check /tmp/zapbot-bridge.log"; kill $BRIDGE_PID $AO_PID 2>/dev/null; exit 1; }
+  sleep 1
+done
+echo "Bridge ready on port ${BRIDGE_PORT}"
+
+# Ngrok (optional)
+if [ "$USE_NGROK" = true ]; then
+  echo "Starting ngrok tunnel..."
+  ngrok http "$BRIDGE_PORT" --log=stdout > /tmp/zapbot-ngrok.log 2>&1 &
+  NGROK_PID=$!
+
+  NGROK_URL=""
+  for i in $(seq 1 15); do
+    NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[] | select(.proto=="https") | .public_url' 2>/dev/null || echo "")
+    [ -n "$NGROK_URL" ] && break
+    sleep 1
+  done
+
+  if [ -z "$NGROK_URL" ]; then
+    echo "ERROR: ngrok failed to start. Check /tmp/zapbot-ngrok.log"
     kill $BRIDGE_PID $AO_PID 2>/dev/null || true
     exit 1
   fi
-  sleep 1
-done
 
-# Start ngrok tunnel to bridge port
-echo "Starting ngrok tunnel..."
-ngrok http "$BRIDGE_PORT" --log=stdout > /tmp/zapbot-ngrok.log 2>&1 &
-NGROK_PID=$!
+  # Update webhook
+  WEBHOOK_URL="${NGROK_URL}/api/webhooks/github"
+  EXISTING_HOOK=$(gh api "repos/${ZAPBOT_REPO}/hooks" --jq '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
 
-for i in $(seq 1 15); do
-  NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | jq -r '.tunnels[] | select(.proto=="https") | .public_url' 2>/dev/null || echo "")
-  [ -n "$NGROK_URL" ] && break
-  sleep 1
-done
+  if [ -n "$EXISTING_HOOK" ]; then
+    gh api "repos/${ZAPBOT_REPO}/hooks/${EXISTING_HOOK}" --method PATCH \
+      -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
+      -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" >/dev/null
+  else
+    gh api "repos/${ZAPBOT_REPO}/hooks" --method POST \
+      -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
+      -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" \
+      -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
+      -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" >/dev/null
+  fi
 
-if [ -z "$NGROK_URL" ]; then
-  echo "ERROR: ngrok failed to start."
-  echo "FIX: Check /tmp/zapbot-ngrok.log. Verify ngrok auth: ngrok config check"
-  kill $BRIDGE_PID $AO_PID 2>/dev/null || true
-  exit 1
-fi
-echo "ngrok URL: $NGROK_URL"
-
-# Update or create GitHub webhook (filter by URL pattern)
-WEBHOOK_URL="${NGROK_URL}/api/webhooks/github"
-EXISTING_HOOK=$(gh api "repos/${ZAPBOT_REPO}/hooks" --jq '[.[] | select(.config.url | test("ngrok|webhook-bridge|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
-
-if [ -n "$EXISTING_HOOK" ]; then
-  echo "Updating webhook #${EXISTING_HOOK}..."
-  gh api "repos/${ZAPBOT_REPO}/hooks/${EXISTING_HOOK}" --method PATCH \
-    -f "config[url]=${WEBHOOK_URL}" \
-    -f "config[content_type]=json" \
-    -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" >/dev/null
+  # Persist bridge URL in project .env
+  if [ -f "$PROJECT_DIR/.env" ]; then
+    sed -i.bak '/^ZAPBOT_BRIDGE_URL=/d' "$PROJECT_DIR/.env"
+    echo "ZAPBOT_BRIDGE_URL=${NGROK_URL}" >> "$PROJECT_DIR/.env"
+    rm -f "$PROJECT_DIR/.env.bak"
+  fi
+  export ZAPBOT_BRIDGE_URL="${NGROK_URL}"
 else
-  echo "Creating webhook..."
-  gh api "repos/${ZAPBOT_REPO}/hooks" --method POST \
-    -f "config[url]=${WEBHOOK_URL}" \
-    -f "config[content_type]=json" \
-    -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" \
-    -F "events[]=issues" \
-    -F "events[]=pull_request" \
-    -F "events[]=pull_request_review" \
-    -F "events[]=check_run" \
-    -F "events[]=issue_comment" \
-    -F "active=true" >/dev/null
+  NGROK_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:${BRIDGE_PORT}}"
+  NGROK_PID=""
+  echo "ngrok disabled. Bridge URL: $NGROK_URL"
 fi
-
-# Export bridge URL for publish script
-export ZAPBOT_BRIDGE_URL="${NGROK_URL}"
 
 # Cleanup on exit
 cleanup() {
   echo ""
   echo "Shutting down..."
-  kill $NGROK_PID $BRIDGE_PID $AO_PID 2>/dev/null || true
+  [ -n "${NGROK_PID:-}" ] && kill $NGROK_PID 2>/dev/null || true
+  kill $BRIDGE_PID $AO_PID 2>/dev/null || true
   echo "All processes stopped."
 }
 trap cleanup EXIT INT TERM
@@ -128,19 +145,17 @@ echo ""
 echo "================================================"
 echo "  Zapbot is running!"
 echo "================================================"
-echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
-echo "  AO:        http://localhost:${AO_PORT}"
-echo "  ngrok:     ${NGROK_URL}"
-echo "  Webhook:   ${WEBHOOK_URL}"
+echo "  Project:   $PROJECT_DIR"
 echo "  Repo:      https://github.com/${ZAPBOT_REPO}"
+echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
 echo "  Dashboard: http://localhost:${AO_PORT}"
+[ "$USE_NGROK" = true ] && echo "  ngrok:     ${NGROK_URL}"
 echo ""
-echo "  Publish:   ZAPBOT_BRIDGE_URL=${NGROK_URL} bash bin/zapbot-publish.sh <plan-file> --key <name>"
+echo "  Publish:   bash $ZAPBOT_DIR/bin/zapbot-publish.sh <plan-file> --key <name>"
 echo "  Approve:   Add '${APPROVE_LABEL}' label on the GitHub issue"
 echo ""
 echo "  Logs: /tmp/zapbot-{ao,bridge,ngrok}.log"
 echo "  Press Ctrl+C to stop everything."
 echo "================================================"
 
-# Block until interrupted
 wait

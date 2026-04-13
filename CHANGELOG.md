@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0 (2026-04-12)
+
+Fixes all path assumptions from the global install restructuring.
+
+### What changed
+
+- **start.sh now runs from the project directory** — pass a project path or run from the project dir. No more hardcoded `zapbot-test` fallback.
+- **`.env` sourced before defaults** — port and label settings from `.env` actually work now.
+- **team-init generates `.env`** — random webhook secret, correct repo name, mode 600.
+- **Share links work from any repo** — `zapbot-publish.sh` finds `share-link.ts` via `ZAPBOT_DIR`, not the project's git root.
+- **Bridge URL persisted in `.env`** — `start.sh` writes the ngrok URL to the project's `.env` so the publish script can find it in a separate Claude Code session.
+- **Re-approve after plan update works** — `spawnedIssues` in the bridge has a 1-hour TTL, not permanent.
+- **`--no-ngrok` flag** — for GCP or static IP deployments.
+- **`jq` added to prerequisites**
+- **Hardcoded configs removed** — `agent-orchestrator.yaml` and `.agent-rules.md` are generated per-repo by `team-init`, not committed in the zapbot tool repo.
+
+### For contributors
+
+- Codex adversarial review found 14 post-restructuring gaps. All fixed.
+- `ZAPBOT_DIR` env var available in all scripts for locating zapbot binaries.
+
 ## 0.1.0 (2026-04-12)
 
 Initial release. Plan-to-code workflow for teams.

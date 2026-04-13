@@ -20,10 +20,14 @@ setInterval(() => {
   for (const [key, val] of tokens) {
     if (now - val.createdAt > TOKEN_TTL_MS) tokens.delete(key);
   }
+  for (const [num, ts] of spawnedIssues) {
+    if (now - ts > SPAWN_TTL_MS) spawnedIssues.delete(num);
+  }
 }, 60 * 60 * 1000);
 
-// --- Spawned issues tracker (dedup) ---
-const spawnedIssues = new Set<number>();
+// --- Spawned issues tracker (dedup with 1h TTL) ---
+const spawnedIssues = new Map<number, number>();
+const SPAWN_TTL_MS = 60 * 60 * 1000;
 
 function verifyHmac(payload: string, signature: string): boolean {
   const expected = "sha256=" + createHmac("sha256", SECRET!).update(payload).digest("hex");
@@ -105,7 +109,7 @@ async function handleGitHubWebhook(req: Request, body: string): Promise<Response
       }
 
       console.log(`[bridge] ${APPROVE_LABEL} on issue #${issueNum}, spawning...`);
-      spawnedIssues.add(issueNum);
+      spawnedIssues.set(issueNum, Date.now());
 
       const proc = Bun.spawn(["ao", "spawn", String(issueNum)], {
         stdout: "pipe",

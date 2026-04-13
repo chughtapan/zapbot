@@ -98,16 +98,16 @@ fi
 # Generate share link (now that we know the issue number)
 SHARE_LINK=""
 CB_TOKEN=""
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+ZAPBOT_DIR="${ZAPBOT_DIR:-$HOME/.claude/skills/zapbot}"
 
-if [ -f "$REPO_ROOT/bin/share-link.ts" ] && command -v bun >/dev/null 2>&1; then
+if [ -f "$ZAPBOT_DIR/bin/share-link.ts" ] && command -v bun >/dev/null 2>&1; then
   if [ -n "$BRIDGE_URL" ]; then
     CB_TOKEN=$(openssl rand -hex 16)
-    SHARE_LINK=$(bun "$REPO_ROOT/bin/share-link.ts" "$PLAN_FILE" \
+    SHARE_LINK=$(bun "$ZAPBOT_DIR/bin/share-link.ts" "$PLAN_FILE" \
       --callback-url "${BRIDGE_URL}/api/callbacks/plannotator/${ISSUE_NUM}" \
       --callback-token "$CB_TOKEN" 2>/dev/null || echo "")
   else
-    SHARE_LINK=$(bun "$REPO_ROOT/bin/share-link.ts" "$PLAN_FILE" 2>/dev/null || echo "")
+    SHARE_LINK=$(bun "$ZAPBOT_DIR/bin/share-link.ts" "$PLAN_FILE" 2>/dev/null || echo "")
   fi
 fi
 

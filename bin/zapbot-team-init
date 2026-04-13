@@ -119,11 +119,25 @@ gh label create "zapbot-plan" --repo "$REPO" --color "0E8A16" --description "Pla
 gh label create "plan-approved" --repo "$REPO" --color "1D76DB" --description "Plan approved for agent implementation" --force 2>/dev/null || true
 echo "Labels ready"
 
+# --- .env ---
+if [ ! -f "$REPO_ROOT/.env" ]; then
+  WEBHOOK_SECRET=$(openssl rand -hex 32)
+  cat > "$REPO_ROOT/.env" << ENV_EOF
+GITHUB_WEBHOOK_SECRET=${WEBHOOK_SECRET}
+ZAPBOT_REPO=${REPO}
+ENV_EOF
+  chmod 600 "$REPO_ROOT/.env"
+  echo ".env: created with random webhook secret (mode 600)"
+else
+  echo ".env: already exists (keeping existing secrets)"
+fi
+
 # --- .gitignore ---
 if [ -f "$REPO_ROOT/.gitignore" ]; then
   grep -q "^\.env$" "$REPO_ROOT/.gitignore" 2>/dev/null || echo ".env" >> "$REPO_ROOT/.gitignore"
+  grep -q "^agent-orchestrator.yaml$" "$REPO_ROOT/.gitignore" 2>/dev/null || echo "agent-orchestrator.yaml" >> "$REPO_ROOT/.gitignore"
 else
-  echo ".env" > "$REPO_ROOT/.gitignore"
+  printf ".env\nagent-orchestrator.yaml\n" > "$REPO_ROOT/.gitignore"
 fi
 
 echo ""
@@ -132,8 +146,6 @@ echo "  Repo onboarded for zapbot!"
 echo "================================================"
 echo ""
 echo "Next steps:"
-echo "  1. Review agent-orchestrator.yaml (check port, path)"
-echo "  2. Generate .env: echo 'GITHUB_WEBHOOK_SECRET=\$(openssl rand -hex 32)' > .env"
-echo "  3. Start zapbot: cd ~/.claude/skills/zapbot && ./start.sh"
-echo "  4. In Claude Code: /plan → create plan → /zapbot-publish"
+echo "  1. Start zapbot: ~/.claude/skills/zapbot/start.sh"
+echo "  2. In Claude Code: /plan → create plan → /zapbot-publish"
 echo ""

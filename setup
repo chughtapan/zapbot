@@ -15,6 +15,7 @@ command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
 command -v git >/dev/null 2>&1 || MISSING="$MISSING git"
 command -v gh >/dev/null 2>&1 || MISSING="$MISSING gh"
 command -v tmux >/dev/null 2>&1 || MISSING="$MISSING tmux"
+command -v jq >/dev/null 2>&1 || MISSING="$MISSING jq"
 
 if [ -n "$MISSING" ]; then
   echo "ERROR: Missing:$MISSING"
