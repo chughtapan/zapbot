@@ -44,7 +44,7 @@ export async function spawnAgent(
 
   try {
     const proc = Bun.spawn(
-      ["ao", "session", "spawn", "--issue", String(ctx.issueNumber), "--repo", ctx.repo],
+      ["ao", "spawn", String(ctx.issueNumber)],
       {
         env: {
           ...process.env,
