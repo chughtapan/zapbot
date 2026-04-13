@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# zapbot-update-check — periodic version check
+#
+# Output (one line, or nothing):
+#   UPGRADE_AVAILABLE <old> <new>  — remote VERSION differs from local
+#   (nothing)                      — up to date or check skipped
+set -euo pipefail
+
+ZAPBOT_DIR="${ZAPBOT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+STATE_DIR="$HOME/.zapbot"
+CACHE_FILE="$STATE_DIR/last-update-check"
+VERSION_FILE="$ZAPBOT_DIR/VERSION"
+REMOTE_URL="${ZAPBOT_REMOTE_URL:-https://raw.githubusercontent.com/chughtapan/zapbot/main/VERSION}"
+
+mkdir -p "$STATE_DIR"
+
+# Skip if checked recently (1 hour cache)
+if [ -f "$CACHE_FILE" ]; then
+  LAST_CHECK=$(cat "$CACHE_FILE" 2>/dev/null || echo "0")
+  NOW=$(date +%s)
+  DIFF=$((NOW - LAST_CHECK))
+  [ "$DIFF" -lt 3600 ] && exit 0
+fi
+
+LOCAL_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "0.0.0")
+REMOTE_VERSION=$(curl -fsSL --max-time 3 "$REMOTE_URL" 2>/dev/null | tr -d '[:space:]' || echo "")
+
+# Update cache timestamp
+date +%s > "$CACHE_FILE"
+
+[ -z "$REMOTE_VERSION" ] && exit 0
+[ "$LOCAL_VERSION" = "$REMOTE_VERSION" ] && exit 0
+
+echo "UPGRADE_AVAILABLE $LOCAL_VERSION $REMOTE_VERSION"

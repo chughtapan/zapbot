@@ -7,6 +7,16 @@ allowed-tools:
   - AskUserQuestion
 ---
 
+## Preamble
+
+```bash
+_UPD=$(~/.claude/skills/zapbot/bin/zapbot-update-check 2>/dev/null || true)
+[ -n "$_UPD" ] && echo "$_UPD" || true
+```
+
+If output shows `UPGRADE_AVAILABLE <old> <new>`: tell the user
+"Zapbot v{new} is available (you're on v{old}). Upgrade: `cd ~/.claude/skills/zapbot && git pull && ./setup`"
+
 # /zapbot-publish
 
 Publish the current plan to a GitHub issue for team review.
@@ -40,11 +50,8 @@ Use the answer as `KEY`. Otherwise use the branch name.
 ### 3. Publish
 
 ```bash
-bash bin/zapbot-publish.sh "$PLAN_FILE" --key "$KEY"
+bash ~/.claude/skills/zapbot/bin/zapbot-publish.sh "$PLAN_FILE" --key "$KEY"
 ```
-
-The script handles everything: share link generation, issue creation/update,
-label invalidation on plan changes, and callback token registration.
 
 ### 4. Report result
 

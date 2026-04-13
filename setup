@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Zapbot setup — installs dependencies for the zapbot tool itself.
+# Run once after cloning: cd ~/.claude/skills/zapbot && ./setup
+
+ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "=== Zapbot Setup ==="
+echo ""
+
+# Check prerequisites
+MISSING=""
+command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
+command -v git >/dev/null 2>&1 || MISSING="$MISSING git"
+command -v gh >/dev/null 2>&1 || MISSING="$MISSING gh"
+command -v tmux >/dev/null 2>&1 || MISSING="$MISSING tmux"
+
+if [ -n "$MISSING" ]; then
+  echo "ERROR: Missing:$MISSING"
+  exit 1
+fi
+
+# Install bun (if missing)
+if ! command -v bun >/dev/null 2>&1; then
+  echo "Installing bun..."
+  curl -fsSL https://bun.sh/install | bash
+fi
+
+# Install ngrok (if missing)
+if ! command -v ngrok >/dev/null 2>&1; then
+  echo "Installing ngrok..."
+  if [[ "$(uname)" == "Darwin" ]]; then
+    brew install ngrok 2>/dev/null || {
+      ARCH=$(uname -m)
+      [ "$ARCH" = "x86_64" ] && ARCH="amd64"
+      [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ] && ARCH="arm64"
+      curl -fsSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-${ARCH}.tgz" -o /tmp/ngrok.tgz
+      tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
+    }
+  else
+    curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz
+    sudo tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
+  fi
+fi
+
+# Install plannotator (if missing)
+if ! command -v plannotator >/dev/null 2>&1; then
+  echo "Installing plannotator..."
+  curl -fsSL https://plannotator.ai/install.sh | bash
+fi
+
+# Install agent-orchestrator (if missing)
+if ! command -v ao >/dev/null 2>&1; then
+  echo "Installing agent-orchestrator..."
+  npm install -g @aoagents/ao
+fi
+
+# Make scripts executable
+chmod +x "$ZAPBOT_DIR/bin/"* "$ZAPBOT_DIR/setup" "$ZAPBOT_DIR/start.sh" "$ZAPBOT_DIR/test/e2e-smoke.sh" 2>/dev/null || true
+
+echo ""
+echo "================================================"
+echo "  Zapbot v$(cat "$ZAPBOT_DIR/VERSION") installed!"
+echo "================================================"
+echo ""
+echo "To onboard a repo:"
+echo "  cd ~/your-project"
+echo "  ~/.claude/skills/zapbot/bin/zapbot-team-init"
+echo ""
+echo "To start the server:"
+echo "  cd ~/your-project"
+echo "  ~/.claude/skills/zapbot/start.sh"
+echo ""
