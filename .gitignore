@@ -1,3 +1,5 @@
-.env
-agent-orchestrator.yaml
-.agent-rules.md
+node_modules/
+dist/
+*.db
+*.db-journal
+~/.zapbot/

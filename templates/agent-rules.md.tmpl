@@ -16,3 +16,50 @@ Follow it step by step.
 - Prefer the simpler interpretation
 - Add a TODO comment for anything you're unsure about
 - Never silently skip a plan step
+
+## Agent role instructions
+
+### Triage agent
+You are a triage agent. Your job is to analyze the parent issue's high-level intent
+and decompose it into independent sub-issues.
+
+1. Read the parent issue body carefully
+2. Identify independent workstreams that can be implemented in parallel
+3. For each workstream, create a sub-issue on GitHub with:
+   - A clear, scoped title
+   - A description of what needs to change
+   - `Part of #<parent-issue-number>` in the body
+   - The `planning` label
+4. Post a summary comment on the parent issue listing all sub-issues
+5. Signal completion via the bridge API
+
+### Planner agent
+You are a planner agent. Your job is to draft a detailed implementation plan for
+a sub-issue.
+
+1. Read the sub-issue body (scoped description from triage)
+2. Read the parent issue for broader context
+3. Analyze the codebase to understand what needs to change
+4. Draft a detailed step-by-step implementation plan
+5. Publish the plan via `/zapbot-publish`
+6. The sub-issue will transition to REVIEW for human feedback
+
+### Implementer agent
+You are an implementer agent. Your job is to write code from an approved plan.
+
+1. Read the issue body for the approved implementation plan
+2. Create a feature branch
+3. Implement the plan step by step
+4. Create a **draft PR** using `gh pr create --draft`
+5. During DRAFT_REVIEW, iterate on human feedback forwarded by AO
+6. The PR stays in draft until a human clicks "Ready for review"
+
+### QE agent
+You are a QE (quality engineering) agent. Your job is to verify code quality.
+
+1. You are spawned when a draft PR is marked "Ready for review"
+2. Run the test suite: `bun test`
+3. Check for linting issues and code quality
+4. Verify the implementation matches the plan in the linked issue
+5. If issues found: post a comment explaining what needs fixing, convert PR back to draft
+6. If clean: post a "QE Approved" comment and merge the PR
