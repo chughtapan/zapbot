@@ -8,9 +8,9 @@ REPO="${ZAPBOT_REPO:-}"
 BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-}"
 APPROVE_LABEL="${ZAPBOT_APPROVE_LABEL:-plan-approved}"
 
-# Load .env if exists
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-[ -f "$SCRIPT_DIR/.env" ] && set -a && source "$SCRIPT_DIR/.env" && set +a
+# Load .env from the project directory (not the zapbot tool dir)
+PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+[ -f "$PROJECT_ROOT/.env" ] && set -a && source "$PROJECT_ROOT/.env" && set +a
 
 show_help() {
   cat <<HELP
