@@ -63,6 +63,18 @@ else
 fi
 
 # ------------------------------------------------------------------
+# 2b. Install bun (if missing)
+# ------------------------------------------------------------------
+if ! command -v bun >/dev/null 2>&1; then
+  echo ""
+  echo "--- Installing bun ---"
+  curl -fsSL https://bun.sh/install | bash
+  echo "bun installed"
+else
+  echo "bun: $(bun --version) (already installed)"
+fi
+
+# ------------------------------------------------------------------
 # 3. Install plannotator (if missing)
 # ------------------------------------------------------------------
 if ! command -v plannotator >/dev/null 2>&1; then
@@ -84,6 +96,26 @@ if ! command -v ao >/dev/null 2>&1; then
   echo "agent-orchestrator installed: $(ao --version 2>/dev/null || echo 'ok')"
 else
   echo "agent-orchestrator: already installed"
+fi
+
+# ------------------------------------------------------------------
+# 4b. Generate .env (if missing)
+# ------------------------------------------------------------------
+if [ ! -f "$REPO_DIR/.env" ]; then
+  echo ""
+  echo "--- Generating .env ---"
+  WEBHOOK_SECRET=$(openssl rand -hex 32)
+  cat > "$REPO_DIR/.env" << ENV_EOF
+GITHUB_WEBHOOK_SECRET=${WEBHOOK_SECRET}
+ZAPBOT_REPO=${GITHUB_USER}/${ZAPBOT_REPO}
+ZAPBOT_BRIDGE_PORT=3000
+ZAPBOT_AO_PORT=3001
+ZAPBOT_APPROVE_LABEL=plan-approved
+ENV_EOF
+  echo ".env" >> "$REPO_DIR/.gitignore" 2>/dev/null || true
+  echo "Created .env with random webhook secret"
+else
+  echo ".env: already exists (keeping existing secrets)"
 fi
 
 # ------------------------------------------------------------------
@@ -188,6 +220,9 @@ echo "Created agent-orchestrator.yaml"
 echo ""
 echo "--- Writing /zapbot-publish skill ---"
 mkdir -p "$REPO_DIR/.claude/skills/zapbot-publish"
+if [ -f "$REPO_DIR/.claude/skills/zapbot-publish/SKILL.md" ]; then
+  echo "Skill already exists, skipping (won't clobber)"
+else
 cat > "$REPO_DIR/.claude/skills/zapbot-publish/SKILL.md" << 'SKILL_EOF'
 ---
 name: zapbot-publish
@@ -317,6 +352,7 @@ echo "When the team is ready, add the 'plan-approved' label to trigger implement
 ```
 SKILL_EOF
 echo "Created .claude/skills/zapbot-publish/SKILL.md"
+fi
 
 # ------------------------------------------------------------------
 # 9. Create CLAUDE.md with routing rules
@@ -494,31 +530,13 @@ git push origin main 2>/dev/null || echo "Push failed (will retry later)"
 # ------------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------------
-GITHUB_USER_DISPLAY=$GITHUB_USER
 echo ""
 echo "================================================"
 echo "  Zapbot setup complete!"
 echo "================================================"
 echo ""
-echo "Next steps:"
+echo "Next: run ./start.sh"
 echo ""
-echo "  1. Start ngrok tunnel (in a separate terminal):"
-echo "     ngrok http 3000"
-echo ""
-echo "  2. Copy the ngrok HTTPS URL and create a GitHub webhook:"
-echo "     gh api repos/${GITHUB_USER_DISPLAY}/${ZAPBOT_REPO}/hooks --method POST \\"
-echo "       -f 'config[url]=<NGROK_URL>/api/webhooks/github' \\"
-echo "       -f 'config[content_type]=json' \\"
-echo "       -f 'config[secret]=zapbot-webhook-secret' \\"
-echo "       -F 'events[]=issues' \\"
-echo "       -F 'active=true'"
-echo ""
-echo "  3. Set the webhook secret env var:"
-echo "     export GITHUB_WEBHOOK_SECRET=zapbot-webhook-secret"
-echo ""
-echo "  4. Start agent-orchestrator:"
-echo "     cd $REPO_DIR && ao start"
-echo ""
-echo "  5. Run the E2E smoke test:"
-echo "     ./test/e2e-smoke.sh"
+echo "That starts everything (ngrok + webhook bridge + agent-orchestrator)."
+echo "Then use /zapbot-publish in Claude Code to publish plans."
 echo ""

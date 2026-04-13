@@ -2,32 +2,37 @@
 set -euo pipefail
 
 # Zapbot E2E Smoke Test
-# Tests: plan publish → issue creation → label trigger
+# Tests: plan publish, issue creation, label management, bridge endpoints
 #
-# Prerequisites: install.sh has been run
+# Prerequisites: install.sh has been run. start.sh is optional (bridge tests skip if not running).
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 GITHUB_USER=$(gh api user --jq '.login')
-ZAPBOT_REPO="zapbot-test"
+ZAPBOT_REPO="${ZAPBOT_REPO:-${GITHUB_USER}/zapbot-test}"
+BRIDGE_PORT="${ZAPBOT_BRIDGE_PORT:-3000}"
 PASS=0
 FAIL=0
+
+# Load .env if exists
+[ -f "$REPO_DIR/.env" ] && set -a && source "$REPO_DIR/.env" && set +a
 
 assert_cmd() {
   local desc="$1"
   local cmd="$2"
   if eval "$cmd" >/dev/null 2>&1; then
-    echo "  ✓ $desc"
+    echo "  + $desc"
     PASS=$((PASS + 1))
   else
-    echo "  ✗ $desc"
+    echo "  x $desc"
     FAIL=$((FAIL + 1))
   fi
 }
 
 echo "=== Zapbot E2E Smoke Test ==="
+echo "Repo: $ZAPBOT_REPO"
 echo ""
 
-# --- Test 1: Create a plan file ---
+# --- Test 1: Plan file creation ---
 echo "Test 1: Plan file creation"
 cat > "$REPO_DIR/plan.md" << 'PLAN'
 # Plan: Add hello endpoint
@@ -35,35 +40,39 @@ cat > "$REPO_DIR/plan.md" << 'PLAN'
 ## Goal
 Add a simple /hello endpoint that returns "Hello, World!" for testing.
 
-## Approach
-1. Create a new file `hello.ts` with a function that returns the greeting
-2. Add a test for the function
-
 ## Files to Change
-- `hello.ts` — new file, the endpoint handler
-- `hello.test.ts` — new file, tests
+- `hello.ts` — new file
 
 ## Acceptance Criteria
 - [ ] `hello()` returns "Hello, World!"
-- [ ] Test passes
 PLAN
 assert_cmd "Plan file created" "test -f '$REPO_DIR/plan.md'"
 
-# --- Test 2: Publish plan as GitHub issue ---
+# --- Test 2: Share link generation ---
 echo ""
-echo "Test 2: Plan → GitHub issue"
+echo "Test 2: Share link generation"
+SHARE_LINK=$(bun "$REPO_DIR/bin/share-link.ts" "$REPO_DIR/plan.md" 2>/dev/null || echo "")
+assert_cmd "Share link generated" "test -n '$SHARE_LINK'"
+assert_cmd "Link points to plannotator" "echo '$SHARE_LINK' | grep -q 'share.plannotator.ai'"
+
+SHARE_LINK_CB=$(bun "$REPO_DIR/bin/share-link.ts" "$REPO_DIR/plan.md" --callback-url "http://example.com/cb/1" --callback-token "tok123" 2>/dev/null || echo "")
+assert_cmd "Share link with callback params" "echo '$SHARE_LINK_CB' | grep -q 'cb='"
+
+# --- Test 3: Publish plan as GitHub issue ---
+echo ""
+echo "Test 3: Plan -> GitHub issue"
 ISSUE_URL=$(gh issue create \
-  --repo "${GITHUB_USER}/${ZAPBOT_REPO}" \
+  --repo "$ZAPBOT_REPO" \
   --title "zapbot:smoke-test — Add hello endpoint" \
   --body "$(cat "$REPO_DIR/plan.md")" \
   --label "zapbot-plan" 2>/dev/null || echo "")
 ISSUE_NUM=$(echo "$ISSUE_URL" | grep -o '[0-9]*$' || echo "")
 
 if [ -n "$ISSUE_NUM" ]; then
-  echo "  ✓ Issue created: $ISSUE_URL"
+  echo "  + Issue created: $ISSUE_URL"
   PASS=$((PASS + 1))
 else
-  echo "  ✗ Issue creation failed"
+  echo "  x Issue creation failed"
   FAIL=$((FAIL + 1))
   rm -f "$REPO_DIR/plan.md"
   echo ""
@@ -71,31 +80,71 @@ else
   exit 1
 fi
 
-# --- Test 3: Verify issue content ---
+# --- Test 4: Issue content verification ---
 echo ""
-echo "Test 3: Issue content verification"
-ISSUE_BODY=$(gh issue view "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --json body --jq '.body')
-assert_cmd "Issue body contains plan goal" "echo '$ISSUE_BODY' | grep -q 'hello endpoint'"
-assert_cmd "Issue body contains acceptance criteria" "echo '$ISSUE_BODY' | grep -q 'Acceptance Criteria'"
+echo "Test 4: Issue content verification"
+ISSUE_BODY=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json body --jq '.body')
+assert_cmd "Issue body contains plan goal" "echo \"$ISSUE_BODY\" | grep -q 'hello endpoint'"
+assert_cmd "Issue body contains acceptance criteria" "echo \"$ISSUE_BODY\" | grep -q 'Acceptance Criteria'"
 
-ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --json labels --jq '[.labels[].name] | join(",")')
-assert_cmd "Issue has zapbot-plan label" "echo '$ISSUE_LABELS' | grep -q 'zapbot-plan'"
+ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
+assert_cmd "Issue has zapbot-plan label" "echo \"$ISSUE_LABELS\" | grep -q 'zapbot-plan'"
 
-# --- Test 4: Plan update removes approval ---
+# --- Test 5: Plan update removes approval ---
 echo ""
-echo "Test 4: Plan update invalidates approval"
-gh issue edit "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --add-label "plan-approved" >/dev/null 2>&1 || true
+echo "Test 5: Plan update invalidates approval"
+gh issue edit "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --add-label "plan-approved" >/dev/null 2>&1 || true
 sleep 2
-# Simulate what the skill does: remove label on plan update
-gh issue edit "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --remove-label "plan-approved" >/dev/null 2>&1 || true
-sleep 1
-LABELS_AFTER=$(gh issue view "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" --json labels --jq '[.labels[].name] | join(",")')
-assert_cmd "plan-approved label removed after update" "echo '$LABELS_AFTER' | grep -v 'plan-approved'"
+# Verify label was added
+LABELS_BEFORE=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
+if echo "$LABELS_BEFORE" | grep -q "plan-approved"; then
+  # Now remove it (simulating what zapbot-publish.sh does on plan update)
+  gh issue edit "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --remove-label "plan-approved" >/dev/null 2>&1 || true
+  sleep 1
+  LABELS_AFTER=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
+  assert_cmd "plan-approved label removed after update" "! echo \"$LABELS_AFTER\" | grep -q 'plan-approved'"
+else
+  echo "  ~ Could not add plan-approved label (skipping removal test)"
+fi
+
+# --- Test 6: Bridge health check (if running) ---
+echo ""
+echo "Test 6: Webhook bridge"
+if curl -s "http://localhost:${BRIDGE_PORT}/healthz" >/dev/null 2>&1; then
+  HEALTH=$(curl -s "http://localhost:${BRIDGE_PORT}/healthz")
+  assert_cmd "Bridge health endpoint responds" "echo '$HEALTH' | grep -q 'ok'"
+
+  # Test HMAC rejection (invalid signature)
+  REJECT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "http://localhost:${BRIDGE_PORT}/api/webhooks/github" \
+    -H "Content-Type: application/json" \
+    -H "x-hub-signature-256: sha256=invalid" \
+    -H "x-github-event: issues" \
+    -d '{"action":"labeled","label":{"name":"test"},"issue":{"number":999}}' 2>/dev/null)
+  assert_cmd "Invalid HMAC returns 401" "test '$REJECT_STATUS' = '401'"
+
+  # Test token registration
+  TOKEN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "http://localhost:${BRIDGE_PORT}/api/tokens" \
+    -H "Content-Type: application/json" \
+    -d '{"token":"test-tok-123","issueNumber":999}' 2>/dev/null)
+  assert_cmd "Token registration returns 200" "test '$TOKEN_STATUS' = '200'"
+
+  # Test callback with invalid token
+  CB_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "http://localhost:${BRIDGE_PORT}/api/callbacks/plannotator/999" \
+    -H "Content-Type: application/json" \
+    -d '{"token":"wrong-token","action":"feedback","annotated_url":"https://example.com"}' 2>/dev/null)
+  assert_cmd "Invalid callback token returns 403" "test '$CB_STATUS' = '403'"
+else
+  echo "  ~ Bridge not running on port ${BRIDGE_PORT} (skipping bridge tests)"
+  echo "  ~ Start with ./start.sh to test bridge endpoints"
+fi
 
 # --- Cleanup ---
 echo ""
-echo "Cleaning up test issue..."
-gh issue close "$ISSUE_NUM" --repo "${GITHUB_USER}/${ZAPBOT_REPO}" >/dev/null 2>&1 || true
+echo "Cleaning up..."
+gh issue close "$ISSUE_NUM" --repo "$ZAPBOT_REPO" >/dev/null 2>&1 || true
 rm -f "$REPO_DIR/plan.md"
 
 # --- Results ---
