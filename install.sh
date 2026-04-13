@@ -231,8 +231,6 @@ description: Publish current plan to a GitHub issue with a plannotator share lin
 allowed-tools:
   - Bash
   - Read
-  - Grep
-  - Glob
   - AskUserQuestion
 ---
 
@@ -242,115 +240,43 @@ Publish the current plan to a GitHub issue for team review.
 
 ## Steps
 
-### 1. Find the plan content
-
-Look for the plan content in the current conversation context. The plan was just
-created or edited in plan mode. Read the plan file from disk.
+### 1. Find the plan file
 
 ```bash
-# Check common plan file locations
+PLAN_FILE=""
 for f in plan.md .claude/plan.md PLAN.md; do
-  [ -f "$f" ] && echo "PLAN_FILE: $f" && break
+  [ -f "$f" ] && PLAN_FILE="$f" && echo "Found plan: $f" && break
 done
+[ -z "$PLAN_FILE" ] && echo "NO_PLAN_FILE"
 ```
 
-If no plan file found, ask the user: "Where is the plan file? Provide the path."
+If `NO_PLAN_FILE`, ask the user: "Where is the plan file? Provide the path."
 
-Read the plan file content using the Read tool.
-
-### 2. Generate zapbot-id
-
-Check if the plan file already has a `zapbot-id:` line. If not, generate one
-and note it (do NOT write it to the plan file — just track it for the issue).
-
-```bash
-ZAPBOT_ID=$(head -20 "$PLAN_FILE" | grep '^zapbot-id:' | awk '{print $2}')
-if [ -z "$ZAPBOT_ID" ]; then
-  ZAPBOT_ID="zap-$(openssl rand -hex 4)"
-  echo "Generated new zapbot-id: $ZAPBOT_ID"
-else
-  echo "Existing zapbot-id: $ZAPBOT_ID"
-fi
-```
-
-### 3. Determine issue key
+### 2. Determine the feature key
 
 ```bash
 BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
 echo "Branch: $BRANCH"
 ```
 
-If `$BRANCH` is `main`, `master`, or `develop`, use AskUserQuestion to ask:
+If branch is `main`, `master`, or `develop`, use AskUserQuestion:
 "You're on a shared branch. What short name describes this plan? (e.g., 'auth-refactor', 'add-billing')"
 
-Otherwise use the branch name as the key.
+Use the answer as `KEY`. Otherwise use the branch name.
 
-The issue title will be: `zapbot:$KEY — <first line of plan>`
-
-### 4. Generate plannotator share link (optional)
+### 3. Publish
 
 ```bash
-if command -v plannotator >/dev/null 2>&1; then
-  SHARE_LINK=$(plannotator share "$PLAN_FILE" 2>/dev/null || echo "")
-  if [ -n "$SHARE_LINK" ]; then
-    echo "Share link: $SHARE_LINK"
-  else
-    echo "plannotator share failed — will include raw markdown instead"
-  fi
-else
-  echo "plannotator not installed — will include raw markdown"
-  SHARE_LINK=""
-fi
+bash bin/zapbot-publish.sh "$PLAN_FILE" --key "$KEY"
 ```
 
-### 5. Check for existing issue
+The script handles everything: share link generation, issue creation/update,
+label invalidation on plan changes, and callback token registration.
 
-```bash
-EXISTING=$(gh issue list --label "zapbot-plan" --search "zapbot:$KEY" --json number,title --limit 1 2>/dev/null)
-echo "Existing issues: $EXISTING"
-```
+### 4. Report result
 
-### 6. Create or update the issue
-
-**Build the issue body** from the plan content. Include:
-- The plan markdown (full content)
-- The zapbot-id
-- The plannotator share link (if generated)
-- A note: "This plan was published via /zapbot-publish. Add the `plan-approved` label when ready for implementation."
-
-**If an existing issue was found:**
-
-```bash
-ISSUE_NUM=$(echo "$EXISTING" | jq -r '.[0].number')
-# Update issue body
-gh issue edit "$ISSUE_NUM" --body "$ISSUE_BODY"
-# Add update comment
-gh issue comment "$ISSUE_NUM" --body "Plan updated via /zapbot-publish at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# Remove plan-approved label if present (force re-approval)
-gh issue edit "$ISSUE_NUM" --remove-label "plan-approved" 2>/dev/null || true
-echo "Updated issue #$ISSUE_NUM"
-```
-
-**If no existing issue:**
-
-```bash
-gh issue create \
-  --title "zapbot:$KEY — $PLAN_TITLE" \
-  --body "$ISSUE_BODY" \
-  --label "zapbot-plan"
-```
-
-### 7. Print result
-
-Print the issue URL so the user can share it with the team.
-
-```bash
-echo ""
-echo "Plan published! Share with your team:"
-echo "  $ISSUE_URL"
-echo ""
-echo "When the team is ready, add the 'plan-approved' label to trigger implementation."
-```
+Tell the user the issue URL and remind them:
+"When the team is ready, add the 'plan-approved' label to trigger implementation."
 SKILL_EOF
 echo "Created .claude/skills/zapbot-publish/SKILL.md"
 fi
@@ -514,7 +440,21 @@ echo "Labels created"
 echo ""
 echo "--- Committing setup files ---"
 cd "$REPO_DIR"
-git add -A
+git add \
+  install.sh \
+  start.sh \
+  .agent-rules.md \
+  agent-orchestrator.yaml \
+  .claude/skills/zapbot-publish/SKILL.md \
+  CLAUDE.md \
+  README.md \
+  bin/share-link.ts \
+  bin/webhook-bridge.ts \
+  bin/zapbot-publish.sh \
+  test/e2e-smoke.sh \
+  .gitignore \
+  docs/ \
+  2>/dev/null || true
 git commit -m "$(cat <<'EOF'
 chore: zapbot initial setup
 
