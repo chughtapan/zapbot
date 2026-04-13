@@ -25,12 +25,12 @@ echo "=== Starting Zapbot ==="
 echo ""
 
 # Kill any existing processes
-pkill -f "webhook-bridge" 2>/dev/null || true
+pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 pkill -f "ngrok http" 2>/dev/null || true
 
 # Start AO on port $AO_PORT (background)
 echo "Starting agent-orchestrator on port ${AO_PORT}..."
-cd "$REPO_DIR" && ao start > /tmp/zapbot-ao.log 2>&1 &
+(cd "$REPO_DIR" && ao start > /tmp/zapbot-ao.log 2>&1) &
 AO_PID=$!
 
 # Wait for AO to be ready

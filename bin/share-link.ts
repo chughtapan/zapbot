@@ -34,11 +34,8 @@ writer.close();
 const buffer = await new Response(stream.readable).arrayBuffer();
 const compressed = new Uint8Array(buffer);
 
-let binary = "";
-for (let i = 0; i < compressed.length; i++) {
-  binary += String.fromCharCode(compressed[i]);
-}
-const hash = btoa(binary)
+const hash = Buffer.from(compressed)
+  .toString("base64")
   .replace(/\+/g, "-")
   .replace(/\//g, "_")
   .replace(/=/g, "");

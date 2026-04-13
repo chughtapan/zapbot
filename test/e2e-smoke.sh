@@ -83,29 +83,21 @@ fi
 # --- Test 4: Issue content verification ---
 echo ""
 echo "Test 4: Issue content verification"
-ISSUE_BODY=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json body --jq '.body')
+ISSUE_DATA=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json body,labels)
+ISSUE_BODY=$(echo "$ISSUE_DATA" | jq -r '.body')
+ISSUE_LABELS=$(echo "$ISSUE_DATA" | jq -r '[.labels[].name] | join(",")')
 assert_cmd "Issue body contains plan goal" "echo \"$ISSUE_BODY\" | grep -q 'hello endpoint'"
 assert_cmd "Issue body contains acceptance criteria" "echo \"$ISSUE_BODY\" | grep -q 'Acceptance Criteria'"
-
-ISSUE_LABELS=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
 assert_cmd "Issue has zapbot-plan label" "echo \"$ISSUE_LABELS\" | grep -q 'zapbot-plan'"
 
 # --- Test 5: Plan update removes approval ---
 echo ""
 echo "Test 5: Plan update invalidates approval"
 gh issue edit "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --add-label "plan-approved" >/dev/null 2>&1 || true
-sleep 2
-# Verify label was added
-LABELS_BEFORE=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
-if echo "$LABELS_BEFORE" | grep -q "plan-approved"; then
-  # Now remove it (simulating what zapbot-publish.sh does on plan update)
-  gh issue edit "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --remove-label "plan-approved" >/dev/null 2>&1 || true
-  sleep 1
-  LABELS_AFTER=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
-  assert_cmd "plan-approved label removed after update" "! echo \"$LABELS_AFTER\" | grep -q 'plan-approved'"
-else
-  echo "  ~ Could not add plan-approved label (skipping removal test)"
-fi
+# Verify and remove (simulating what zapbot-publish.sh does on plan update)
+gh issue edit "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --remove-label "plan-approved" >/dev/null 2>&1 || true
+LABELS_AFTER=$(gh issue view "$ISSUE_NUM" --repo "$ZAPBOT_REPO" --json labels --jq '[.labels[].name] | join(",")')
+assert_cmd "plan-approved label removed after update" "! echo \"$LABELS_AFTER\" | grep -q 'plan-approved'"
 
 # --- Test 6: Bridge health check (if running) ---
 echo ""
