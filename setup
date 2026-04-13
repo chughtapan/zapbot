@@ -57,6 +57,35 @@ if ! command -v ao >/dev/null 2>&1; then
   npm install -g @aoagents/ao
 fi
 
+# Claude Code only scans ~/.claude/skills/*/SKILL.md (one level deep).
+# Repo symlink provides bin/ path resolution for SKILL.md references.
+link_skill_dirs() {
+  local zapbot_dir="$1"
+  local skills_dir="$2"
+  local linked=()
+  local dir_name skill_name target
+  for skill_dir in "$zapbot_dir"/skills/*/; do
+    [ -f "$skill_dir/SKILL.md" ] || continue
+    dir_name="$(basename "$skill_dir")"
+    skill_name=$(grep -m1 '^name:' "$skill_dir/SKILL.md" 2>/dev/null \
+      | sed 's/^name:[[:space:]]*//' | tr -d '[:space:]')
+    [ -z "$skill_name" ] && skill_name="$dir_name"
+    # Guard: don't clobber the repo-level symlink
+    [ "$skill_name" = "zapbot" ] && skill_name="$dir_name"
+    target="$skills_dir/$skill_name"
+    rm -rf "$target" 2>/dev/null || true
+    mkdir -p "$target"
+    ln -snf "$zapbot_dir/skills/$dir_name/SKILL.md" "$target/SKILL.md"
+    linked+=("$skill_name")
+  done
+  [ ${#linked[@]} -gt 0 ] && echo "  Linked skills: ${linked[*]}"
+}
+
+SKILLS_DIR="$HOME/.claude/skills"
+mkdir -p "$SKILLS_DIR"
+ln -snf "$ZAPBOT_DIR" "$SKILLS_DIR/zapbot"
+link_skill_dirs "$ZAPBOT_DIR" "$SKILLS_DIR"
+
 # Make scripts executable
 chmod +x "$ZAPBOT_DIR/bin/"* "$ZAPBOT_DIR/setup" "$ZAPBOT_DIR/start.sh" "$ZAPBOT_DIR/test/e2e-smoke.sh" 2>/dev/null || true
 
