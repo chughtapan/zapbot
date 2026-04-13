@@ -6,6 +6,10 @@ set -euo pipefail
 #
 # Run from a project directory that has agent-orchestrator.yaml (created by zapbot-team-init).
 # Or pass the project path as the first argument.
+#
+# Supports multiple repos defined in agent-orchestrator.yaml. The bridge
+# routes webhooks by the `repository.full_name` in each payload, so a
+# single bridge instance handles all configured repos.
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -42,16 +46,36 @@ if [ -z "${GITHUB_WEBHOOK_SECRET:-}" ]; then
   exit 1
 fi
 
-# Auto-detect repo from config
-ZAPBOT_REPO="${ZAPBOT_REPO:-$(grep 'repo:' "$PROJECT_DIR/agent-orchestrator.yaml" | head -1 | awk '{print $2}')}"
-if [ -z "$ZAPBOT_REPO" ]; then
-  echo "ERROR: Could not detect repo from agent-orchestrator.yaml"
+# Build repo list from agent-orchestrator.yaml projects section.
+# Each `repo:` line under `projects:` is an owner/name pair.
+ZAPBOT_REPOS=()
+while IFS= read -r line; do
+  repo=$(echo "$line" | awk '{print $2}')
+  [ -n "$repo" ] && ZAPBOT_REPOS+=("$repo")
+done < <(grep '^\s\+repo:' "$PROJECT_DIR/agent-orchestrator.yaml")
+
+# Backward compat: if ZAPBOT_REPO env var is set and not in the list, add it
+if [ -n "${ZAPBOT_REPO:-}" ]; then
+  found=false
+  for r in "${ZAPBOT_REPOS[@]}"; do
+    [ "$r" = "$ZAPBOT_REPO" ] && found=true && break
+  done
+  if [ "$found" = false ]; then
+    ZAPBOT_REPOS+=("$ZAPBOT_REPO")
+  fi
+fi
+
+if [ ${#ZAPBOT_REPOS[@]} -eq 0 ]; then
+  echo "ERROR: No repos found in agent-orchestrator.yaml"
   exit 1
 fi
 
+# For backward compat, export ZAPBOT_REPO as the first repo
+ZAPBOT_REPO="${ZAPBOT_REPOS[0]}"
+
 echo "=== Starting Zapbot ==="
 echo "Project: $PROJECT_DIR"
-echo "Repo:    $ZAPBOT_REPO"
+echo "Repos:   ${ZAPBOT_REPOS[*]}"
 echo ""
 
 # Kill any existing zapbot processes
@@ -102,21 +126,26 @@ if [ "$USE_NGROK" = true ]; then
     exit 1
   fi
 
-  # Update webhook
+  # Update webhooks for ALL repos
   WEBHOOK_URL="${NGROK_URL}/api/webhooks/github"
-  EXISTING_HOOK=$(gh api "repos/${ZAPBOT_REPO}/hooks" --jq '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
+  for repo in "${ZAPBOT_REPOS[@]}"; do
+    echo "Configuring webhook for ${repo}..."
+    EXISTING_HOOK=$(gh api "repos/${repo}/hooks" --jq '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
 
-  if [ -n "$EXISTING_HOOK" ]; then
-    gh api "repos/${ZAPBOT_REPO}/hooks/${EXISTING_HOOK}" --method PATCH \
-      -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
-      -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" >/dev/null
-  else
-    gh api "repos/${ZAPBOT_REPO}/hooks" --method POST \
-      -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
-      -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" \
-      -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
-      -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" >/dev/null
-  fi
+    if [ -n "$EXISTING_HOOK" ]; then
+      gh api "repos/${repo}/hooks/${EXISTING_HOOK}" --method PATCH \
+        -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
+        -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" >/dev/null
+      echo "  Updated existing webhook for ${repo}"
+    else
+      gh api "repos/${repo}/hooks" --method POST \
+        -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
+        -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" \
+        -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
+        -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" >/dev/null
+      echo "  Created webhook for ${repo}"
+    fi
+  done
 
   # Persist bridge URL in project .env
   if [ -f "$PROJECT_DIR/.env" ]; then
@@ -146,7 +175,9 @@ echo "================================================"
 echo "  Zapbot is running!"
 echo "================================================"
 echo "  Project:   $PROJECT_DIR"
-echo "  Repo:      https://github.com/${ZAPBOT_REPO}"
+for repo in "${ZAPBOT_REPOS[@]}"; do
+echo "  Repo:      https://github.com/${repo}"
+done
 echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
 echo "  Dashboard: http://localhost:${AO_PORT}"
 [ "$USE_NGROK" = true ] && echo "  ngrok:     ${NGROK_URL}"

@@ -7,6 +7,13 @@ defaults:
   notifiers: [desktop]
   maxAgentsPerRepo: 5
 
+# Each key under `projects:` is a project name. The bridge builds a
+# repo -> projectName lookup from these entries so incoming webhooks
+# are routed to the correct project automatically.
+#
+# To add another repo, duplicate a project block with a unique key,
+# repo, path, and sessionPrefix. Or run:
+#   zapbot-team-init --add-repo <owner/repo>
 projects:
   {{REPO_NAME}}:
     repo: {{REPO}}
@@ -22,6 +29,21 @@ projects:
         secretEnvVar: GITHUB_WEBHOOK_SECRET
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event
+
+  # Example: add more projects below (uncomment and fill in)
+  # frontend-app:
+  #   repo: owner/frontend-app
+  #   path: /path/to/frontend-app
+  #   defaultBranch: main
+  #   sessionPrefix: fe
+  #   agentRulesFile: .agent-rules.md
+  #   scm:
+  #     plugin: github
+  #     webhook:
+  #       path: /api/webhooks/github
+  #       secretEnvVar: GITHUB_WEBHOOK_SECRET
+  #       signatureHeader: x-hub-signature-256
+  #       eventHeader: x-github-event
 
 reactions:
   ci-failed:
