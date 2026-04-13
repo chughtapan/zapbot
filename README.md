@@ -88,6 +88,13 @@ ao session ls    # List all sessions
 cat /tmp/zapbot-bridge.log | grep "spawn"
 ```
 
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — system design, data flow, design decisions
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, project structure, dev workflow
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [CLAUDE.md](CLAUDE.md) — project instructions for Claude Code
+
 ## Prerequisites
 
 node 20+, git 2.25+, bun, gh CLI (authenticated), tmux, claude (Claude Code), ngrok (with auth token)
