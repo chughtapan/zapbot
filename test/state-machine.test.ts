@@ -93,18 +93,20 @@ describe("sub-issue transitions", () => {
     expect(result!.sideEffects.some((e) => e.type === "add_label" && e.label === "review")).toBe(true);
   });
 
-  it("REVIEW -> APPROVED on label plan-approved", () => {
+  it("REVIEW -> IMPLEMENTING on label plan-approved", () => {
     const wf = makeSub(SubState.REVIEW);
     const result = apply(wf, { type: "label_added", label: "plan-approved", triggeredBy: "reviewer" });
     expect(result).not.toBeNull();
-    expect(result!.newState).toBe(SubState.APPROVED);
+    expect(result!.newState).toBe(SubState.IMPLEMENTING);
     expect(result!.sideEffects.some((e) => e.type === "spawn_agent" && e.role === "implementer")).toBe(true);
   });
 
-  it("rejects plan-approved label from PLANNING state", () => {
+  it("PLANNING -> IMPLEMENTING on label plan-approved", () => {
     const wf = makeSub(SubState.PLANNING);
     const result = apply(wf, { type: "label_added", label: "plan-approved", triggeredBy: "reviewer" });
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.IMPLEMENTING);
+    expect(result!.sideEffects.some((e) => e.type === "spawn_agent" && e.role === "implementer")).toBe(true);
   });
 
   it("rejects non-plan-approved labels in REVIEW", () => {
@@ -120,12 +122,12 @@ describe("sub-issue transitions", () => {
     expect(result!.newState).toBe(SubState.PLANNING);
   });
 
-  it("APPROVED -> IMPLEMENTING on spawn_agent", () => {
-    const wf = makeSub(SubState.APPROVED);
-    const result = apply(wf, { type: "spawn_agent", triggeredBy: "system" });
+  it("PLANNING -> IMPLEMENTING removes planning label and adds implementing label", () => {
+    const wf = makeSub(SubState.PLANNING);
+    const result = apply(wf, { type: "label_added", label: "plan-approved", triggeredBy: "reviewer" });
     expect(result).not.toBeNull();
-    expect(result!.newState).toBe(SubState.IMPLEMENTING);
-    expect(result!.sideEffects.some((e) => e.type === "spawn_agent" && e.role === "implementer")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "remove_label" && e.label === "planning")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "add_label" && e.label === "implementing")).toBe(true);
   });
 
   it("IMPLEMENTING -> DRAFT_REVIEW on draft_pr_opened", () => {
@@ -239,16 +241,16 @@ describe("edge cases", () => {
     expect(result3!.newState).toBe(SubState.ABANDONED);
   });
 
-  it("APPROVED -> IMPLEMENTING spawns implementer agent", () => {
-    const wf = makeSub(SubState.APPROVED);
-    const result = apply(wf, { type: "spawn_agent", triggeredBy: "system" });
+  it("REVIEW -> IMPLEMENTING spawns exactly one implementer agent", () => {
+    const wf = makeSub(SubState.REVIEW);
+    const result = apply(wf, { type: "label_added", label: "plan-approved", triggeredBy: "reviewer" });
     const spawnEffects = result!.sideEffects.filter((e) => e.type === "spawn_agent");
     expect(spawnEffects).toHaveLength(1);
     expect((spawnEffects[0] as any).role).toBe("implementer");
   });
 
-  it("REVIEW -> APPROVED spawns implementer agent as side effect", () => {
-    const wf = makeSub(SubState.REVIEW);
+  it("PLANNING -> IMPLEMENTING spawns exactly one implementer agent", () => {
+    const wf = makeSub(SubState.PLANNING);
     const result = apply(wf, { type: "label_added", label: "plan-approved", triggeredBy: "reviewer" });
     const spawnEffects = result!.sideEffects.filter((e) => e.type === "spawn_agent");
     expect(spawnEffects).toHaveLength(1);
