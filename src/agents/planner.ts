@@ -23,7 +23,7 @@ export async function completePlannerAgent(
   await withTransaction(db, async (trx) => {
     await updateWorkflowState(trx, workflowId, "REVIEW");
     await addTransition(trx, {
-      id: `t-${crypto.randomUUID().slice(0, 8)}`,
+      id: `t-${crypto.randomUUID()}`,
       workflow_id: workflowId,
       from_state: "PLANNING",
       to_state: "REVIEW",

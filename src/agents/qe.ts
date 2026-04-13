@@ -26,7 +26,7 @@ export async function completeQEVerification(
     await withTransaction(db, async (trx) => {
       await updateWorkflowState(trx, workflowId, "DONE");
       await addTransition(trx, {
-        id: `t-${crypto.randomUUID().slice(0, 8)}`,
+        id: `t-${crypto.randomUUID()}`,
         workflow_id: workflowId,
         from_state: "VERIFYING",
         to_state: "DONE",
@@ -44,7 +44,7 @@ export async function completeQEVerification(
         draft_review_cycles: newCycles,
       });
       await addTransition(trx, {
-        id: `t-${crypto.randomUUID().slice(0, 8)}`,
+        id: `t-${crypto.randomUUID()}`,
         workflow_id: workflowId,
         from_state: "VERIFYING",
         to_state: "DRAFT_REVIEW",

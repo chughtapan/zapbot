@@ -50,7 +50,7 @@ export async function completeTriageAgent(
     // Transition parent to TRIAGED
     await updateWorkflowState(trx, parentWorkflowId, "TRIAGED");
     await addTransition(trx, {
-      id: `t-${crypto.randomUUID().slice(0, 8)}`,
+      id: `t-${crypto.randomUUID()}`,
       workflow_id: parentWorkflowId,
       from_state: "TRIAGE",
       to_state: "TRIAGED",

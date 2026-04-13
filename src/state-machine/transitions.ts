@@ -79,10 +79,10 @@ const subTransitions: TransitionDef[] = [
   {
     from: SubState.REVIEW,
     eventType: "label_added",
-    to: SubState.APPROVED,
+    to: SubState.IMPLEMENTING,
     guard: (_wf, event) => event.type === "label_added" && event.label === "plan-approved",
     effects: (wf) => [
-      ...labelSwap(wf.issueNumber, SubState.REVIEW, SubState.APPROVED),
+      ...labelSwap(wf.issueNumber, SubState.REVIEW, SubState.IMPLEMENTING),
       { type: "spawn_agent", role: "implementer", issueNumber: wf.issueNumber },
     ],
   },
@@ -93,15 +93,6 @@ const subTransitions: TransitionDef[] = [
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.REVIEW, SubState.PLANNING),
       { type: "post_comment", issueNumber: wf.issueNumber, body: "Feedback received. Revise the plan and re-publish." },
-    ],
-  },
-  {
-    from: SubState.APPROVED,
-    eventType: "spawn_agent",
-    to: SubState.IMPLEMENTING,
-    effects: (wf) => [
-      ...labelSwap(wf.issueNumber, SubState.APPROVED, SubState.IMPLEMENTING),
-      { type: "spawn_agent", role: "implementer", issueNumber: wf.issueNumber },
     ],
   },
   {

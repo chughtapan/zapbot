@@ -15,7 +15,7 @@ export interface SpawnContext {
 }
 
 function generateAgentId(): string {
-  return `agent-${crypto.randomUUID().slice(0, 8)}`;
+  return `agent-${crypto.randomUUID()}`;
 }
 
 /**

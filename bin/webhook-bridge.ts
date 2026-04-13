@@ -24,14 +24,23 @@ import { spawnAgent, type AgentRole } from "../src/agents/spawner.js";
 import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heartbeat.js";
 import { createLogger } from "../src/logger.js";
 
+// Prevent crashes from unhandled async errors
+process.on("unhandledRejection", (err) => {
+  console.error("[bridge] Unhandled rejection (non-fatal):", err instanceof Error ? err.message : err);
+});
+
 const log = createLogger("bridge");
 
 // ── Configuration ───────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.ZAPBOT_PORT || "3000", 10);
-const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
+const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
+if (!WEBHOOK_SECRET) {
+  console.error("[bridge] GITHUB_WEBHOOK_SECRET is required. Set it in .env or export it.");
+  process.exit(1);
+}
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
-const AO_URL = process.env.AO_URL || "http://localhost:3000";
+const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
 // ── HMAC verification ───────────────────────────────────────────────
 
@@ -39,7 +48,7 @@ async function verifySignature(
   payload: string,
   signature: string | null
 ): Promise<boolean> {
-  if (!WEBHOOK_SECRET || !signature) return !WEBHOOK_SECRET;
+  if (!signature) return false;
 
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -88,8 +97,7 @@ function mapWebhookToEvent(
     }
 
     if (label === "triage") {
-      // When triage label is added to a new issue, treat as creating a parent workflow
-      return null; // Handled by issue creation flow, not label transitions
+      return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
     }
 
     return null;
@@ -289,7 +297,7 @@ async function checkParentCompletion(parentWorkflowId: string, repo: string): Pr
       await withTransaction(db, async (trx) => {
         await updateWorkflowState(trx, parent.id, result.newState);
         await addTransition(trx, {
-          id: `t-${crypto.randomUUID().slice(0, 8)}`,
+          id: `t-${crypto.randomUUID()}`,
           workflow_id: parent.id,
           from_state: result.transition.from,
           to_state: result.transition.to,
@@ -327,7 +335,7 @@ async function abandonChildren(parentWorkflowId: string, repo: string): Promise<
       await withTransaction(db, async (trx) => {
         await updateWorkflowState(trx, sub.id, result.newState);
         await addTransition(trx, {
-          id: `t-${crypto.randomUUID().slice(0, 8)}`,
+          id: `t-${crypto.randomUUID()}`,
           workflow_id: sub.id,
           from_state: result.transition.from,
           to_state: result.transition.to,
@@ -375,7 +383,7 @@ async function handleWebhook(
       const issueNumber = payload.issue.number;
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${issueNumber}`;
+      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -404,7 +412,7 @@ async function handleWebhook(
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
       const body: string = payload.issue?.body || "";
-      const wfId = `wf-${issueNumber}`;
+      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
 
       // Extract parent reference from body
       const parentMatch = body.match(/Part of #(\d+)/i);
@@ -426,6 +434,31 @@ async function handleWebhook(
     }
   }
 
+  // Handle triage label on existing issue (creates parent workflow if none exists)
+  const mapped_pre = mapWebhookToEvent(eventType, payload);
+  if (mapped_pre && mapped_pre.event.type === "triage_label_added") {
+    const existingWf = await getWorkflowByIssue(db, mapped_pre.issueNumber, repo);
+    if (!existingWf) {
+      const author = payload.sender?.login || "";
+      const intent = payload.issue?.title || "";
+      const wfId = `wf-${repo.replace("/", "-")}-${mapped_pre.issueNumber}`;
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: mapped_pre.issueNumber,
+        repo,
+        state: "TRIAGE",
+        level: "parent",
+        parent_workflow_id: null,
+        author,
+        intent,
+      });
+      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped_pre.issueNumber });
+      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
+      return { status: 200, body: "parent workflow created" };
+    }
+    // If workflow exists, fall through to normal processing
+  }
+
   // Map webhook to state machine event
   const mapped = mapWebhookToEvent(eventType, payload);
   if (!mapped) {
@@ -436,14 +469,13 @@ async function handleWebhook(
   const { event, issueNumber } = mapped;
 
   // Load workflow
-  const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+  let wfRow = await getWorkflowByIssue(db, issueNumber, repo);
   if (!wfRow) {
     // Backward compat: plan-approved label on an issue with no workflow
-    // Create a sub workflow on the fly
     if (event.type === "label_added" && (event as any).label === "plan-approved") {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${issueNumber}`;
+      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -457,10 +489,11 @@ async function handleWebhook(
       });
 
       log.info(`Created ad-hoc workflow ${wfId} in REVIEW for backward compat`, { issueNumber });
-      // Now fall through to process the event
-      return handleWebhook(eventType, deliveryId + "-retry", payload);
+      wfRow = await getWorkflowByIssue(db, issueNumber, repo);
     }
+  }
 
+  if (!wfRow) {
     log.warn("No workflow found for issue", { issueNumber, event: event.type });
     return { status: 200, body: "no workflow" };
   }
@@ -495,7 +528,7 @@ async function handleWebhook(
     }
     await updateWorkflowState(trx, workflow.id, result.newState, stateUpdates);
     await addTransition(trx, {
-      id: `t-${crypto.randomUUID().slice(0, 8)}`,
+      id: `t-${crypto.randomUUID()}`,
       workflow_id: workflow.id,
       from_state: result.transition.from,
       to_state: result.transition.to,
@@ -528,7 +561,7 @@ async function handleWebhook(
         await withTransaction(db, async (trx) => {
           await updateWorkflowState(trx, workflow.id, readyResult.newState);
           await addTransition(trx, {
-            id: `t-${crypto.randomUUID().slice(0, 8)}`,
+            id: `t-${crypto.randomUUID()}`,
             workflow_id: workflow.id,
             from_state: "DRAFT_REVIEW",
             to_state: readyResult.newState,
@@ -592,17 +625,26 @@ async function main() {
         const eventType = req.headers.get("x-github-event") || "";
         const deliveryId = req.headers.get("x-github-delivery") || "";
 
-        if (WEBHOOK_SECRET && !(await verifySignature(body, signature))) {
+        if (!(await verifySignature(body, signature))) {
           return new Response("invalid signature", { status: 401 });
         }
 
-        const payload = JSON.parse(body);
+        let payload: any;
+        try {
+          payload = JSON.parse(body);
+        } catch {
+          return new Response("invalid JSON", { status: 400 });
+        }
         const result = await handleWebhook(eventType, deliveryId, payload);
         return new Response(result.body, { status: result.status });
       }
 
       // Workflow state API
       if (pathname.match(/^\/api\/workflows\/(\d+)$/) && req.method === "GET") {
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const repo = url.searchParams.get("repo") || "";
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
@@ -616,6 +658,10 @@ async function main() {
 
       // Workflow history API
       if (pathname.match(/^\/api\/workflows\/(\d+)\/history$/) && req.method === "GET") {
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
         const issueNumber = parseInt(pathname.split("/")[3], 10);
         const repo = url.searchParams.get("repo") || "";
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
@@ -629,7 +675,7 @@ async function main() {
       if (pathname.match(/^\/api\/agents\/[\w-]+\/heartbeat$/) && req.method === "POST") {
         const agentId = pathname.split("/")[3];
         const auth = req.headers.get("authorization");
-        if (WEBHOOK_SECRET && auth !== `Bearer ${WEBHOOK_SECRET}`) {
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
           return new Response("unauthorized", { status: 401 });
         }
         const session = await getAgentSession(db, agentId);
@@ -642,7 +688,7 @@ async function main() {
       if (pathname.match(/^\/api\/agents\/[\w-]+\/complete$/) && req.method === "POST") {
         const agentId = pathname.split("/")[3];
         const auth = req.headers.get("authorization");
-        if (WEBHOOK_SECRET && auth !== `Bearer ${WEBHOOK_SECRET}`) {
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
           return new Response("unauthorized", { status: 401 });
         }
         const session = await getAgentSession(db, agentId);
@@ -656,11 +702,58 @@ async function main() {
 
       // Plannotator callback
       if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "POST") {
+        // CORS headers for browser-based plannotator callbacks
+        const corsHeaders = {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        };
+        if (req.method === "OPTIONS") {
+          return new Response(null, { status: 204, headers: corsHeaders });
+        }
+
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
         const repo = body.repo || "";
 
         log.info(`Plannotator callback for #${issueNumber}`, { issueNumber });
+
+        // Handle plan_published event from zapbot-publish.sh
+        if (body.event === "plan_published") {
+          const wf = await getWorkflowByIssue(db, issueNumber, repo);
+          if (wf && wf.state === "PLANNING") {
+            const mapped: WorkflowEvent = { type: "plan_published", triggeredBy: body.author || "author" };
+            const workflow: Workflow = {
+              id: wf.id,
+              issueNumber: wf.issue_number,
+              state: wf.state,
+              level: wf.level as "parent" | "sub",
+              parentWorkflowId: wf.parent_workflow_id,
+              draftReviewCycles: wf.draft_review_cycles,
+            };
+            const result = apply(workflow, mapped);
+            if (result) {
+              await withTransaction(db, async (trx) => {
+                await updateWorkflowState(trx, wf.id, result.newState);
+                await addTransition(trx, {
+                  id: `t-${crypto.randomUUID()}`,
+                  workflow_id: wf.id,
+                  from_state: result.transition.from,
+                  to_state: result.transition.to,
+                  event_type: "plan_published",
+                  triggered_by: body.author || "author",
+                  metadata: null,
+                  github_delivery_id: null,
+                });
+              });
+              await executeSideEffects(result.sideEffects, repo);
+              log.info(`Plan published: ${wf.id} PLANNING → REVIEW`, { issueNumber });
+            }
+          }
+          const resp = new Response("ok", { status: 200 });
+          for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+          return resp;
+        }
 
         // Check if this has "revise" annotations
         const hasRevisions = body.annotations?.some((a: any) => a.type === "revise");
@@ -681,7 +774,7 @@ async function main() {
               await withTransaction(db, async (trx) => {
                 await updateWorkflowState(trx, wf.id, result.newState);
                 await addTransition(trx, {
-                  id: `t-${crypto.randomUUID().slice(0, 8)}`,
+                  id: `t-${crypto.randomUUID()}`,
                   workflow_id: wf.id,
                   from_state: result.transition.from,
                   to_state: result.transition.to,
@@ -696,7 +789,9 @@ async function main() {
           }
         }
 
-        return new Response("ok", { status: 200 });
+        const resp = new Response("ok", { status: 200 });
+        for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+        return resp;
       }
 
       // Token management (passthrough to AO)

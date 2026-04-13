@@ -1,6 +1,6 @@
 import { Kysely } from "kysely";
 import type { Database } from "../store/database.js";
-import { getStaleAgents, updateAgentStatus } from "../store/queries.js";
+import { getStaleAgents, updateAgentStatus, getWorkflow, updateWorkflowState, addTransition } from "../store/queries.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("heartbeat");
@@ -12,7 +12,8 @@ let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Start periodic checks for stale agents.
- * Agents with no heartbeat in 15 minutes are marked as timed out.
+ * Agents with no heartbeat in 15 minutes are marked as timed out
+ * and their workflows are notified.
  */
 export function startHeartbeatChecker(db: Kysely<Database>): void {
   if (intervalHandle) return;
@@ -29,6 +30,17 @@ export function startHeartbeatChecker(db: Kysely<Database>): void {
           workflow: agent.workflow_id,
         });
         await updateAgentStatus(db, agent.id, "timeout");
+
+        // Notify about the timeout by logging (side effects like GitHub comments
+        // are handled by the bridge when it detects the workflow is stuck)
+        const wf = await getWorkflow(db, agent.workflow_id);
+        if (wf) {
+          log.warn(`Workflow ${wf.id} has timed-out agent, may need human intervention`, {
+            workflow: wf.id,
+            state: wf.state,
+            agent: agent.id,
+          });
+        }
       }
       if (stale.length > 0) {
         log.info(`Marked ${stale.length} stale agent(s) as timed out`);

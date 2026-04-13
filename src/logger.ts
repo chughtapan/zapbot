@@ -54,10 +54,10 @@ class Logger {
     const stream = level === "error" ? process.stderr : process.stdout;
     stream.write(line + "\n");
 
-    // Append to log file
+    // Append to log file (async, non-blocking)
     try {
       ensureLogDir();
-      fs.appendFileSync(getLogFilePath(), line + "\n");
+      fs.appendFile(getLogFilePath(), line + "\n", () => {});
     } catch {
       // Don't fail if log writing fails
     }
