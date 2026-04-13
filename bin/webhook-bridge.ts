@@ -652,10 +652,55 @@ async function proxyToAO(req: Request, path: string): Promise<Response> {
 
 // ── HTTP server ─────────────────────────────────────────────────────
 
+// ── Startup recovery ───────────────────────────────────────────────
+
+async function recoverStuckWorkflows(): Promise<void> {
+  const active = await db.selectFrom("workflows")
+    .selectAll()
+    .where("state", "not in", ["COMPLETED", "ABANDONED", "DONE"])
+    .execute();
+
+  if (active.length === 0) {
+    log.info("Recovery: no active workflows found");
+    return;
+  }
+
+  log.info(`Recovery: scanning ${active.length} active workflow(s)`);
+
+  const agentStates = new Set(["TRIAGE", "IMPLEMENTING", "VERIFYING"]);
+
+  for (const wf of active) {
+    const agents = await getAgentSessions(db, wf.id);
+
+    if (agentStates.has(wf.state) && allAgentsDead(agents)) {
+      const role: AgentRole = wf.state === "TRIAGE" ? "triage"
+        : wf.state === "VERIFYING" ? "qe"
+        : "implementer";
+      log.warn(`Recovery: ${wf.id} stuck in ${wf.state} with all agents dead, re-spawning ${role}`, {
+        workflow: wf.id, state: wf.state, role,
+      });
+      await executeSideEffects([
+        { type: "spawn_agent", role, issueNumber: wf.issue_number },
+        { type: "post_comment", issueNumber: wf.issue_number,
+          body: `Zapbot: Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
+      ], wf.repo);
+    } else {
+      const zombies = agents.filter((a) => a.status === "running" || a.status === "spawning");
+      if (zombies.length > 0) {
+        log.info(`Recovery: ${wf.id} has ${zombies.length} agent(s) still marked running, will check on next heartbeat`, {
+          workflow: wf.id, state: wf.state,
+        });
+      }
+    }
+  }
+}
+
 async function main() {
   db = await initDatabase();
 
   startHeartbeatChecker(db, onAgentFailed);
+
+  await recoverStuckWorkflows();
 
   log.info(`Webhook bridge starting on port ${PORT}`);
 
