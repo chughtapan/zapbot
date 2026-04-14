@@ -27,6 +27,8 @@ import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
 import { createGitHubClient } from "../src/github/client.js";
 import { makeWorkflowId } from "../src/workflow-id.js";
+import { errorResponse } from "../src/http/error-response.js";
+import { verifySignature } from "../src/http/verify-signature.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -35,10 +37,6 @@ process.on("unhandledRejection", (err) => {
 
 const log = createLogger("bridge");
 const gh = createGitHubClient();
-
-function errorResponse(status: number, type: string, message: string): Response {
-  return Response.json({ error: { type, message, status } }, { status });
-}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -111,30 +109,6 @@ function pruneExpiredTokens(): void {
       callbackTokens.delete(key);
     }
   }
-}
-
-// ── HMAC verification ───────────────────────────────────────────────
-
-async function verifySignature(
-  payload: string,
-  signature: string | null,
-  secret: string
-): Promise<boolean> {
-  if (!signature) return false;
-
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  const expected = `sha256=${Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-  // Constant-time comparison to prevent timing attacks
-  if (expected.length !== signature.length) return false;
-  return Buffer.from(expected).equals(Buffer.from(signature));
 }
 
 // ── Database ────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import {
   getTransitionHistory,
   hasDeliveryBeenProcessed,
   withTransaction,
+  incrementRetryCount,
 } from "../src/store/queries.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -346,6 +347,197 @@ describe("transitions", () => {
 
     const notProcessed = await hasDeliveryBeenProcessed(db, "gh-delivery-999");
     expect(notProcessed).toBe(false);
+  });
+});
+
+describe("incrementRetryCount", () => {
+  beforeEach(async () => {
+    await upsertWorkflow(db, {
+      id: "wf-1",
+      issue_number: 1,
+      repo: "r",
+      state: "IMPLEMENTING",
+      level: "sub",
+      parent_workflow_id: null,
+      author: "a",
+      intent: "",
+    });
+  });
+
+  it("increments retry_count by 1", async () => {
+    await createAgentSession(db, {
+      id: "agent-retry",
+      workflow_id: "wf-1",
+      role: "implementer",
+      worktree_path: null,
+      pr_number: null,
+    });
+
+    const before = await getAgentSession(db, "agent-retry");
+    expect(before!.retry_count).toBe(0);
+
+    await incrementRetryCount(db, "agent-retry");
+    const after1 = await getAgentSession(db, "agent-retry");
+    expect(after1!.retry_count).toBe(1);
+
+    await incrementRetryCount(db, "agent-retry");
+    const after2 = await getAgentSession(db, "agent-retry");
+    expect(after2!.retry_count).toBe(2);
+  });
+});
+
+describe("updateAgentStatus terminal states", () => {
+  beforeEach(async () => {
+    await upsertWorkflow(db, {
+      id: "wf-1",
+      issue_number: 1,
+      repo: "r",
+      state: "IMPLEMENTING",
+      level: "sub",
+      parent_workflow_id: null,
+      author: "a",
+      intent: "",
+    });
+  });
+
+  it("sets completed_at when status is 'failed'", async () => {
+    await createAgentSession(db, {
+      id: "agent-fail",
+      workflow_id: "wf-1",
+      role: "implementer",
+      worktree_path: null,
+      pr_number: null,
+    });
+
+    const before = await getAgentSession(db, "agent-fail");
+    expect(before!.completed_at).toBeNull();
+
+    await updateAgentStatus(db, "agent-fail", "failed");
+    const after = await getAgentSession(db, "agent-fail");
+    expect(after!.status).toBe("failed");
+    expect(after!.completed_at).not.toBeNull();
+    expect(after!.completed_at).toBeGreaterThan(0);
+  });
+
+  it("sets completed_at when status is 'timeout'", async () => {
+    await createAgentSession(db, {
+      id: "agent-timeout",
+      workflow_id: "wf-1",
+      role: "implementer",
+      worktree_path: null,
+      pr_number: null,
+    });
+
+    const before = await getAgentSession(db, "agent-timeout");
+    expect(before!.completed_at).toBeNull();
+
+    await updateAgentStatus(db, "agent-timeout", "timeout");
+    const after = await getAgentSession(db, "agent-timeout");
+    expect(after!.status).toBe("timeout");
+    expect(after!.completed_at).not.toBeNull();
+    expect(after!.completed_at).toBeGreaterThan(0);
+  });
+});
+
+describe("getStaleAgents filtering", () => {
+  beforeEach(async () => {
+    await upsertWorkflow(db, {
+      id: "wf-1",
+      issue_number: 1,
+      repo: "r",
+      state: "IMPLEMENTING",
+      level: "sub",
+      parent_workflow_id: null,
+      author: "a",
+      intent: "",
+    });
+  });
+
+  it("returns only agents with old heartbeats in active statuses", async () => {
+    // Create three agents
+    await createAgentSession(db, {
+      id: "agent-old-running",
+      workflow_id: "wf-1",
+      role: "implementer",
+      worktree_path: null,
+      pr_number: null,
+    });
+    await createAgentSession(db, {
+      id: "agent-old-spawning",
+      workflow_id: "wf-1",
+      role: "qe",
+      worktree_path: null,
+      pr_number: null,
+    });
+    await createAgentSession(db, {
+      id: "agent-fresh",
+      workflow_id: "wf-1",
+      role: "implementer",
+      worktree_path: null,
+      pr_number: null,
+    });
+
+    const oldTime = Math.floor(Date.now() / 1000) - 1200; // 20 min ago
+    // Make two agents stale
+    await db
+      .updateTable("agent_sessions")
+      .set({ last_heartbeat: oldTime, status: "running" })
+      .where("id", "=", "agent-old-running")
+      .execute();
+    await db
+      .updateTable("agent_sessions")
+      .set({ last_heartbeat: oldTime, status: "spawning" })
+      .where("id", "=", "agent-old-spawning")
+      .execute();
+    // Keep agent-fresh with recent heartbeat and running status
+    await db
+      .updateTable("agent_sessions")
+      .set({ status: "running" })
+      .where("id", "=", "agent-fresh")
+      .execute();
+
+    const stale = await getStaleAgents(db);
+    expect(stale).toHaveLength(2);
+    const ids = stale.map((a) => a.id).sort();
+    expect(ids).toEqual(["agent-old-running", "agent-old-spawning"]);
+  });
+});
+
+describe("getWorkflowByIssue repo scoping", () => {
+  it("returns correct workflow when same issue number exists in different repos", async () => {
+    await upsertWorkflow(db, {
+      id: "wf-repo-a",
+      issue_number: 42,
+      repo: "owner/repo-a",
+      state: "TRIAGE",
+      level: "parent",
+      parent_workflow_id: null,
+      author: "alice",
+      intent: "fix in repo-a",
+    });
+    await upsertWorkflow(db, {
+      id: "wf-repo-b",
+      issue_number: 42,
+      repo: "owner/repo-b",
+      state: "PLANNING",
+      level: "parent",
+      parent_workflow_id: null,
+      author: "bob",
+      intent: "fix in repo-b",
+    });
+
+    const wfA = await getWorkflowByIssue(db, 42, "owner/repo-a");
+    expect(wfA).toBeDefined();
+    expect(wfA!.id).toBe("wf-repo-a");
+    expect(wfA!.intent).toBe("fix in repo-a");
+
+    const wfB = await getWorkflowByIssue(db, 42, "owner/repo-b");
+    expect(wfB).toBeDefined();
+    expect(wfB!.id).toBe("wf-repo-b");
+    expect(wfB!.intent).toBe("fix in repo-b");
+
+    const wfNone = await getWorkflowByIssue(db, 42, "owner/repo-c");
+    expect(wfNone).toBeUndefined();
   });
 });
 
