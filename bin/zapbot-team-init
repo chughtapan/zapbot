@@ -287,13 +287,26 @@ echo "  Events: Issues, Pull requests, Pull request reviews"
 # ── Done ─────────────────────────────────────────────────────────────
 
 echo ""
+
+# Reload bridge if running as systemd service
+if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
+  echo "Reloading bridge config (systemd service detected)..."
+  sudo systemctl reload zapbot-bridge 2>/dev/null && echo "  Bridge reloaded." || echo "  WARNING: Could not reload. Run: sudo systemctl reload zapbot-bridge"
+fi
+
+echo ""
 echo "================================================"
 echo "  Team init complete for $ZAPBOT_REPO!"
 echo "================================================"
 echo ""
 echo "Next steps:"
-echo "  1. Run ./start.sh to start the bridge"
-echo "  2. Create an issue with the 'triage' label to kick off a workflow"
+if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
+  echo "  1. Bridge is running (systemd). Config was auto-reloaded."
+  echo "  2. Create an issue with the 'triage' label to kick off a workflow"
+else
+  echo "  1. Run ./start.sh to start the bridge"
+  echo "  2. Create an issue with the 'triage' label to kick off a workflow"
+fi
 echo ""
 echo "To add another repo later:"
 echo "  cd ~/other-project"

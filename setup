@@ -115,6 +115,21 @@ if $SERVER_MODE; then
   else
     echo "  WARNING: ao not found after install"
   fi
+
+  # Generate systemd service file
+  echo ""
+  echo "--- Systemd service ---"
+  SERVICE_FILE="$ZAPBOT_DIR/zapbot-bridge.service"
+  sed "s|__PROJECT_DIR__|$(pwd)|g; s|__ZAPBOT_DIR__|$ZAPBOT_DIR|g" \
+    "$ZAPBOT_DIR/templates/zapbot-bridge.service" > "$SERVICE_FILE"
+  echo "  Generated: $SERVICE_FILE"
+  echo ""
+  echo "  To install as a systemd service (auto-start on boot, auto-restart on crash):"
+  echo "    sudo cp $SERVICE_FILE /etc/systemd/system/zapbot-bridge.service"
+  echo "    sudo systemctl enable --now zapbot-bridge"
+  echo ""
+  echo "  To reload config without restart (after changing .env or agent-orchestrator.yaml):"
+  echo "    sudo systemctl reload zapbot-bridge"
 fi
 
 # Claude Code only scans ~/.claude/skills/*/SKILL.md (one level deep).

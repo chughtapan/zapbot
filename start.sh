@@ -79,6 +79,19 @@ echo "Project: $PROJECT_DIR"
 echo "Repos:   ${ZAPBOT_REPOS[*]}"
 echo ""
 
+# Check if bridge is managed by systemd
+if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
+  echo "WARNING: Bridge is managed by systemd."
+  echo "  Use 'sudo systemctl restart zapbot-bridge' to restart."
+  echo "  Use 'sudo systemctl reload zapbot-bridge' to reload config."
+  echo "  Running start.sh alongside systemd will cause port conflicts."
+  echo ""
+  echo "  To stop the service and use start.sh instead:"
+  echo "    sudo systemctl stop zapbot-bridge"
+  echo ""
+  exit 1
+fi
+
 # Kill any existing zapbot processes
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 pkill -f "ngrok http" 2>/dev/null || true
