@@ -18,6 +18,7 @@ export interface SpawnContext {
   repo: string;
   role: AgentRole;
   workflowId: string;
+  projectName?: string;
 }
 
 interface SpawnOptions {
@@ -137,8 +138,14 @@ export async function spawnAgent(
   }
 
   try {
+    const spawnArgs = ["ao", "spawn"];
+    if (ctx.projectName) {
+      spawnArgs.push("--project", ctx.projectName);
+    }
+    spawnArgs.push(String(ctx.issueNumber));
+
     const proc = Bun.spawn(
-      ["ao", "spawn", String(ctx.issueNumber)],
+      spawnArgs,
       {
         env: {
           ...process.env,

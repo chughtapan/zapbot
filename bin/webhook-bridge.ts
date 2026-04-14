@@ -24,6 +24,7 @@ import { spawnAgent, cancelPendingRetries, type AgentRole, type AgentFailureHand
 import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heartbeat.js";
 import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
+import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -81,6 +82,9 @@ if (!WEBHOOK_SECRET) {
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
 const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
+// Multi-repo config: loaded from agent-orchestrator.yaml or ZAPBOT_REPO env var
+const { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
+
 // ── Plannotator callback token store ────────────────────────────────
 // Maps callback tokens to { issueNumber, repo, createdAt } so plannotator
 // callbacks resolve to the correct repo without relying on a global env var.
@@ -101,14 +105,15 @@ function pruneExpiredTokens(): void {
 
 async function verifySignature(
   payload: string,
-  signature: string | null
+  signature: string | null,
+  secret: string
 ): Promise<boolean> {
   if (!signature) return false;
 
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(WEBHOOK_SECRET),
+    encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -241,6 +246,7 @@ async function executeSideEffects(
   effects: SideEffect[],
   repo: string
 ): Promise<void> {
+  const projectName = repoMap.get(repo)?.projectName;
   for (const effect of effects) {
     try {
       switch (effect.type) {
@@ -252,6 +258,7 @@ async function executeSideEffects(
               repo,
               role: effect.role as AgentRole,
               workflowId: wf.id,
+              projectName,
             }, { onFailed: onAgentFailed });
           }
           break;
@@ -714,16 +721,28 @@ async function main() {
         const eventType = req.headers.get("x-github-event") || "";
         const deliveryId = req.headers.get("x-github-delivery") || "";
 
-        if (!(await verifySignature(body, signature))) {
-          return new Response("invalid signature", { status: 401 });
-        }
-
+        // Parse payload first to extract repo for per-repo secret lookup
         let payload: any;
         try {
           payload = JSON.parse(body);
         } catch {
           return new Response("invalid JSON", { status: 400 });
         }
+
+        const repoFullName: string = payload.repository?.full_name || "";
+
+        // Reject webhooks from unconfigured repos (only when config is loaded)
+        if (repoMap.size > 0 && repoFullName && !repoMap.has(repoFullName)) {
+          log.warn("Webhook from unconfigured repo, rejecting", { repo: repoFullName, deliveryId });
+          return new Response(`repo '${repoFullName}' is not configured`, { status: 403 });
+        }
+
+        // Per-repo HMAC verification with shared secret fallback
+        const secret = resolveWebhookSecret(repoFullName, repoMap, WEBHOOK_SECRET!);
+        if (!(await verifySignature(body, signature, secret))) {
+          return new Response("invalid signature", { status: 401 });
+        }
+
         const result = await handleWebhook(eventType, deliveryId, payload);
         return new Response(result.body, { status: result.status });
       }
