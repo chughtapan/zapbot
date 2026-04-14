@@ -20,7 +20,11 @@ export function startHeartbeatChecker(
   db: Kysely<Database>,
   onAgentFailed?: AgentFailureHandler
 ): void {
-  if (intervalHandle) return;
+  if (intervalHandle) {
+    log.warn("Heartbeat checker already running, stopping old one");
+    clearInterval(intervalHandle);
+    intervalHandle = null;
+  }
 
   log.info("Starting heartbeat checker", { intervalMs: CHECK_INTERVAL_MS, timeoutSec: TIMEOUT_SECONDS });
 

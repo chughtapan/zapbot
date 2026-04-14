@@ -174,8 +174,8 @@ function mapWebhookToEvent(
     if (isDraft) {
       return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
     } else {
-      // Non-draft PR: skip DRAFT_REVIEW (fallback per plan edge case)
-      return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
+      // Non-draft PR: skip DRAFT_REVIEW, go straight to VERIFYING
+      return { event: { type: "non_draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
     }
   }
 
@@ -308,7 +308,9 @@ async function runGh(args: string[]): Promise<string> {
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
     const stderr = await new Response(proc.stderr).text();
-    log.error(`gh command failed: gh ${args.join(" ")} → ${stderr}`);
+    const errMsg = `gh ${args.join(" ")} → ${stderr.trim()}`;
+    log.error(`gh command failed: ${errMsg}`);
+    throw new Error(errMsg);
   }
   return output.trim();
 }
@@ -316,13 +318,17 @@ async function runGh(args: string[]): Promise<string> {
 // ── Parent completion check ─────────────────────────────────────────
 
 async function checkParentCompletion(parentWorkflowId: string, repo: string): Promise<void> {
-  const parent = await getWorkflow(db, parentWorkflowId);
-  if (!parent || TERMINAL_STATES.has(parent.state)) return;
+  // Wrap entire check in a transaction to prevent two concurrent sub-issue
+  // completions from both triggering all_subs_done on the same parent
+  const result = await withTransaction(db, async (trx) => {
+    const parent = await getWorkflow(trx, parentWorkflowId);
+    if (!parent || TERMINAL_STATES.has(parent.state)) return null;
 
-  const subs = await getSubWorkflows(db, parentWorkflowId);
-  const allTerminal = subs.length > 0 && subs.every((s) => TERMINAL_STATES.has(s.state));
+    const subs = await getSubWorkflows(trx, parentWorkflowId);
+    const allTerminal = subs.length > 0 && subs.every((s) => TERMINAL_STATES.has(s.state));
 
-  if (allTerminal) {
+    if (!allTerminal) return null;
+
     const parentWf: Workflow = {
       id: parent.id,
       issueNumber: parent.issue_number,
@@ -331,26 +337,29 @@ async function checkParentCompletion(parentWorkflowId: string, repo: string): Pr
       parentWorkflowId: parent.parent_workflow_id,
       draftReviewCycles: parent.draft_review_cycles,
     };
-    const result = apply(parentWf, { type: "all_subs_done", triggeredBy: "system" });
-    if (result) {
-      await withTransaction(db, async (trx) => {
-        await updateWorkflowState(trx, parent.id, result.newState);
-        await addTransition(trx, {
-          id: `t-${crypto.randomUUID()}`,
-          workflow_id: parent.id,
-          from_state: result.transition.from,
-          to_state: result.transition.to,
-          event_type: result.transition.event,
-          triggered_by: result.transition.triggeredBy,
-          metadata: null,
-          github_delivery_id: null,
-        });
-      });
-      log.info(`Parent ${parent.id}: ${result.transition.from} → ${result.transition.to}`, {
-        trigger: "all_subs_done",
-      });
-      await executeSideEffects(result.sideEffects, repo);
-    }
+    const applyResult = apply(parentWf, { type: "all_subs_done", triggeredBy: "system" });
+    if (!applyResult) return null;
+
+    await updateWorkflowState(trx, parent.id, applyResult.newState);
+    await addTransition(trx, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: parent.id,
+      from_state: applyResult.transition.from,
+      to_state: applyResult.transition.to,
+      event_type: applyResult.transition.event,
+      triggered_by: applyResult.transition.triggeredBy,
+      metadata: null,
+      github_delivery_id: null,
+    });
+
+    return applyResult;
+  });
+
+  if (result) {
+    log.info(`Parent ${parentWorkflowId}: ${result.transition.from} → ${result.transition.to}`, {
+      trigger: "all_subs_done",
+    });
+    await executeSideEffects(result.sideEffects, repo);
   }
 }
 
@@ -455,7 +464,7 @@ async function handleWebhook(
 
       // Extract parent reference from body
       const parentMatch = body.match(/Part of #(\d+)/i);
-      const parentWorkflowId = parentMatch ? `wf-${parentMatch[1]}` : null;
+      const parentWorkflowId = parentMatch ? `wf-${repo.replace("/", "-")}-${parentMatch[1]}` : null;
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -594,39 +603,6 @@ async function handleWebhook(
     trigger: event.type,
     by: event.triggeredBy,
   });
-
-  // Handle non-draft PR fallback: if implementer opened a non-draft PR,
-  // also fire pr_ready_for_review to skip DRAFT_REVIEW
-  if (event.type === "draft_pr_opened" && result.newState === "DRAFT_REVIEW") {
-    const prPayload = payload.pull_request;
-    if (prPayload && !prPayload.draft) {
-      log.info("Non-draft PR detected, auto-transitioning to VERIFYING", { issueNumber });
-      const readyEvent: WorkflowEvent = {
-        type: "pr_ready_for_review",
-        triggeredBy: event.triggeredBy,
-        prNumber: (event as any).prNumber,
-      };
-      const updatedWf: Workflow = { ...workflow, state: "DRAFT_REVIEW" };
-      const readyResult = apply(updatedWf, readyEvent);
-      if (readyResult) {
-        await withTransaction(db, async (trx) => {
-          await updateWorkflowState(trx, workflow.id, readyResult.newState);
-          await addTransition(trx, {
-            id: `t-${crypto.randomUUID()}`,
-            workflow_id: workflow.id,
-            from_state: "DRAFT_REVIEW",
-            to_state: readyResult.newState,
-            event_type: "pr_ready_for_review",
-            triggered_by: "system",
-            metadata: JSON.stringify({ reason: "non-draft PR fallback" }),
-            github_delivery_id: null,
-          });
-        });
-        await executeSideEffects(readyResult.sideEffects, repo);
-        return { status: 200, body: `${result.transition.from} → ${readyResult.newState} (non-draft fallback)` };
-      }
-    }
-  }
 
   // Execute side effects
   await executeSideEffects(result.sideEffects, repo);

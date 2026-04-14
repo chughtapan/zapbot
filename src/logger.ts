@@ -57,9 +57,11 @@ class Logger {
     // Append to log file (async, non-blocking)
     try {
       ensureLogDir();
-      fs.appendFile(getLogFilePath(), line + "\n", () => {});
-    } catch {
-      // Don't fail if log writing fails
+      fs.appendFile(getLogFilePath(), line + "\n", (err) => {
+        if (err) process.stderr.write(`[log write failed: ${err.message}]\n`);
+      });
+    } catch (err: any) {
+      process.stderr.write(`[log init failed: ${err.message}]\n`);
     }
   }
 

@@ -115,6 +115,16 @@ const subTransitions: TransitionDef[] = [
     ],
   },
   {
+    from: SubState.IMPLEMENTING,
+    eventType: "non_draft_pr_opened",
+    to: SubState.VERIFYING,
+    effects: (wf) => [
+      ...labelSwap(wf.issueNumber, SubState.IMPLEMENTING, SubState.VERIFYING),
+      { type: "spawn_agent", role: "qe", issueNumber: wf.issueNumber },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "Non-draft PR opened. Spawning QE agent to verify." },
+    ],
+  },
+  {
     from: SubState.DRAFT_REVIEW,
     eventType: "changes_requested",
     to: SubState.DRAFT_REVIEW,

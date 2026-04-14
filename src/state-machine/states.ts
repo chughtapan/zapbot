@@ -8,7 +8,7 @@ export enum ParentState {
 export enum SubState {
   PLANNING = "PLANNING",
   REVIEW = "REVIEW",
-  APPROVED = "APPROVED",
+  APPROVED = "APPROVED", // Transient: used for label mapping only, transitions skip to IMPLEMENTING
   IMPLEMENTING = "IMPLEMENTING",
   DRAFT_REVIEW = "DRAFT_REVIEW",
   VERIFYING = "VERIFYING",

@@ -35,31 +35,29 @@ export function cancelPendingRetries(): void {
 
 async function findSessionForIssue(issueNumber: number): Promise<string | null> {
   const branch = `feat/issue-${issueNumber}`;
-  try {
-    const proc = Bun.spawn(["ao", "session", "ls"], { stdout: "pipe", stderr: "pipe" });
-    const stdout = await new Response(proc.stdout).text();
-    await proc.exited;
-    // Parse ao session ls output: session names are in the first column
-    for (const line of stdout.split("\n")) {
-      if (line.includes(branch)) {
-        const match = line.match(/^\s*(zap-\d+)/);
-        if (match) return match[1];
-      }
-    }
-  } catch {
-    // Fallback: check ao status output
+
+  // Try ao session ls first, fall back to ao status
+  for (const cmd of [["ao", "session", "ls"], ["ao", "status"]]) {
     try {
-      const proc = Bun.spawn(["ao", "status"], { stdout: "pipe", stderr: "pipe" });
+      const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
       const stdout = await new Response(proc.stdout).text();
-      await proc.exited;
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) {
+        log.warn(`${cmd.join(" ")} exited with code ${exitCode}`, { branch });
+        continue;
+      }
       for (const line of stdout.split("\n")) {
         if (line.includes(branch)) {
           const match = line.match(/(zap-\d+)/);
           if (match) return match[1];
         }
       }
-    } catch {}
+    } catch (err) {
+      log.warn(`${cmd.join(" ")} threw: ${err}`, { branch });
+    }
   }
+
+  log.warn(`Could not find AO session for ${branch}`, { issueNumber });
   return null;
 }
 
@@ -161,14 +159,20 @@ export async function spawnAgent(
         const sessionName = await findSessionForIssue(ctx.issueNumber);
         if (sessionName) {
           const prompt = buildPrompt(ctx);
-          const sendTimer = setTimeout(async () => {
+          const sendTimer = setTimeout(() => {
             pendingTimers.delete(sendTimer);
-            log.info(`Re-delivering prompt to ${sessionName}`, { agentId, session: sessionName });
-            const send = Bun.spawn(["ao", "send", sessionName, prompt], { stdout: "pipe", stderr: "pipe" });
-            const sendCode = await send.exited;
-            if (sendCode !== 0) {
-              log.warn(`ao send to ${sessionName} failed (code ${sendCode})`, { agentId });
-            }
+            (async () => {
+              try {
+                log.info(`Re-delivering prompt to ${sessionName}`, { agentId, session: sessionName });
+                const send = Bun.spawn(["ao", "send", sessionName, prompt], { stdout: "pipe", stderr: "pipe" });
+                const sendCode = await send.exited;
+                if (sendCode !== 0) {
+                  log.warn(`ao send to ${sessionName} failed (code ${sendCode})`, { agentId });
+                }
+              } catch (err) {
+                log.error(`Prompt re-delivery failed for ${sessionName}: ${err}`, { agentId });
+              }
+            })();
           }, 15000); // 15s delay for Claude Code to finish loading
           pendingTimers.add(sendTimer);
         }

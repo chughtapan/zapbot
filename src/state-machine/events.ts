@@ -6,6 +6,7 @@ export type WorkflowEvent =
   | { type: "annotation_feedback"; triggeredBy: string }
   | { type: "spawn_agent"; triggeredBy: string }
   | { type: "draft_pr_opened"; triggeredBy: string; prNumber: number }
+  | { type: "non_draft_pr_opened"; triggeredBy: string; prNumber: number }
   | { type: "changes_requested"; triggeredBy: string }
   | { type: "pr_ready_for_review"; triggeredBy: string; prNumber: number }
   | { type: "verified_and_shipped"; triggeredBy: string }
