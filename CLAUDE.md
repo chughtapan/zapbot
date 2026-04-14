@@ -9,7 +9,7 @@ When the user's request matches an available skill, ALWAYS invoke it using the S
 tool as your FIRST action.
 
 Key routing rules:
-- "zapbot", "get started with zapbot", "configure zapbot" → invoke zapbot (meta-skill: onboarding + routing)
+- "zapbot", "get started with zapbot", "configure zapbot", "zap" → invoke zap (meta-skill: onboarding + routing)
 - "publish plan", "share plan", "sync plan", "create issue from plan" → invoke zapbot-publish
 - "check status", "workflow status", "what happened to issue" → invoke zapbot-status
 

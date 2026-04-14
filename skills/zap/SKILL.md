@@ -1,5 +1,5 @@
 ---
-name: zapbot
+name: zap
 description: Zapbot plan-to-code workflow. Routes to publish, status, and help. Onboards new teammates automatically.
 allowed-tools:
   - Bash
