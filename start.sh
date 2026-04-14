@@ -107,6 +107,9 @@ for i in $(seq 1 10); do
 done
 echo "Bridge ready on port ${BRIDGE_PORT}"
 
+# Track webhook IDs for cleanup
+WEBHOOK_IDS=()
+
 # Ngrok (optional)
 if [ "$USE_NGROK" = true ]; then
   echo "Starting ngrok tunnel..."
@@ -136,13 +139,15 @@ if [ "$USE_NGROK" = true ]; then
       gh api "repos/${repo}/hooks/${EXISTING_HOOK}" --method PATCH \
         -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
         -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" >/dev/null
+      WEBHOOK_IDS+=("${repo}:${EXISTING_HOOK}")
       echo "  Updated existing webhook for ${repo}"
     else
-      gh api "repos/${repo}/hooks" --method POST \
+      HOOK_ID=$(gh api "repos/${repo}/hooks" --method POST \
         -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
         -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" \
         -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
-        -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" >/dev/null
+        -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" --jq '.id')
+      WEBHOOK_IDS+=("${repo}:${HOOK_ID}")
       echo "  Created webhook for ${repo}"
     fi
   done
@@ -160,10 +165,16 @@ else
   echo "ngrok disabled. Bridge URL: $NGROK_URL"
 fi
 
-# Cleanup on exit
+# Cleanup on exit: deactivate webhooks and stop processes
 cleanup() {
   echo ""
   echo "Shutting down..."
+  for entry in "${WEBHOOK_IDS[@]}"; do
+    repo="${entry%%:*}"
+    hook_id="${entry##*:}"
+    echo "  Deactivating webhook #${hook_id} on ${repo}..."
+    gh api "repos/${repo}/hooks/${hook_id}" --method PATCH -F "active=false" >/dev/null 2>&1 || true
+  done
   [ -n "${NGROK_PID:-}" ] && kill $NGROK_PID 2>/dev/null || true
   kill $BRIDGE_PID $AO_PID 2>/dev/null || true
   echo "All processes stopped."
