@@ -33,6 +33,40 @@ export function cancelPendingRetries(): void {
   pendingTimers.clear();
 }
 
+async function findSessionForIssue(issueNumber: number): Promise<string | null> {
+  const branch = `feat/issue-${issueNumber}`;
+  try {
+    const proc = Bun.spawn(["ao", "session", "ls"], { stdout: "pipe", stderr: "pipe" });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    // Parse ao session ls output: session names are in the first column
+    for (const line of stdout.split("\n")) {
+      if (line.includes(branch)) {
+        const match = line.match(/^\s*(zap-\d+)/);
+        if (match) return match[1];
+      }
+    }
+  } catch {
+    // Fallback: check ao status output
+    try {
+      const proc = Bun.spawn(["ao", "status"], { stdout: "pipe", stderr: "pipe" });
+      const stdout = await new Response(proc.stdout).text();
+      await proc.exited;
+      for (const line of stdout.split("\n")) {
+        if (line.includes(branch)) {
+          const match = line.match(/(zap-\d+)/);
+          if (match) return match[1];
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function buildPrompt(ctx: SpawnContext): string {
+  return `You are a ${ctx.role} agent. Read GitHub issue #${ctx.issueNumber} in repo ${ctx.repo} and follow the instructions in .agent-rules.md. Start working now.`;
+}
+
 function generateAgentId(): string {
   return `agent-${crypto.randomUUID()}`;
 }
@@ -121,6 +155,23 @@ export async function spawnAgent(
     proc.exited.then(async (code) => {
       if (code === 0) {
         log.info(`Agent ${agentId} spawn process exited successfully`, { agentId });
+
+        // Re-deliver prompt after a delay to work around AO prompt delivery race.
+        // AO pastes the prompt before Claude Code finishes loading, so it gets swallowed.
+        const sessionName = await findSessionForIssue(ctx.issueNumber);
+        if (sessionName) {
+          const prompt = buildPrompt(ctx);
+          const sendTimer = setTimeout(async () => {
+            pendingTimers.delete(sendTimer);
+            log.info(`Re-delivering prompt to ${sessionName}`, { agentId, session: sessionName });
+            const send = Bun.spawn(["ao", "send", sessionName, prompt], { stdout: "pipe", stderr: "pipe" });
+            const sendCode = await send.exited;
+            if (sendCode !== 0) {
+              log.warn(`ao send to ${sessionName} failed (code ${sendCode})`, { agentId });
+            }
+          }, 15000); // 15s delay for Claude Code to finish loading
+          pendingTimers.add(sendTimer);
+        }
         return;
       }
 
