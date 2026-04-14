@@ -114,7 +114,17 @@ SQLite database at `~/.zapbot/state.db` managed via Kysely migrations.
 | POST | `/api/agents/:agentId/heartbeat` | Agent liveness ping |
 | POST | `/api/agents/:agentId/complete` | Agent completion signal |
 | POST | `/api/callbacks/plannotator/:issueNumber` | Plannotator callback |
-| POST | `/api/tokens` | OAuth token exchange |
+| POST | `/api/tokens` | Plannotator callback token registration |
+
+## Multi-Repo Routing
+
+The bridge supports multiple repos from a single instance via `src/config/loader.ts`:
+
+1. **Config loading:** Parses `agent-orchestrator.yaml` to build a `RepoMap` (repo full_name → project config). Falls back to `ZAPBOT_REPO` env var for single-repo backward compat.
+2. **Per-repo HMAC:** Each project can specify a `secretEnvVar` in its SCM config. `resolveWebhookSecret()` checks the per-repo env var first, falls back to shared `GITHUB_WEBHOOK_SECRET`.
+3. **Repo rejection:** Webhooks from repos not in the `RepoMap` are rejected with 403 (only when a config is loaded).
+4. **Project-scoped spawning:** `executeSideEffects()` resolves the project name from the repo map and passes `--project <name>` to `ao spawn`.
+5. **Callback tokens:** Plannotator tokens are stored locally with repo context (`callbackTokens` Map with 24h TTL). Callbacks resolve repo via: token store → request body → `ZAPBOT_REPO` env var.
 
 ## Edge Cases
 
@@ -124,3 +134,5 @@ SQLite database at `~/.zapbot/state.db` managed via Kysely migrations.
 - **Race conditions:** `BEGIN IMMEDIATE` SQLite transactions serialize per-workflow writes
 - **Non-draft PR fallback:** Non-draft PR from implementer skips DRAFT_REVIEW
 - **Parent completion:** Triggers when all sub-issues reach terminal state (DONE or ABANDONED)
+- **Startup recovery:** Bridge scans active workflows on startup, re-spawns agents for stuck workflows (all agents dead)
+- **Webhook cleanup:** `start.sh` tracks webhook IDs and deactivates them on shutdown to avoid stale deliveries

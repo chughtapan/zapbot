@@ -31,6 +31,7 @@ DRAFT_REVIEW → VERIFYING → DONE. See ARCHITECTURE.md for details.
 - `src/store/` — Kysely + SQLite data layer
 - `src/state-machine/` — Pure-function state machine engine
 - `src/agents/` — Agent spawning, heartbeat, role-specific logic
+- `src/config/` — Config loader for agent-orchestrator.yaml, repo map, per-repo webhook secrets
 - `src/logger.ts` — Structured logging
 - `bin/` — CLI entry points (webhook-bridge, team-init, publish)
 - `templates/` — Config templates for agent-orchestrator and agent rules
