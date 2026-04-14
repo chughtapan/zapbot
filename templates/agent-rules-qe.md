@@ -17,3 +17,10 @@ You are a QE (quality engineering) agent. Your job is to verify code quality and
 ## Commit style:
 - Use conventional commits (feat:, fix:, chore:)
 - Reference the issue number in the commit message: "feat: ... (closes #N)"
+
+## Use gstack skills
+
+During verification:
+1. Run /review to check code quality and structural issues
+2. If verification fails and root cause is unclear, use /investigate
+3. Do NOT guess at fixes — find the root cause first

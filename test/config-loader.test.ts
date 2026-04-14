@@ -32,7 +32,7 @@ projects:
       plugin: github
       webhook:
         path: /api/webhooks/github
-        secretEnvVar: GITHUB_WEBHOOK_SECRET
+        secretEnvVar: ZAPBOT_API_KEY
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event
 `;
@@ -61,7 +61,7 @@ projects:
       plugin: github
       webhook:
         path: /api/webhooks/github
-        secretEnvVar: GITHUB_WEBHOOK_SECRET
+        secretEnvVar: ZAPBOT_API_KEY
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event
   frontend:
@@ -74,7 +74,7 @@ projects:
       plugin: github
       webhook:
         path: /api/webhooks/github
-        secretEnvVar: GITHUB_WEBHOOK_SECRET_FRONTEND
+        secretEnvVar: ZAPBOT_API_KEY_FRONTEND
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event
 `;
@@ -140,7 +140,7 @@ describe("resolveWebhookSecret", () => {
   }
 
   afterEach(() => {
-    delete process.env.GITHUB_WEBHOOK_SECRET_FRONTEND;
+    delete process.env.ZAPBOT_API_KEY_FRONTEND;
   });
 
   it("returns shared secret for unknown repo", () => {
@@ -148,24 +148,24 @@ describe("resolveWebhookSecret", () => {
     expect(resolveWebhookSecret("unknown/repo", map, sharedSecret)).toBe(sharedSecret);
   });
 
-  it("returns shared secret when repo uses GITHUB_WEBHOOK_SECRET", () => {
+  it("returns shared secret when repo uses ZAPBOT_API_KEY", () => {
     const map = buildRepoMap([
-      { repo: "owner/repo", projectName: "repo", secretEnvVar: "GITHUB_WEBHOOK_SECRET" },
+      { repo: "owner/repo", projectName: "repo", secretEnvVar: "ZAPBOT_API_KEY" },
     ]);
     expect(resolveWebhookSecret("owner/repo", map, sharedSecret)).toBe(sharedSecret);
   });
 
   it("returns per-repo secret when configured and env var is set", () => {
-    process.env.GITHUB_WEBHOOK_SECRET_FRONTEND = "frontend-secret-456";
+    process.env.ZAPBOT_API_KEY_FRONTEND = "frontend-secret-456";
     const map = buildRepoMap([
-      { repo: "owner/frontend", projectName: "frontend", secretEnvVar: "GITHUB_WEBHOOK_SECRET_FRONTEND" },
+      { repo: "owner/frontend", projectName: "frontend", secretEnvVar: "ZAPBOT_API_KEY_FRONTEND" },
     ]);
     expect(resolveWebhookSecret("owner/frontend", map, sharedSecret)).toBe("frontend-secret-456");
   });
 
   it("falls back to shared secret when per-repo env var is not set", () => {
     const map = buildRepoMap([
-      { repo: "owner/frontend", projectName: "frontend", secretEnvVar: "GITHUB_WEBHOOK_SECRET_FRONTEND" },
+      { repo: "owner/frontend", projectName: "frontend", secretEnvVar: "ZAPBOT_API_KEY_FRONTEND" },
     ]);
     expect(resolveWebhookSecret("owner/frontend", map, sharedSecret)).toBe(sharedSecret);
   });

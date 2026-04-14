@@ -123,7 +123,7 @@ All error responses use structured JSON via `src/http/error-response.ts` (`{ err
 The bridge supports multiple repos from a single instance via `src/config/loader.ts`:
 
 1. **Config loading:** Parses `agent-orchestrator.yaml` to build a `RepoMap` (repo full_name → project config). Falls back to `ZAPBOT_REPO` env var for single-repo backward compat.
-2. **Per-repo HMAC:** Each project can specify a `secretEnvVar` in its SCM config. `resolveWebhookSecret()` checks the per-repo env var first, falls back to shared `GITHUB_WEBHOOK_SECRET`.
+2. **Per-repo HMAC:** Each project can specify a `secretEnvVar` in its SCM config. `resolveWebhookSecret()` checks the per-repo env var first, falls back to shared `ZAPBOT_API_KEY`.
 3. **Repo rejection:** Webhooks from repos not in the `RepoMap` are rejected with 403 (only when a config is loaded).
 4. **Project-scoped spawning:** `executeSideEffects()` resolves the project name from the repo map and passes `--project <name>` to `ao spawn`.
 5. **Callback tokens:** Plannotator tokens are stored locally with repo context (`callbackTokens` Map with 24h TTL). Tokens are scoped to the specific issue number, so a token for issue #5 cannot be replayed against issue #10. Callbacks resolve repo via: token store → request body → `ZAPBOT_REPO` env var.
