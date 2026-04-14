@@ -25,6 +25,7 @@ import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heart
 import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
+import { reloadConfigFromDisk } from "../src/config/reload.js";
 import { createGitHubClient } from "../src/github/client.js";
 import { makeWorkflowId } from "../src/workflow-id.js";
 import { errorResponse } from "../src/http/error-response.js";
@@ -97,34 +98,11 @@ let { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
 
 // ── SIGHUP config reload ───────────────────────────────────────────
 function reloadConfig(): void {
-  try {
-    // Re-source .env by re-reading it (Bun doesn't have dotenv, so re-read manually)
-    const envPath = process.env.ZAPBOT_CONFIG?.replace(/agent-orchestrator\.yaml$/, ".env");
-    if (envPath) {
-      const envContent = require("fs").readFileSync(envPath, "utf-8");
-      for (const line of envContent.split("\n")) {
-        if (line.startsWith("#") || !line.includes("=")) continue;
-        const [key, ...rest] = line.split("=");
-        process.env[key.trim()] = rest.join("=").trim();
-      }
-    }
-
-    const newConfig = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
-    const newSecret = process.env.ZAPBOT_API_KEY;
-
-    // Validate before applying
-    if (!newSecret) {
-      log.error("Config reload failed: ZAPBOT_API_KEY is empty after re-read. Keeping old config.");
-      return;
-    }
-
-    const secretRotated = newSecret !== WEBHOOK_SECRET;
-    repoMap = newConfig.repoMap;
-    WEBHOOK_SECRET = newSecret;
-
-    log.info(`Config reloaded (${repoMap.size} repos, secret rotated: ${secretRotated})`);
-  } catch (err) {
-    log.error(`Config reload failed: ${err}. Keeping old config.`);
+  const envPath = process.env.ZAPBOT_CONFIG?.replace(/agent-orchestrator\.yaml$/, ".env");
+  const result = reloadConfigFromDisk(envPath, process.env.ZAPBOT_CONFIG || undefined, WEBHOOK_SECRET);
+  if (result) {
+    repoMap = result.config.repoMap;
+    WEBHOOK_SECRET = result.config.webhookSecret;
   }
 }
 
