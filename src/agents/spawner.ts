@@ -1,7 +1,11 @@
 import { Kysely } from "kysely";
+import * as fs from "fs";
+import * as path from "path";
 import type { Database } from "../store/database.js";
 import { createAgentSession, updateAgentStatus, getAgentSession, incrementRetryCount } from "../store/queries.js";
 import { createLogger } from "../logger.js";
+
+const ZAPBOT_DIR = path.resolve(import.meta.dir, "../..");
 
 const log = createLogger("agents");
 
@@ -79,6 +83,14 @@ export async function spawnAgent(
   });
 
   await cleanStaleWorktree(ctx.issueNumber);
+
+  // Copy role-specific agent rules so AO gives the agent the right instructions
+  const rulesFile = path.join(ZAPBOT_DIR, `templates/agent-rules-${ctx.role}.md`);
+  const projectRules = path.join(process.cwd(), ".agent-rules.md");
+  if (fs.existsSync(rulesFile)) {
+    fs.copyFileSync(rulesFile, projectRules);
+    log.info(`Wrote ${ctx.role} agent rules to ${projectRules}`, { role: ctx.role });
+  }
 
   if (!isRetry) {
     await createAgentSession(db, {
