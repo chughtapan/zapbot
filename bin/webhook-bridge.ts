@@ -706,9 +706,20 @@ async function main() {
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
 
-        // Resolve repo: token store first, then request body, then env var fallback
-        const stored = body.token ? callbackTokens.get(body.token) : undefined;
-        const repo = stored?.repo || body.repo || process.env.ZAPBOT_REPO || "";
+        // Require valid callback token for authentication
+        if (!body.token || typeof body.token !== "string") {
+          const resp = errorResponse(401, "authentication_error", "Missing callback token.");
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
+          return resp;
+        }
+        const stored = callbackTokens.get(body.token);
+        if (!stored) {
+          const resp = errorResponse(401, "authentication_error", "Invalid or expired callback token.");
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
+          return resp;
+        }
+        // Repo comes from the trusted token store only, never from request body
+        const repo = stored.repo;
 
         log.info(`Plannotator callback for #${issueNumber}`, { issueNumber, repo });
 

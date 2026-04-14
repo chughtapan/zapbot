@@ -163,7 +163,8 @@ if [ "$USE_NGROK" = true ]; then
           -H "Authorization: Bearer $ZAPBOT_GITHUB_TOKEN" \
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${repo}/hooks/${EXISTING_HOOK}" \
-          -d "{\"config\":{\"url\":\"${WEBHOOK_URL}\",\"content_type\":\"json\",\"secret\":\"${REPO_SECRET}\"}}" \
+          -d "$(jq -n --arg url "$WEBHOOK_URL" --arg secret "$REPO_SECRET" \
+            '{config:{url:$url,content_type:"json",secret:$secret}}')" \
           >/dev/null
       else
         gh api "repos/${repo}/hooks/${EXISTING_HOOK}" --method PATCH \
@@ -178,7 +179,8 @@ if [ "$USE_NGROK" = true ]; then
           -H "Authorization: Bearer $ZAPBOT_GITHUB_TOKEN" \
           -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${repo}/hooks" \
-          -d "{\"config\":{\"url\":\"${WEBHOOK_URL}\",\"content_type\":\"json\",\"secret\":\"${REPO_SECRET}\"},\"events\":[\"issues\",\"pull_request\",\"pull_request_review\",\"check_run\",\"issue_comment\"],\"active\":true}" \
+          -d "$(jq -n --arg url "$WEBHOOK_URL" --arg secret "$REPO_SECRET" \
+            '{config:{url:$url,content_type:"json",secret:$secret},events:["issues","pull_request","pull_request_review","check_run","issue_comment"],active:true}')" \
           | jq -r '.id')
       else
         HOOK_ID=$(gh api "repos/${repo}/hooks" --method POST \
