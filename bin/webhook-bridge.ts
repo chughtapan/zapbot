@@ -26,6 +26,7 @@ import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
 import { createGitHubClient } from "../src/github/client.js";
+import { makeWorkflowId } from "../src/workflow-id.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -82,6 +83,11 @@ if (!WEBHOOK_SECRET) {
   process.exit(1);
 }
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+} as const;
 const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
 // Multi-repo config: loaded from agent-orchestrator.yaml or ZAPBOT_REPO env var
@@ -131,8 +137,6 @@ async function verifySignature(
 
 let db: Kysely<Database>;
 
-// ── Webhook event mapping ───────────────────────────────────────────
-// Extracted to src/webhook/mapper.ts for testability
 import { mapWebhookToEvent } from "../src/webhook/mapper.js";
 
 // ── Side effect execution ───────────────────────────────────────────
@@ -336,7 +340,7 @@ async function handleWebhook(
       const issueNumber = payload.issue.number;
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -365,11 +369,11 @@ async function handleWebhook(
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
       const body: string = payload.issue?.body || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
 
       // Extract parent reference from body
       const parentMatch = body.match(/Part of #(\d+)/i);
-      const parentWorkflowId = parentMatch ? `wf-${repo.replace("/", "-")}-${parentMatch[1]}` : null;
+      const parentWorkflowId = parentMatch ? makeWorkflowId(repo, parseInt(parentMatch[1], 10)) : null;
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -387,17 +391,19 @@ async function handleWebhook(
     }
   }
 
+  // Map webhook to state machine event
+  const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
+
   // Handle triage label on existing issue (creates parent workflow if none exists)
-  const mapped_pre = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
-  if (mapped_pre && mapped_pre.event.type === "triage_label_added") {
-    const existingWf = await getWorkflowByIssue(db, mapped_pre.issueNumber, repo);
+  if (mapped && mapped.event.type === "triage_label_added") {
+    const existingWf = await getWorkflowByIssue(db, mapped.issueNumber, repo);
     if (!existingWf) {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${mapped_pre.issueNumber}`;
+      const wfId = makeWorkflowId(repo, mapped.issueNumber);
       await upsertWorkflow(db, {
         id: wfId,
-        issue_number: mapped_pre.issueNumber,
+        issue_number: mapped.issueNumber,
         repo,
         state: "TRIAGE",
         level: "parent",
@@ -405,27 +411,22 @@ async function handleWebhook(
         author,
         intent,
       });
-      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped_pre.issueNumber });
-      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
+      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped.issueNumber });
+      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
       return { status: 200, body: "parent workflow created" };
     }
     if (existingWf && existingWf.state === "TRIAGE") {
       const agents = await getAgentSessions(db, existingWf.id);
       if (allAgentsDead(agents)) {
-        // All agents failed, re-spawn
-        log.info(`Re-spawning triage agent for stuck workflow ${existingWf.id}`, { issueNumber: mapped_pre.issueNumber });
-        await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
+        log.info(`Re-spawning triage agent for stuck workflow ${existingWf.id}`, { issueNumber: mapped.issueNumber });
+        await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
         return { status: 200, body: "triage agent re-spawned" };
       }
-      // Active agent exists, suppress the duplicate label event silently
-      log.debug("Triage workflow already active, ignoring duplicate label event", { issueNumber: mapped_pre.issueNumber });
+      log.debug("Triage workflow already active, ignoring duplicate label event", { issueNumber: mapped.issueNumber });
       return { status: 200, body: "triage already active" };
     }
-    // Workflow exists but not in TRIAGE, fall through to normal processing
   }
 
-  // Map webhook to state machine event
-  const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
   if (!mapped) {
     log.debug("No state machine event for this webhook", { eventType, action: payload.action });
     return { status: 200, body: "no-op" };
@@ -440,7 +441,7 @@ async function handleWebhook(
     if (event.type === "label_added" && (event as any).label === "plan-approved") {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -692,24 +693,11 @@ async function main() {
 
       // CORS preflight for plannotator callbacks
       if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-          },
-        });
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
       }
 
       // Plannotator callback
       if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "POST") {
-        // CORS headers for browser-based plannotator callbacks
-        const corsHeaders = {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        };
 
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
@@ -753,7 +741,7 @@ async function main() {
             }
           }
           const resp = new Response("ok", { status: 200 });
-          for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
           return resp;
         }
 
@@ -792,7 +780,7 @@ async function main() {
         }
 
         const resp = new Response("ok", { status: 200 });
-        for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+        for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
         return resp;
       }
 

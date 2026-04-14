@@ -11,4 +11,5 @@ export type WorkflowEvent =
   | { type: "pr_ready_for_review"; triggeredBy: string; prNumber: number }
   | { type: "verified_and_shipped"; triggeredBy: string }
   | { type: "verification_failed"; triggeredBy: string }
-  | { type: "label_abandoned"; triggeredBy: string };
+  | { type: "label_abandoned"; triggeredBy: string }
+  | { type: "triage_label_added"; triggeredBy: string };

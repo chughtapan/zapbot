@@ -1,6 +1,12 @@
 import type { WorkflowEvent } from "../state-machine/events.js";
 
 const DEFAULT_BOT_USERNAME = "zapbot[bot]";
+const LINKED_ISSUE_RE = /(?:closes|fixes|resolves|part of)\s+#(\d+)/i;
+
+function extractLinkedIssue(body: string): number | null {
+  const match = body.match(LINKED_ISSUE_RE);
+  return match ? parseInt(match[1], 10) : null;
+}
 
 /**
  * Maps a GitHub webhook event + payload to a WorkflowEvent for the state machine.
@@ -32,7 +38,7 @@ export function mapWebhookToEvent(
     }
 
     if (label === "triage") {
-      return { event: { type: "triage_label_added" as any, triggeredBy: actor }, issueNumber, repo };
+      return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
     }
 
     return null;
@@ -52,10 +58,8 @@ export function mapWebhookToEvent(
     const body: string = payload.pull_request?.body || "";
     const actor: string = payload.sender?.login || "";
 
-    // Look for linked issue in PR body (e.g., "Closes #11", "Part of #10")
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
+    const issueNumber = extractLinkedIssue(body);
+    if (issueNumber === null) return null;
 
     if (isDraft) {
       return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
@@ -69,9 +73,8 @@ export function mapWebhookToEvent(
     const body: string = payload.pull_request?.body || "";
     const actor: string = payload.sender?.login || "";
 
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
+    const issueNumber = extractLinkedIssue(body);
+    if (issueNumber === null) return null;
 
     return { event: { type: "pr_ready_for_review", triggeredBy: actor, prNumber }, issueNumber, repo };
   }
@@ -80,9 +83,8 @@ export function mapWebhookToEvent(
     const body: string = payload.pull_request?.body || "";
     const actor: string = payload.sender?.login || "";
 
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
+    const issueNumber = extractLinkedIssue(body);
+    if (issueNumber === null) return null;
 
     return { event: { type: "verified_and_shipped", triggeredBy: actor }, issueNumber, repo };
   }
@@ -94,9 +96,8 @@ export function mapWebhookToEvent(
 
     if (state !== "changes_requested") return null;
 
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
+    const issueNumber = extractLinkedIssue(body);
+    if (issueNumber === null) return null;
 
     return { event: { type: "changes_requested", triggeredBy: actor }, issueNumber, repo };
   }

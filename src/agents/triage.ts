@@ -3,6 +3,7 @@ import type { Database } from "../store/database.js";
 import { getWorkflow, upsertWorkflow, updateWorkflowState, addTransition } from "../store/queries.js";
 import { withTransaction } from "../store/queries.js";
 import { createLogger } from "../logger.js";
+import { makeWorkflowId } from "../workflow-id.js";
 
 const log = createLogger("triage-agent");
 
@@ -34,7 +35,7 @@ export async function completeTriageAgent(
   await withTransaction(db, async (trx) => {
     // Register each sub-issue as a sub-workflow in PLANNING
     for (const issueNumber of subIssueNumbers) {
-      const subId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const subId = makeWorkflowId(repo, issueNumber);
       await upsertWorkflow(trx, {
         id: subId,
         issue_number: issueNumber,
