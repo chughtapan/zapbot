@@ -75,7 +75,8 @@ snippet to share with teammates.
 ```
 
 Starts ngrok, configures GitHub webhooks, and launches the agent-orchestrator.
-Webhook bridge on `http://localhost:3000`, dashboard at `http://localhost:3001`.
+Webhook bridge on `http://localhost:3000` (configurable via `ZAPBOT_BRIDGE_PORT` in `.env`),
+AO dashboard on `http://localhost:3001` (configurable via `port:` in `agent-orchestrator.yaml`).
 
 ### Multi-Repo Support
 

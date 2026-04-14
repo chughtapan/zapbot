@@ -41,7 +41,8 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   │   ├── planner.ts               # Planner role logic
 │   │   └── qe.ts                    # QE role logic
 │   ├── config/
-│   │   └── loader.ts                # Parses agent-orchestrator.yaml, builds repo map
+│   │   ├── loader.ts                # Parses agent-orchestrator.yaml, builds repo map
+│   │   └── reload.ts                # SIGHUP config reload (parseEnvFile, reloadConfigFromDisk)
 │   ├── http/
 │   │   ├── error-response.ts        # Structured JSON error helper (errorResponse)
 │   │   └── verify-signature.ts      # GitHub HMAC signature verification
@@ -90,6 +91,8 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   ├── effects-executor.test.ts     # Side effect retry + reconciliation tests
 │   ├── systemd-service.test.ts      # Systemd service template validation tests
 │   ├── plannotator-integration.test.ts # Plannotator command + callback contract tests
+│   ├── config-reload.test.ts        # SIGHUP config reload + parseEnvFile tests
+│   ├── multi-repo.test.ts           # Multi-repo routing, AO spawning, bridge endpoints
 │   └── e2e-smoke.sh                 # E2E smoke tests
 ├── setup                            # Tool installer: ./setup (teammate) or ./setup --server (eng lead)
 ├── start.sh                         # Start bridge + AO + ngrok from a project dir
@@ -109,7 +112,7 @@ your-project/
 ## Running tests
 
 ```bash
-# Unit tests (147 tests across 14 files, runs in ~400ms)
+# Unit tests (248 tests across 16 files, runs in ~400ms)
 bun test
 
 # E2E smoke tests (needs gh CLI, a test repo, and running bridge)
@@ -151,7 +154,8 @@ real GitHub issues and need the bridge running.
 | `skills/zap/SKILL.md` | Meta-skill: onboarding + routing | Changing /zap behavior |
 | `skills/zapbot-status/SKILL.md` | Workflow status checker | Changing /zapbot-status behavior |
 | `templates/zapbot-bridge.service` | Systemd unit template | Changing service configuration |
-| `test/*.test.ts` | Vitest unit tests (147 tests across 14 files) | Adding tests for new features |
+| `src/config/reload.ts` | SIGHUP config reload (parseEnvFile, reloadConfigFromDisk) | Changing hot-reload behavior |
+| `test/*.test.ts` | Vitest unit tests (248 tests across 16 files) | Adding tests for new features |
 | `test/e2e-smoke.sh` | E2E test suite | Adding integration tests |
 
 ## Adding a new repo

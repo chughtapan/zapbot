@@ -125,7 +125,7 @@ The bridge supports multiple repos from a single instance via `src/config/loader
 1. **Config loading:** Parses `agent-orchestrator.yaml` to build a `RepoMap` (repo full_name → project config). Falls back to `ZAPBOT_REPO` env var for single-repo backward compat.
 2. **Per-repo HMAC:** Each project can specify a `secretEnvVar` in its SCM config. `resolveWebhookSecret()` checks the per-repo env var first, falls back to shared `ZAPBOT_API_KEY`.
 3. **Repo rejection:** Webhooks from repos not in the `RepoMap` are rejected with 403 (only when a config is loaded).
-4. **Project-scoped spawning:** `executeSideEffects()` resolves the project name from the repo map and passes `--project <name>` to `ao spawn`.
+4. **Project-scoped spawning:** `executeSideEffects()` resolves the project name from the repo map and passes it to `ao spawn` via `AO_PROJECT_ID` and `AO_CONFIG_PATH` environment variables. AO uses `AO_PROJECT_ID` to select the correct project and `AO_CONFIG_PATH` to find the agent-orchestrator.yaml.
 5. **Callback tokens:** Plannotator tokens are stored locally with repo context (`callbackTokens` Map with 24h TTL). Tokens are scoped to the specific issue number, so a token for issue #5 cannot be replayed against issue #10. Callbacks resolve repo via: token store → request body → `ZAPBOT_REPO` env var.
 
 ## Operations
@@ -155,6 +155,13 @@ silent state divergence between the DB and GitHub.
 
 Logic lives in `src/effects/executor.ts`.
 
+### GitHub Comments
+
+Every state transition posts a `**Zapbot:**` prefixed comment on the GitHub issue explaining
+what happened and what to do next. Comments include who approved (with @mention), what agent
+is spawning, and guidance for the next step. This gives users visibility into the pipeline
+without needing to check bridge logs. Defined in `src/state-machine/transitions.ts`.
+
 ## Extracted Modules
 
 | Module | Description |
@@ -164,6 +171,7 @@ Logic lives in `src/effects/executor.ts`.
 | `src/webhook/mapper.ts` | Maps raw GitHub webhook payloads to typed internal events |
 | `src/workflow-id.ts` | Canonical workflow ID generation from repo + issue number |
 | `src/effects/executor.ts` | Side effect retry with reconciliation comments for GitHub API failures |
+| `src/config/reload.ts` | SIGHUP config reload: `parseEnvFile()` + `reloadConfigFromDisk()` |
 
 ## Edge Cases
 
