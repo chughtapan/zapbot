@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.2 (2026-04-14)
+
+Three fixes that make the multi-repo agent pipeline work end-to-end.
+
+### Fixed
+
+- **Port configuration** — `start.sh` now correctly passes `PORT` to AO and `ZAPBOT_PORT` to the bridge, so they bind to different ports. Previously both tried to use 3000, causing a systemd crash loop.
+- **Agent spawning** — replaced non-existent `ao spawn --project` flag with `AO_PROJECT_ID` and `AO_CONFIG_PATH` env vars. Agents now spawn successfully across all repos.
+
+### Added
+
+- **GitHub comments on every transition** — every state change posts a `**Zapbot:**` comment on the issue explaining what happened and what to do next. Approvals include @mentions. 16 transition points now have comments.
+
+### Changed
+
+- **248 tests** (up from 147). Added config-reload and multi-repo test suites.
+
 ## 0.4.1 (2026-04-14)
 
 Hardening, operations, and the bugs you'd find in week one of real usage.
