@@ -133,18 +133,32 @@ if [ "$USE_NGROK" = true ]; then
   WEBHOOK_URL="${NGROK_URL}/api/webhooks/github"
   for repo in "${ZAPBOT_REPOS[@]}"; do
     echo "Configuring webhook for ${repo}..."
+
+    # Resolve per-repo webhook secret: look up secretEnvVar from YAML, fall back to shared
+    REPO_SECRET="$GITHUB_WEBHOOK_SECRET"
+    SECRET_ENV_VAR=$(awk -v target="$repo" '
+      /repo:/ && $2 == target { found=1; next }
+      found && /secretEnvVar:/ { print $2; exit }
+    ' "$PROJECT_DIR/agent-orchestrator.yaml")
+    if [ -n "$SECRET_ENV_VAR" ] && [ "$SECRET_ENV_VAR" != "GITHUB_WEBHOOK_SECRET" ]; then
+      RESOLVED="${!SECRET_ENV_VAR:-}"
+      if [ -n "$RESOLVED" ]; then
+        REPO_SECRET="$RESOLVED"
+      fi
+    fi
+
     EXISTING_HOOK=$(gh api "repos/${repo}/hooks" --jq '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
 
     if [ -n "$EXISTING_HOOK" ]; then
       gh api "repos/${repo}/hooks/${EXISTING_HOOK}" --method PATCH \
         -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
-        -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" >/dev/null
+        -f "config[secret]=${REPO_SECRET}" >/dev/null
       WEBHOOK_IDS+=("${repo}:${EXISTING_HOOK}")
       echo "  Updated existing webhook for ${repo}"
     else
       HOOK_ID=$(gh api "repos/${repo}/hooks" --method POST \
         -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
-        -f "config[secret]=${GITHUB_WEBHOOK_SECRET}" \
+        -f "config[secret]=${REPO_SECRET}" \
         -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
         -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" --jq '.id')
       WEBHOOK_IDS+=("${repo}:${HOOK_ID}")
