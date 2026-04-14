@@ -61,8 +61,8 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   │   └── dialect.ts               # Bun SQLite dialect
 │   └── logger.ts                    # Structured logging (createLogger)
 ├── skills/
-│   ├── zapbot-meta/
-│   │   └── SKILL.md                 # Meta-skill: onboarding + routing (/zapbot)
+│   ├── zap/
+│   │   └── SKILL.md                 # Meta-skill: onboarding + routing (/zap)
 │   ├── zapbot-publish/
 │   │   └── SKILL.md                 # Plan publisher with Claude orchestration
 │   └── zapbot-status/
@@ -72,8 +72,9 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   ├── agent-rules.md.tmpl          # Base agent instructions template
 │   ├── agent-rules-triage.md        # Triage agent rules
 │   ├── agent-rules-planner.md       # Planner agent rules
-│   ├── agent-rules-implementer.md   # Implementer agent rules
-│   └── agent-rules-qe.md            # QE agent rules
+│   ├── agent-rules-implementer.md   # Implementer agent rules (skill-aware: /simplify, /review, /investigate, /ship)
+│   ├── agent-rules-qe.md            # QE agent rules (skill-aware: /review, /investigate)
+│   └── zapbot-bridge.service        # Systemd unit template (placeholders: __PROJECT_DIR__, __ZAPBOT_DIR__)
 ├── test/
 │   ├── state-machine.test.ts        # State machine unit tests
 │   ├── store.test.ts                # Store/query unit tests
@@ -86,6 +87,9 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   ├── workflow-id.test.ts          # Workflow ID generation tests
 │   ├── agent-completions.test.ts    # Agent completion function tests
 │   ├── github-client.test.ts        # GitHub client tests
+│   ├── effects-executor.test.ts     # Side effect retry + reconciliation tests
+│   ├── systemd-service.test.ts      # Systemd service template validation tests
+│   ├── plannotator-integration.test.ts # Plannotator command + callback contract tests
 │   └── e2e-smoke.sh                 # E2E smoke tests
 ├── setup                            # Tool installer: ./setup (teammate) or ./setup --server (eng lead)
 ├── start.sh                         # Start bridge + AO + ngrok from a project dir
@@ -105,7 +109,7 @@ your-project/
 ## Running tests
 
 ```bash
-# Unit tests (136 tests across 11 files, runs in ~400ms)
+# Unit tests (147 tests across 14 files, runs in ~400ms)
 bun test
 
 # E2E smoke tests (needs gh CLI, a test repo, and running bridge)
@@ -114,14 +118,16 @@ bun test
 
 Unit tests cover the state machine, store queries, config loader, webhook mapper,
 bridge endpoints, error responses, signature verification, heartbeat, workflow IDs,
-and agent completions. They run in-memory with no external dependencies. E2E tests
-create real GitHub issues and need the bridge running.
+agent completions, side effect retry, systemd service template, and plannotator
+integration. They run in-memory with no external dependencies. E2E tests create
+real GitHub issues and need the bridge running.
 
 ## Development workflow
 
 1. Edit code in `~/.claude/skills/zapbot/`
-2. Restart the bridge: `pkill -f "bun.*webhook-bridge" && source .env && bun bin/webhook-bridge.ts &`
-3. Run tests: `./test/e2e-smoke.sh`
+2. Reload config (if bridge runs as systemd service): `sudo systemctl reload zapbot-bridge`
+   Or restart manually: `pkill -f "bun.*webhook-bridge" && source .env && bun bin/webhook-bridge.ts &`
+3. Run tests: `bun test` (unit) or `./test/e2e-smoke.sh` (E2E, needs running bridge)
 4. Test the full flow: create a plan, run `bin/zapbot-publish.sh`, add label, verify agent spawns
 
 ## Key files
@@ -141,9 +147,11 @@ create real GitHub issues and need the bridge running.
 | `src/http/verify-signature.ts` | GitHub HMAC signature verification | Changing webhook auth |
 | `src/webhook/mapper.ts` | Maps GitHub webhook payloads to typed events | Adding new webhook event types |
 | `src/workflow-id.ts` | Canonical workflow ID from repo + issue | Changing ID format |
-| `skills/zapbot-meta/SKILL.md` | Meta-skill: onboarding + routing | Changing /zapbot behavior |
+| `src/effects/executor.ts` | Side effect retry with reconciliation comments | Changing retry behavior or adding effect types |
+| `skills/zap/SKILL.md` | Meta-skill: onboarding + routing | Changing /zap behavior |
 | `skills/zapbot-status/SKILL.md` | Workflow status checker | Changing /zapbot-status behavior |
-| `test/*.test.ts` | Vitest unit tests (136 tests across 11 files) | Adding tests for new features |
+| `templates/zapbot-bridge.service` | Systemd unit template | Changing service configuration |
+| `test/*.test.ts` | Vitest unit tests (147 tests across 14 files) | Adding tests for new features |
 | `test/e2e-smoke.sh` | E2E test suite | Adding integration tests |
 
 ## Adding a new repo
