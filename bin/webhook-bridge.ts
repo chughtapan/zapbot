@@ -357,6 +357,17 @@ async function handleWebhook(
         intent,
       });
 
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "TRIAGE",
+        event_type: "workflow_created",
+        triggered_by: author,
+        metadata: null,
+        github_delivery_id: deliveryId,
+      });
+
       log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
       await executeSideEffects([
         { type: "spawn_agent", role: "triage", issueNumber },
@@ -390,6 +401,17 @@ async function handleWebhook(
         intent,
       });
 
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "PLANNING",
+        event_type: "workflow_created",
+        triggered_by: author,
+        metadata: null,
+        github_delivery_id: deliveryId,
+      });
+
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
       return { status: 200, body: "sub workflow created" };
     }
@@ -415,6 +437,17 @@ async function handleWebhook(
         author,
         intent,
       });
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "TRIAGE",
+        event_type: "workflow_created",
+        triggered_by: author,
+        metadata: null,
+        github_delivery_id: deliveryId,
+      });
+
       log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped.issueNumber });
       await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
       return { status: 200, body: "parent workflow created" };
@@ -715,6 +748,12 @@ async function main() {
         const stored = callbackTokens.get(body.token);
         if (!stored) {
           const resp = errorResponse(401, "authentication_error", "Invalid or expired callback token.");
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
+          return resp;
+        }
+        // Verify the token is scoped to this issue number
+        if (stored.issueNumber !== issueNumber) {
+          const resp = errorResponse(403, "authorization_error", `Callback token is not valid for issue #${issueNumber}.`);
           for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
           return resp;
         }

@@ -29,6 +29,10 @@ afterEach(async () => {
   try { fs.unlinkSync(dbPath + "-shm"); } catch {}
 });
 
+// NOTE: These tests cover deprecated functions that bypass the state machine engine.
+// The webhook-driven flow in webhook-bridge.ts is the production code path.
+// See @deprecated JSDoc on each function for details.
+
 describe("completeTriageAgent", () => {
   it("transitions parent from TRIAGE to TRIAGED and creates sub-workflows", async () => {
     await upsertWorkflow(db, {

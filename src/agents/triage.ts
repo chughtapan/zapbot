@@ -18,6 +18,12 @@ export interface TriageResult {
  * After the triage agent finishes its analysis and creates sub-issues,
  * call this to transition the parent workflow to TRIAGED and register
  * the sub-issues as workflows.
+ *
+ * @deprecated This function bypasses the state machine engine and skips side effects
+ * (label swaps, comments, issue closing, parent completion checks). The webhook-driven
+ * flow in webhook-bridge.ts handles these transitions correctly via apply() + executeSideEffects().
+ * This function exists for potential future direct-completion paths but is not currently
+ * called by any production code path.
  */
 export async function completeTriageAgent(
   db: Kysely<Database>,
