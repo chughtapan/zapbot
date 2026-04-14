@@ -118,16 +118,21 @@ function createTokenClient(token: string): GitHubClient {
       const resp = await ghFetch(token, `/repos/${repo}/pulls/${prNumber}`);
       const pr = await resp.json() as { node_id: string };
 
-      await fetch("https://api.github.com/graphql", {
+      const gqlResp = await fetch("https://api.github.com/graphql", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          query: `mutation { convertPullRequestToDraft(input: {pullRequestId: "${pr.node_id}"}) { pullRequest { isDraft } } }`,
+          query: `mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`,
+          variables: { id: pr.node_id },
         }),
       });
+      if (!gqlResp.ok) {
+        const body = await gqlResp.text().catch(() => "");
+        throw new Error(`GraphQL convertPullRequestToDraft failed: ${gqlResp.status}: ${body.slice(0, 200)}`);
+      }
     },
 
     async listWebhooks(repo) {
