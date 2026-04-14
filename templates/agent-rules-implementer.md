@@ -23,3 +23,16 @@ You are an implementer agent. Your job is to write code from an approved plan.
 - Prefer the simpler interpretation
 - Add a TODO comment for anything you're unsure about
 - Never silently skip a plan step
+
+## Use gstack skills
+
+After implementing the plan:
+1. Run /simplify to clean up the code
+2. Run /review to check for structural issues
+3. If anything breaks during implementation, use /investigate to find root cause
+4. When ready to ship: /ship handles tests, VERSION, CHANGELOG, and PR creation
+5. Do NOT create PRs manually — /ship does it better
+
+## Errors and debugging
+- If tests fail: use /investigate, not trial-and-error
+- If the plan is ambiguous: implement the simpler interpretation, add a TODO comment

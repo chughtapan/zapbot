@@ -40,7 +40,7 @@ Multi-repo support. Run one bridge instance across multiple GitHub repos.
 ### What changed
 
 - **Multi-repo webhook routing** — Bridge loads `agent-orchestrator.yaml` via a new config loader (`src/config/loader.ts`), routes webhooks by `repository.full_name`, and rejects unconfigured repos with 403.
-- **Per-repo webhook secrets** — Each project can specify its own `secretEnvVar` in the config. HMAC verification resolves the per-repo secret first, falls back to shared `GITHUB_WEBHOOK_SECRET`.
+- **Per-repo webhook secrets** — Each project can specify its own `secretEnvVar` in the config. HMAC verification resolves the per-repo secret first, falls back to shared `ZAPBOT_API_KEY`.
 - **Repo-scoped plannotator tokens** — Callback tokens now carry repo context. The bridge stores them locally with a 24-hour TTL instead of proxying to AO. Resolves repo via: token store → request body → `ZAPBOT_REPO` env var.
 - **Project-scoped `ao spawn`** — The spawner passes `--project <name>` so AO routes to the correct project.
 - **Webhook cleanup on shutdown** — `start.sh` tracks webhook IDs and deactivates them when you Ctrl+C, preventing stale webhook deliveries.

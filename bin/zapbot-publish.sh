@@ -18,7 +18,7 @@ if [ -z "$BRIDGE_URL" ]; then
   BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
 fi
 # API key for authenticated bridge endpoints
-API_KEY="${GITHUB_WEBHOOK_SECRET:-}"
+API_KEY="${ZAPBOT_API_KEY:-}"
 PLAN_FILE="${1:-}"
 
 if [ -z "$PLAN_FILE" ]; then

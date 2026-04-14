@@ -89,14 +89,14 @@ projects:
     scm:
       plugin: github
       webhook:
-        secretEnvVar: GITHUB_WEBHOOK_SECRET
+        secretEnvVar: ZAPBOT_API_KEY
   frontend:
     repo: chughtapan/frontend-app
     path: /home/user/frontend
     scm:
       plugin: github
       webhook:
-        secretEnvVar: GITHUB_WEBHOOK_SECRET_FRONTEND
+        secretEnvVar: ZAPBOT_API_KEY_FRONTEND
 ```
 
 The bridge routes webhooks by `repository.full_name`, verifies HMAC signatures

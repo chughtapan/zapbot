@@ -41,8 +41,8 @@ BRIDGE_PORT="${ZAPBOT_BRIDGE_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
 APPROVE_LABEL="${ZAPBOT_APPROVE_LABEL:-plan-approved}"
 
-if [ -z "${GITHUB_WEBHOOK_SECRET:-}" ]; then
-  echo "ERROR: GITHUB_WEBHOOK_SECRET is not set."
+if [ -z "${ZAPBOT_API_KEY:-}" ]; then
+  echo "ERROR: ZAPBOT_API_KEY is not set."
   echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env, or set it manually."
   exit 1
 fi
@@ -97,7 +97,7 @@ echo "AO ready on port ${AO_PORT}"
 
 # Start webhook bridge
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
-export GITHUB_WEBHOOK_SECRET ZAPBOT_REPO ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml" ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
+export ZAPBOT_API_KEY ZAPBOT_REPO ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml" ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
 bun "$ZAPBOT_DIR/bin/webhook-bridge.ts" > /tmp/zapbot-bridge.log 2>&1 &
 BRIDGE_PID=$!
 
@@ -136,12 +136,12 @@ if [ "$USE_NGROK" = true ]; then
     echo "Configuring webhook for ${repo}..."
 
     # Resolve per-repo webhook secret: look up secretEnvVar from YAML, fall back to shared
-    REPO_SECRET="$GITHUB_WEBHOOK_SECRET"
+    REPO_SECRET="$ZAPBOT_API_KEY"
     SECRET_ENV_VAR=$(awk -v target="$repo" '
       /repo:/ && $2 == target { found=1; next }
       found && /secretEnvVar:/ { print $2; exit }
     ' "$PROJECT_DIR/agent-orchestrator.yaml")
-    if [ -n "$SECRET_ENV_VAR" ] && [ "$SECRET_ENV_VAR" != "GITHUB_WEBHOOK_SECRET" ]; then
+    if [ -n "$SECRET_ENV_VAR" ] && [ "$SECRET_ENV_VAR" != "ZAPBOT_API_KEY" ]; then
       RESOLVED="${!SECRET_ENV_VAR:-}"
       if [ -n "$RESOLVED" ]; then
         REPO_SECRET="$RESOLVED"
@@ -194,11 +194,13 @@ if [ "$USE_NGROK" = true ]; then
     fi
   done
 
-  # Persist bridge URL in project .env
+  # Persist bridge URL in project .env (atomic via mktemp)
   if [ -f "$PROJECT_DIR/.env" ]; then
-    sed -i.bak '/^ZAPBOT_BRIDGE_URL=/d' "$PROJECT_DIR/.env"
-    echo "ZAPBOT_BRIDGE_URL=${NGROK_URL}" >> "$PROJECT_DIR/.env"
-    rm -f "$PROJECT_DIR/.env.bak"
+    TMPENV=$(mktemp "$PROJECT_DIR/.env.XXXXXX")
+    trap "rm -f '$TMPENV'" EXIT
+    grep -v '^ZAPBOT_BRIDGE_URL=' "$PROJECT_DIR/.env" > "$TMPENV"
+    echo "ZAPBOT_BRIDGE_URL=${NGROK_URL}" >> "$TMPENV"
+    mv "$TMPENV" "$PROJECT_DIR/.env"
   fi
   export ZAPBOT_BRIDGE_URL="${NGROK_URL}"
 else

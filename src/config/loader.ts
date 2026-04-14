@@ -83,7 +83,7 @@ export function loadConfig(configPath?: string): {
             plugin: "github",
             webhook: {
               path: "/api/webhooks/github",
-              secretEnvVar: "GITHUB_WEBHOOK_SECRET",
+              secretEnvVar: "ZAPBOT_API_KEY",
               signatureHeader: "x-hub-signature-256",
               eventHeader: "x-github-event",
             },
@@ -117,7 +117,7 @@ function buildRepoMap(config: ZapbotConfig): RepoMap {
  *
  * Priority:
  * 1. Per-repo secret from the config's secretEnvVar (if different from shared)
- * 2. Shared GITHUB_WEBHOOK_SECRET
+ * 2. Shared ZAPBOT_API_KEY
  */
 export function resolveWebhookSecret(
   repoFullName: string,
@@ -128,7 +128,7 @@ export function resolveWebhookSecret(
   if (!entry) return sharedSecret;
 
   const envVar = entry.config.scm?.webhook?.secretEnvVar;
-  if (envVar && envVar !== "GITHUB_WEBHOOK_SECRET") {
+  if (envVar && envVar !== "ZAPBOT_API_KEY") {
     const perRepoSecret = process.env[envVar];
     if (perRepoSecret) return perRepoSecret;
   }

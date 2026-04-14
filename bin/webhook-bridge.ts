@@ -79,9 +79,9 @@ async function onAgentFailed(database: Kysely<Database>, agentId: string): Promi
 // ── Configuration ───────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.ZAPBOT_PORT || "3000", 10);
-const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
+let WEBHOOK_SECRET = process.env.ZAPBOT_API_KEY;
 if (!WEBHOOK_SECRET) {
-  console.error("[bridge] GITHUB_WEBHOOK_SECRET is required. Set it in .env or export it.");
+  console.error("[bridge] ZAPBOT_API_KEY is required. Set it in .env or export it.");
   process.exit(1);
 }
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
@@ -93,7 +93,45 @@ const CORS_HEADERS = {
 const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
 // Multi-repo config: loaded from agent-orchestrator.yaml or ZAPBOT_REPO env var
-const { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
+let { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
+
+// ── SIGHUP config reload ───────────────────────────────────────────
+function reloadConfig(): void {
+  try {
+    // Re-source .env by re-reading it (Bun doesn't have dotenv, so re-read manually)
+    const envPath = process.env.ZAPBOT_CONFIG?.replace(/agent-orchestrator\.yaml$/, ".env");
+    if (envPath) {
+      const envContent = require("fs").readFileSync(envPath, "utf-8");
+      for (const line of envContent.split("\n")) {
+        if (line.startsWith("#") || !line.includes("=")) continue;
+        const [key, ...rest] = line.split("=");
+        process.env[key.trim()] = rest.join("=").trim();
+      }
+    }
+
+    const newConfig = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
+    const newSecret = process.env.ZAPBOT_API_KEY;
+
+    // Validate before applying
+    if (!newSecret) {
+      log.error("Config reload failed: ZAPBOT_API_KEY is empty after re-read. Keeping old config.");
+      return;
+    }
+
+    const secretRotated = newSecret !== WEBHOOK_SECRET;
+    repoMap = newConfig.repoMap;
+    WEBHOOK_SECRET = newSecret;
+
+    log.info(`Config reloaded (${repoMap.size} repos, secret rotated: ${secretRotated})`);
+  } catch (err) {
+    log.error(`Config reload failed: ${err}. Keeping old config.`);
+  }
+}
+
+process.on("SIGHUP", () => {
+  log.info("SIGHUP received, reloading config...");
+  reloadConfig();
+});
 
 // ── Plannotator callback token store ────────────────────────────────
 // Maps callback tokens to { issueNumber, repo, createdAt } so plannotator
@@ -124,6 +162,7 @@ async function executeSideEffects(
   repo: string
 ): Promise<void> {
   const projectName = repoMap.get(repo)?.projectName;
+  const failedEffects: SideEffect[] = [];
   for (const effect of effects) {
     try {
       switch (effect.type) {
@@ -197,7 +236,46 @@ async function executeSideEffects(
         }
       }
     } catch (err) {
-      log.error(`Failed to execute side effect ${effect.type}: ${err}`, { effect: effect.type });
+      // Retry once for GitHub API effects
+      const retryable = ["add_label", "remove_label", "post_comment", "close_issue", "convert_pr_to_draft", "create_sub_issue"];
+      if (retryable.includes(effect.type)) {
+        log.warn(`Effect ${effect.type} failed, retrying in 2s: ${err}`, { effect: effect.type });
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          // Re-execute the same effect
+          switch (effect.type) {
+            case "add_label": await gh.addLabel(repo, effect.issueNumber, effect.label); break;
+            case "remove_label": await gh.removeLabel(repo, effect.issueNumber, effect.label); break;
+            case "post_comment": await gh.postComment(repo, effect.issueNumber, effect.body); break;
+            case "close_issue": await gh.closeIssue(repo, effect.issueNumber); break;
+            case "convert_pr_to_draft": await gh.convertPrToDraft(repo, effect.prNumber); break;
+            case "create_sub_issue": await gh.createIssue(repo, effect.title, `${effect.body}\n\nPart of #${effect.parentIssueNumber}`, ["planning"]); break;
+          }
+          log.info(`Effect ${effect.type} succeeded on retry`);
+        } catch (retryErr) {
+          log.error(`Effect ${effect.type} failed after retry: ${retryErr}`, { effect: effect.type });
+          failedEffects.push(effect);
+        }
+      } else {
+        log.error(`Non-retryable effect ${effect.type} failed: ${err}`, { effect: effect.type });
+      }
+    }
+  }
+
+  // Post reconciliation comment if any retryable effects failed
+  if (failedEffects.length > 0) {
+    const issueNumbers = new Set(failedEffects.filter((e) => "issueNumber" in e).map((e) => (e as any).issueNumber));
+    for (const issueNum of issueNumbers) {
+      const failed = failedEffects.filter((e) => "issueNumber" in e && (e as any).issueNumber === issueNum);
+      const msg = [
+        "Zapbot: Some side effects failed after retry. The workflow state in the database may differ from GitHub.",
+        "",
+        "**Failed effects:**",
+        ...failed.map((f) => `- \`${f.type}\``),
+        "",
+        "Check the bridge logs for details.",
+      ].join("\n");
+      try { await gh.postComment(repo, issueNum, msg); } catch { /* best effort */ }
     }
   }
 }
@@ -290,6 +368,36 @@ async function abandonChildren(parentWorkflowId: string, repo: string): Promise<
   }
 }
 
+// ── Triage workflow helper ──────────────────────────────────────
+
+async function createTriageWorkflow(
+  repo: string, issueNumber: number, author: string, intent: string, deliveryId: string
+): Promise<void> {
+  const wfId = makeWorkflowId(repo, issueNumber);
+  await upsertWorkflow(db, {
+    id: wfId,
+    issue_number: issueNumber,
+    repo,
+    state: "TRIAGE",
+    level: "parent",
+    parent_workflow_id: null,
+    author,
+    intent,
+  });
+  await addTransition(db, {
+    id: `t-${crypto.randomUUID()}`,
+    workflow_id: wfId,
+    from_state: "NEW",
+    to_state: "TRIAGE",
+    event_type: "workflow_created",
+    triggered_by: author,
+    metadata: null,
+    github_delivery_id: deliveryId,
+  });
+  log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
+  await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber }], repo);
+}
+
 // ── Core webhook handler ────────────────────────────────────────────
 
 async function handleWebhook(
@@ -300,6 +408,9 @@ async function handleWebhook(
   const repo: string = payload.repository?.full_name || "";
 
   // Dedup by delivery ID
+  if (!deliveryId) {
+    log.warn("Webhook received without delivery ID, skipping dedup", { eventType, action: payload.action });
+  }
   if (deliveryId && await hasDeliveryBeenProcessed(db, deliveryId)) {
     log.debug("Duplicate delivery, skipping", { deliveryId });
     return { status: 200, body: "duplicate" };
@@ -318,34 +429,7 @@ async function handleWebhook(
       const issueNumber = payload.issue.number;
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = makeWorkflowId(repo, issueNumber);
-
-      await upsertWorkflow(db, {
-        id: wfId,
-        issue_number: issueNumber,
-        repo,
-        state: "TRIAGE",
-        level: "parent",
-        parent_workflow_id: null,
-        author,
-        intent,
-      });
-
-      await addTransition(db, {
-        id: `t-${crypto.randomUUID()}`,
-        workflow_id: wfId,
-        from_state: "NEW",
-        to_state: "TRIAGE",
-        event_type: "workflow_created",
-        triggered_by: author,
-        metadata: null,
-        github_delivery_id: deliveryId,
-      });
-
-      log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
-      await executeSideEffects([
-        { type: "spawn_agent", role: "triage", issueNumber },
-      ], repo);
+      await createTriageWorkflow(repo, issueNumber, author, intent, deliveryId);
       return { status: 200, body: "parent workflow created" };
     }
   }
@@ -400,30 +484,7 @@ async function handleWebhook(
     if (!existingWf) {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = makeWorkflowId(repo, mapped.issueNumber);
-      await upsertWorkflow(db, {
-        id: wfId,
-        issue_number: mapped.issueNumber,
-        repo,
-        state: "TRIAGE",
-        level: "parent",
-        parent_workflow_id: null,
-        author,
-        intent,
-      });
-      await addTransition(db, {
-        id: `t-${crypto.randomUUID()}`,
-        workflow_id: wfId,
-        from_state: "NEW",
-        to_state: "TRIAGE",
-        event_type: "workflow_created",
-        triggered_by: author,
-        metadata: null,
-        github_delivery_id: deliveryId,
-      });
-
-      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped.issueNumber });
-      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
+      await createTriageWorkflow(repo, mapped.issueNumber, author, intent, deliveryId);
       return { status: 200, body: "parent workflow created" };
     }
     if (existingWf && existingWf.state === "TRIAGE") {
