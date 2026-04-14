@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.1 (2026-04-14)
+
+Hardening, operations, and the bugs you'd find in week one of real usage.
+
+### Added
+
+- **`/zap` command** — single entry point for zapbot. Onboarding wizard, publish, status, help.
+- **Systemd service template** — `setup --server` generates a service file. Auto-start on boot, auto-restart on crash, config reload via `systemctl reload zapbot-bridge`.
+- **SIGHUP config hot-reload** — bridge re-reads .env + YAML on signal, validates before applying, keeps old config if invalid.
+- **Side effect retry** — GitHub API effects retry once (2s delay). Failed effects get a reconciliation comment on the issue.
+- **Plannotator integration test** — catches broken subcommands before they ship silently.
+- **Skill-aware agent rules** — implementer and QE templates use /simplify, /review, /investigate, /ship.
+
+### Changed
+
+- **ZAPBOT_API_KEY** — renamed from GITHUB_WEBHOOK_SECRET everywhere (27 replacements). One name, one purpose.
+- **Plannotator command** — `plannotator share` (nonexistent) → `plannotator annotate` (correct). Uses timeout for headless environments.
+- **No silent failures** — plannotator errors are printed, not swallowed.
+- **DRY triage** — extracted `createTriageWorkflow()` helper, removing 40 lines of duplication.
+- **Atomic file writes** — team-init and start.sh use mktemp + trap.
+
+### Fixed
+
+- `/zap` skill discovery — renamed from `zapbot-meta` so Claude Code finds it by directory name.
+- start.sh warns and exits if systemd service is active (prevents port conflict).
+- team-init auto-reloads bridge via `systemctl reload` after config changes.
+- Null delivery ID warning for visibility on manual API calls.
+
+### Tests
+
+- 139 → 147 tests: systemd template validation, plannotator integration, callback contract.
+
 ## 0.4.0 (2026-04-14)
 
 Teammates can now install zapbot in 30 seconds without touching server infrastructure. The skill and orchestrator are cleanly separated.
