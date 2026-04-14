@@ -25,6 +25,10 @@ import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heart
 import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
+import { createGitHubClient } from "../src/github/client.js";
+import { makeWorkflowId } from "../src/workflow-id.js";
+import { errorResponse } from "../src/http/error-response.js";
+import { verifySignature } from "../src/http/verify-signature.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -32,6 +36,7 @@ process.on("unhandledRejection", (err) => {
 });
 
 const log = createLogger("bridge");
+const gh = createGitHubClient();
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -80,6 +85,11 @@ if (!WEBHOOK_SECRET) {
   process.exit(1);
 }
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+} as const;
 const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
 // Multi-repo config: loaded from agent-orchestrator.yaml or ZAPBOT_REPO env var
@@ -101,144 +111,11 @@ function pruneExpiredTokens(): void {
   }
 }
 
-// ── HMAC verification ───────────────────────────────────────────────
-
-async function verifySignature(
-  payload: string,
-  signature: string | null,
-  secret: string
-): Promise<boolean> {
-  if (!signature) return false;
-
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  const expected = `sha256=${Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-  // Constant-time comparison to prevent timing attacks
-  if (expected.length !== signature.length) return false;
-  return Buffer.from(expected).equals(Buffer.from(signature));
-}
-
 // ── Database ────────────────────────────────────────────────────────
 
 let db: Kysely<Database>;
 
-// ── Webhook event mapping ───────────────────────────────────────────
-
-function mapWebhookToEvent(
-  eventType: string,
-  payload: any
-): { event: WorkflowEvent; issueNumber: number; repo: string } | null {
-  const repo: string = payload.repository?.full_name || "";
-
-  if (eventType === "issues" && payload.action === "labeled") {
-    const label: string = payload.label?.name || "";
-    const actor: string = payload.sender?.login || "";
-    const issueNumber: number = payload.issue?.number;
-
-    // Self-label loop prevention
-    if (actor === BOT_USERNAME) {
-      log.debug("Ignoring self-authored label event", { label, actor });
-      return null;
-    }
-
-    if (label === "abandoned") {
-      return { event: { type: "label_abandoned", triggeredBy: actor }, issueNumber, repo };
-    }
-
-    if (label === "plan-approved") {
-      return { event: { type: "label_added", label, triggeredBy: actor }, issueNumber, repo };
-    }
-
-    if (label === "triage") {
-      return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
-    }
-
-    return null;
-  }
-
-  if (eventType === "issues" && payload.action === "opened") {
-    const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
-    const issueNumber: number = payload.issue?.number;
-    const actor: string = payload.sender?.login || "";
-
-    if (labels.includes("triage")) {
-      // New parent issue with triage label -> will create workflow in TRIAGE state
-      return null; // Handled specially below
-    }
-
-    return null;
-  }
-
-  if (eventType === "issue_comment" && payload.action === "created") {
-    // Could be agent status updates or slash commands
-    return null;
-  }
-
-  if (eventType === "pull_request" && payload.action === "opened") {
-    const prNumber: number = payload.pull_request?.number;
-    const isDraft: boolean = payload.pull_request?.draft || false;
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    // Look for linked issue in PR body (e.g., "Closes #11", "Part of #10")
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    if (isDraft) {
-      return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
-    } else {
-      // Non-draft PR: skip DRAFT_REVIEW, go straight to VERIFYING
-      return { event: { type: "non_draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
-    }
-  }
-
-  if (eventType === "pull_request" && payload.action === "ready_for_review") {
-    const prNumber: number = payload.pull_request?.number;
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    return { event: { type: "pr_ready_for_review", triggeredBy: actor, prNumber }, issueNumber, repo };
-  }
-
-  if (eventType === "pull_request" && payload.action === "closed" && payload.pull_request?.merged) {
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    return { event: { type: "verified_and_shipped", triggeredBy: actor }, issueNumber, repo };
-  }
-
-  if (eventType === "pull_request_review" && payload.action === "submitted") {
-    const state: string = payload.review?.state || "";
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    if (state !== "changes_requested") return null;
-
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    return { event: { type: "changes_requested", triggeredBy: actor }, issueNumber, repo };
-  }
-
-  return null;
-}
+import { mapWebhookToEvent } from "../src/webhook/mapper.js";
 
 // ── Side effect execution ───────────────────────────────────────────
 
@@ -268,7 +145,7 @@ async function executeSideEffects(
             issueNumber: effect.issueNumber,
             label: effect.label,
           });
-          await runGh(["issue", "edit", String(effect.issueNumber), "--repo", repo, "--add-label", effect.label]);
+          await gh.addLabel(repo, effect.issueNumber, effect.label);
           break;
         }
         case "remove_label": {
@@ -276,17 +153,17 @@ async function executeSideEffects(
             issueNumber: effect.issueNumber,
             label: effect.label,
           });
-          await runGh(["issue", "edit", String(effect.issueNumber), "--repo", repo, "--remove-label", effect.label]);
+          await gh.removeLabel(repo, effect.issueNumber, effect.label);
           break;
         }
         case "post_comment": {
           log.info(`Posting comment on #${effect.issueNumber}`, { issueNumber: effect.issueNumber });
-          await runGh(["issue", "comment", String(effect.issueNumber), "--repo", repo, "--body", effect.body]);
+          await gh.postComment(repo, effect.issueNumber, effect.body);
           break;
         }
         case "close_issue": {
           log.info(`Closing issue #${effect.issueNumber}`, { issueNumber: effect.issueNumber });
-          await runGh(["issue", "close", String(effect.issueNumber), "--repo", repo]);
+          await gh.closeIssue(repo, effect.issueNumber);
           break;
         }
         case "check_parent_completion": {
@@ -299,19 +176,19 @@ async function executeSideEffects(
         }
         case "convert_pr_to_draft": {
           log.info(`Converting PR #${effect.prNumber} to draft`, { prNumber: effect.prNumber });
-          await runGh(["pr", "ready", String(effect.prNumber), "--repo", repo, "--undo"]);
+          await gh.convertPrToDraft(repo, effect.prNumber);
           break;
         }
         case "create_sub_issue": {
           log.info(`Creating sub-issue for parent #${effect.parentIssueNumber}`, {
             parentIssue: effect.parentIssueNumber,
           });
-          await runGh([
-            "issue", "create", "--repo", repo,
-            "--title", effect.title,
-            "--body", `${effect.body}\n\nPart of #${effect.parentIssueNumber}`,
-            "--label", "planning",
-          ]);
+          await gh.createIssue(
+            repo,
+            effect.title,
+            `${effect.body}\n\nPart of #${effect.parentIssueNumber}`,
+            ["planning"],
+          );
           break;
         }
         case "notify_human": {
@@ -323,19 +200,6 @@ async function executeSideEffects(
       log.error(`Failed to execute side effect ${effect.type}: ${err}`, { effect: effect.type });
     }
   }
-}
-
-async function runGh(args: string[]): Promise<string> {
-  const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
-  const output = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    const errMsg = `gh ${args.join(" ")} → ${stderr.trim()}`;
-    log.error(`gh command failed: ${errMsg}`);
-    throw new Error(errMsg);
-  }
-  return output.trim();
 }
 
 // ── Parent completion check ─────────────────────────────────────────
@@ -454,7 +318,7 @@ async function handleWebhook(
       const issueNumber = payload.issue.number;
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -465,6 +329,17 @@ async function handleWebhook(
         parent_workflow_id: null,
         author,
         intent,
+      });
+
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "TRIAGE",
+        event_type: "workflow_created",
+        triggered_by: author,
+        metadata: null,
+        github_delivery_id: deliveryId,
       });
 
       log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
@@ -483,11 +358,11 @@ async function handleWebhook(
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
       const body: string = payload.issue?.body || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
 
       // Extract parent reference from body
       const parentMatch = body.match(/Part of #(\d+)/i);
-      const parentWorkflowId = parentMatch ? `wf-${repo.replace("/", "-")}-${parentMatch[1]}` : null;
+      const parentWorkflowId = parentMatch ? makeWorkflowId(repo, parseInt(parentMatch[1], 10)) : null;
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -500,22 +375,35 @@ async function handleWebhook(
         intent,
       });
 
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "PLANNING",
+        event_type: "workflow_created",
+        triggered_by: author,
+        metadata: null,
+        github_delivery_id: deliveryId,
+      });
+
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
       return { status: 200, body: "sub workflow created" };
     }
   }
 
+  // Map webhook to state machine event
+  const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
+
   // Handle triage label on existing issue (creates parent workflow if none exists)
-  const mapped_pre = mapWebhookToEvent(eventType, payload);
-  if (mapped_pre && mapped_pre.event.type === "triage_label_added") {
-    const existingWf = await getWorkflowByIssue(db, mapped_pre.issueNumber, repo);
+  if (mapped && mapped.event.type === "triage_label_added") {
+    const existingWf = await getWorkflowByIssue(db, mapped.issueNumber, repo);
     if (!existingWf) {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${mapped_pre.issueNumber}`;
+      const wfId = makeWorkflowId(repo, mapped.issueNumber);
       await upsertWorkflow(db, {
         id: wfId,
-        issue_number: mapped_pre.issueNumber,
+        issue_number: mapped.issueNumber,
         repo,
         state: "TRIAGE",
         level: "parent",
@@ -523,27 +411,33 @@ async function handleWebhook(
         author,
         intent,
       });
-      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped_pre.issueNumber });
-      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "TRIAGE",
+        event_type: "workflow_created",
+        triggered_by: author,
+        metadata: null,
+        github_delivery_id: deliveryId,
+      });
+
+      log.info(`Created parent workflow ${wfId} in TRIAGE (label on existing issue)`, { issueNumber: mapped.issueNumber });
+      await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
       return { status: 200, body: "parent workflow created" };
     }
     if (existingWf && existingWf.state === "TRIAGE") {
       const agents = await getAgentSessions(db, existingWf.id);
       if (allAgentsDead(agents)) {
-        // All agents failed, re-spawn
-        log.info(`Re-spawning triage agent for stuck workflow ${existingWf.id}`, { issueNumber: mapped_pre.issueNumber });
-        await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped_pre.issueNumber }], repo);
+        log.info(`Re-spawning triage agent for stuck workflow ${existingWf.id}`, { issueNumber: mapped.issueNumber });
+        await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
         return { status: 200, body: "triage agent re-spawned" };
       }
-      // Active agent exists, suppress the duplicate label event silently
-      log.debug("Triage workflow already active, ignoring duplicate label event", { issueNumber: mapped_pre.issueNumber });
+      log.debug("Triage workflow already active, ignoring duplicate label event", { issueNumber: mapped.issueNumber });
       return { status: 200, body: "triage already active" };
     }
-    // Workflow exists but not in TRIAGE, fall through to normal processing
   }
 
-  // Map webhook to state machine event
-  const mapped = mapWebhookToEvent(eventType, payload);
   if (!mapped) {
     log.debug("No state machine event for this webhook", { eventType, action: payload.action });
     return { status: 200, body: "no-op" };
@@ -558,7 +452,7 @@ async function handleWebhook(
     if (event.type === "label_added" && (event as any).label === "plan-approved") {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
-      const wfId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
 
       await upsertWorkflow(db, {
         id: wfId,
@@ -726,7 +620,7 @@ async function main() {
         try {
           payload = JSON.parse(body);
         } catch {
-          return new Response("invalid JSON", { status: 400 });
+          return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
         }
 
         const repoFullName: string = payload.repository?.full_name || "";
@@ -734,13 +628,13 @@ async function main() {
         // Reject webhooks from unconfigured repos (only when config is loaded)
         if (repoMap.size > 0 && repoFullName && !repoMap.has(repoFullName)) {
           log.warn("Webhook from unconfigured repo, rejecting", { repo: repoFullName, deliveryId });
-          return new Response(`repo '${repoFullName}' is not configured`, { status: 403 });
+          return errorResponse(403, "configuration_error", `Repo '${repoFullName}' is not configured on this bridge.`);
         }
 
         // Per-repo HMAC verification with shared secret fallback
         const secret = resolveWebhookSecret(repoFullName, repoMap, WEBHOOK_SECRET!);
         if (!(await verifySignature(body, signature, secret))) {
-          return new Response("invalid signature", { status: 401 });
+          return errorResponse(401, "signature_error", "Webhook signature verification failed.");
         }
 
         const result = await handleWebhook(eventType, deliveryId, payload);
@@ -751,12 +645,12 @@ async function main() {
       if (pathname.match(/^\/api\/workflows\/(\d+)$/) && req.method === "GET") {
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const repo = url.searchParams.get("repo") || "";
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
-        if (!wf) return new Response("not found", { status: 404 });
+        if (!wf) return errorResponse(404, "not_found", `No workflow found for issue #${issueNumber}.`);
 
         const subs = wf.level === "parent" ? await getSubWorkflows(db, wf.id) : [];
         const agents = await getAgentSessions(db, wf.id);
@@ -768,12 +662,12 @@ async function main() {
       if (pathname.match(/^\/api\/workflows\/(\d+)\/history$/) && req.method === "GET") {
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const issueNumber = parseInt(pathname.split("/")[3], 10);
         const repo = url.searchParams.get("repo") || "";
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
-        if (!wf) return new Response("not found", { status: 404 });
+        if (!wf) return errorResponse(404, "not_found", `No workflow found for issue #${issueNumber}.`);
 
         const history = await getTransitionHistory(db, wf.id);
         return Response.json({ history });
@@ -784,10 +678,10 @@ async function main() {
         const agentId = pathname.split("/")[3];
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const session = await getAgentSession(db, agentId);
-        if (!session) return new Response("not found", { status: 404 });
+        if (!session) return errorResponse(404, "not_found", `Agent '${agentId}' not found.`);
         await updateAgentHeartbeat(db, agentId);
         return new Response("ok", { status: 200 });
       }
@@ -797,10 +691,10 @@ async function main() {
         const agentId = pathname.split("/")[3];
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const session = await getAgentSession(db, agentId);
-        if (!session) return new Response("not found", { status: 404 });
+        if (!session) return errorResponse(404, "not_found", `Agent '${agentId}' not found.`);
 
         const body = await req.json().catch(() => ({}));
         await updateAgentStatus(db, agentId, body.status || "completed", body.prNumber);
@@ -808,24 +702,37 @@ async function main() {
         return new Response("ok", { status: 200 });
       }
 
+      // CORS preflight for plannotator callbacks
+      if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+
       // Plannotator callback
       if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "POST") {
-        // CORS headers for browser-based plannotator callbacks
-        const corsHeaders = {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        };
-        if (req.method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: corsHeaders });
-        }
 
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
 
-        // Resolve repo: token store first, then request body, then env var fallback
-        const stored = body.token ? callbackTokens.get(body.token) : undefined;
-        const repo = stored?.repo || body.repo || process.env.ZAPBOT_REPO || "";
+        // Require valid callback token for authentication
+        if (!body.token || typeof body.token !== "string") {
+          const resp = errorResponse(401, "authentication_error", "Missing callback token.");
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
+          return resp;
+        }
+        const stored = callbackTokens.get(body.token);
+        if (!stored) {
+          const resp = errorResponse(401, "authentication_error", "Invalid or expired callback token.");
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
+          return resp;
+        }
+        // Verify the token is scoped to this issue number
+        if (stored.issueNumber !== issueNumber) {
+          const resp = errorResponse(403, "authorization_error", `Callback token is not valid for issue #${issueNumber}.`);
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
+          return resp;
+        }
+        // Repo comes from the trusted token store only, never from request body
+        const repo = stored.repo;
 
         log.info(`Plannotator callback for #${issueNumber}`, { issueNumber, repo });
 
@@ -862,7 +769,7 @@ async function main() {
             }
           }
           const resp = new Response("ok", { status: 200 });
-          for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+          for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
           return resp;
         }
 
@@ -901,16 +808,20 @@ async function main() {
         }
 
         const resp = new Response("ok", { status: 200 });
-        for (const [k, v] of Object.entries(corsHeaders)) resp.headers.set(k, v);
+        for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
         return resp;
       }
 
-      // Token registration for plannotator callbacks
+      // Token registration for plannotator callbacks (requires API key)
       if (pathname === "/api/tokens" && req.method === "POST") {
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
+        }
         const body = await req.json().catch(() => ({}));
         const { token, issueNumber, repo } = body;
         if (!token || typeof token !== "string" || issueNumber == null || typeof issueNumber !== "number") {
-          return new Response("missing or invalid token/issueNumber", { status: 400 });
+          return errorResponse(400, "invalid_request", "Missing or invalid token/issueNumber in request body.");
         }
         pruneExpiredTokens();
         callbackTokens.set(token, {
@@ -925,7 +836,7 @@ async function main() {
         return Response.json({ ok: true });
       }
 
-      return new Response("not found", { status: 404 });
+      return errorResponse(404, "not_found", "Resource not found.");
     },
   });
 

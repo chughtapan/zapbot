@@ -116,6 +116,8 @@ SQLite database at `~/.zapbot/state.db` managed via Kysely migrations.
 | POST | `/api/callbacks/plannotator/:issueNumber` | Plannotator callback |
 | POST | `/api/tokens` | Plannotator callback token registration |
 
+All error responses use structured JSON via `src/http/error-response.ts` (`{ error, message, status }`).
+
 ## Multi-Repo Routing
 
 The bridge supports multiple repos from a single instance via `src/config/loader.ts`:
@@ -124,10 +126,20 @@ The bridge supports multiple repos from a single instance via `src/config/loader
 2. **Per-repo HMAC:** Each project can specify a `secretEnvVar` in its SCM config. `resolveWebhookSecret()` checks the per-repo env var first, falls back to shared `GITHUB_WEBHOOK_SECRET`.
 3. **Repo rejection:** Webhooks from repos not in the `RepoMap` are rejected with 403 (only when a config is loaded).
 4. **Project-scoped spawning:** `executeSideEffects()` resolves the project name from the repo map and passes `--project <name>` to `ao spawn`.
-5. **Callback tokens:** Plannotator tokens are stored locally with repo context (`callbackTokens` Map with 24h TTL). Callbacks resolve repo via: token store → request body → `ZAPBOT_REPO` env var.
+5. **Callback tokens:** Plannotator tokens are stored locally with repo context (`callbackTokens` Map with 24h TTL). Tokens are scoped to the specific issue number, so a token for issue #5 cannot be replayed against issue #10. Callbacks resolve repo via: token store → request body → `ZAPBOT_REPO` env var.
+
+## Extracted Modules
+
+| Module | Description |
+|--------|-------------|
+| `src/http/error-response.ts` | Structured JSON error helper (`errorResponse`) used by all API endpoints |
+| `src/http/verify-signature.ts` | GitHub HMAC signature verification (extracted for testability) |
+| `src/webhook/mapper.ts` | Maps raw GitHub webhook payloads to typed internal events |
+| `src/workflow-id.ts` | Canonical workflow ID generation from repo + issue number |
 
 ## Edge Cases
 
+- **Webhook dedup:** Workflow-creation paths deduplicate to prevent double-spawning agents from rapid webhook deliveries
 - **Self-label loops:** Bridge ignores label events authored by the bot itself
 - **Draft PR loop convergence:** Max 3 cycles of DRAFT_REVIEW <-> VERIFYING before ABANDONED
 - **Stale agents:** Heartbeat timeout after 15 min triggers failure + human notification

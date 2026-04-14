@@ -9,15 +9,25 @@ When the user's request matches an available skill, ALWAYS invoke it using the S
 tool as your FIRST action.
 
 Key routing rules:
+- "zapbot", "get started with zapbot", "configure zapbot" → invoke zapbot (meta-skill: onboarding + routing)
 - "publish plan", "share plan", "sync plan", "create issue from plan" → invoke zapbot-publish
+- "check status", "workflow status", "what happened to issue" → invoke zapbot-status
 
-## Commands
+## Commands (teammates)
+
+```
+/zapbot-publish    # publish a plan to GitHub with review link
+/zapbot-status     # check workflow status for an issue
+```
+
+## Commands (eng lead / server)
 
 ```bash
 bun test              # run unit + store + state-machine tests
 bun run bridge        # start webhook bridge (port 3000)
 ./start.sh            # one-click: ngrok + webhook + bridge
 ./test/e2e-smoke.sh   # end-to-end smoke test
+./setup --server      # install server dependencies
 ```
 
 ## State machine
@@ -32,6 +42,8 @@ DRAFT_REVIEW → VERIFYING → DONE. See ARCHITECTURE.md for details.
 - `src/state-machine/` — Pure-function state machine engine
 - `src/agents/` — Agent spawning, heartbeat, role-specific logic
 - `src/config/` — Config loader for agent-orchestrator.yaml, repo map, per-repo webhook secrets
+- `src/webhook/` — Webhook event mapping (extracted for testability)
 - `src/logger.ts` — Structured logging
 - `bin/` — CLI entry points (webhook-bridge, team-init, publish)
+- `skills/` — Claude Code skill definitions (zapbot-publish, zapbot-status)
 - `templates/` — Config templates for agent-orchestrator and agent rules

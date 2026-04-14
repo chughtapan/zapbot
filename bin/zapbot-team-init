@@ -218,11 +218,14 @@ echo ""
 echo "--- Generating agent-orchestrator.yaml ---"
 TEMPLATE="$REPO_DIR/templates/agent-orchestrator.yaml.tmpl"
 if [ -f "$TEMPLATE" ]; then
+  BRIDGE_URL_VALUE="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
   sed \
     -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
     -e "s|{{REPO_PATH}}|$REPO_PATH|g" \
     -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
     "$TEMPLATE" > "$REPO_DIR/agent-orchestrator.yaml"
+  # Set bridge_url from env or default
+  sed -i "s|^bridge_url:.*|bridge_url: ${BRIDGE_URL_VALUE}|" "$REPO_DIR/agent-orchestrator.yaml"
   echo "  Generated agent-orchestrator.yaml"
 else
   echo "  Template not found at $TEMPLATE, skipping"
@@ -293,4 +296,21 @@ echo ""
 echo "To add another repo later:"
 echo "  cd ~/other-project"
 echo "  $REPO_DIR/bin/zapbot-team-init --add-repo <owner/other-repo>"
+echo ""
+
+# ── Teammate config snippet ──────────────────────────────────────────
+BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
+WEBHOOK_SECRET=$(grep '^GITHUB_WEBHOOK_SECRET=' .env 2>/dev/null | cut -d= -f2 || echo "YOUR_SECRET_HERE")
+echo "================================================"
+echo "  Share this with your teammates:"
+echo "================================================"
+echo ""
+echo "  Teammates: run /zapbot-publish in Claude Code."
+echo "  When asked for config, paste this:"
+echo ""
+echo "  {\"bridges\":{\"$ZAPBOT_REPO\":{\"url\":\"$BRIDGE_URL\",\"secret\":\"$WEBHOOK_SECRET\"}}}"
+echo ""
+echo "  Or share the URL and secret separately:"
+echo "    Bridge URL: $BRIDGE_URL"
+echo "    Secret:     $WEBHOOK_SECRET"
 echo ""

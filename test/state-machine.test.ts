@@ -257,3 +257,91 @@ describe("edge cases", () => {
     expect((spawnEffects[0] as any).role).toBe("implementer");
   });
 });
+
+// ── Additional coverage ────────────────────────────────────────────
+
+describe("non_draft_pr_opened transition", () => {
+  it("IMPLEMENTING -> VERIFYING on non_draft_pr_opened, spawns QE agent", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, { type: "non_draft_pr_opened", triggeredBy: "agent", prNumber: 99 });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.VERIFYING);
+    expect(result!.sideEffects.some((e) => e.type === "spawn_agent" && (e as any).role === "qe")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "remove_label" && (e as any).label === "implementing")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "add_label" && (e as any).label === "verifying")).toBe(true);
+  });
+});
+
+describe("verification_failed cycle-based routing", () => {
+  it("VERIFYING -> DRAFT_REVIEW when draftReviewCycles < 3", () => {
+    const wf = makeSub(SubState.VERIFYING, { draftReviewCycles: 0 });
+    const result = apply(wf, { type: "verification_failed", triggeredBy: "qe-agent" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DRAFT_REVIEW);
+    expect(result!.sideEffects.some((e) => e.type === "remove_label" && (e as any).label === "verifying")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "add_label" && (e as any).label === "draft-review")).toBe(true);
+  });
+
+  it("VERIFYING -> ABANDONED when draftReviewCycles >= 3", () => {
+    const wf = makeSub(SubState.VERIFYING, { draftReviewCycles: 3 });
+    const result = apply(wf, { type: "verification_failed", triggeredBy: "qe-agent" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.ABANDONED);
+    expect(result!.sideEffects.some((e) => e.type === "notify_human")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "check_parent_completion")).toBe(true);
+  });
+});
+
+describe("abandon from APPROVED state", () => {
+  it("APPROVED -> ABANDONED on label_abandoned", () => {
+    const wf = makeSub(SubState.APPROVED);
+    const result = apply(wf, { type: "label_abandoned", triggeredBy: "author" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.ABANDONED);
+    expect(result!.sideEffects.some((e) => e.type === "check_parent_completion")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "remove_label" && (e as any).label === "plan-approved")).toBe(true);
+    expect(result!.sideEffects.some((e) => e.type === "add_label" && (e as any).label === "abandoned")).toBe(true);
+  });
+});
+
+describe("parent abandon cascades", () => {
+  it("TRIAGE -> ABANDONED produces abandon_children effect", () => {
+    const wf = makeParent(ParentState.TRIAGE);
+    const result = apply(wf, { type: "label_abandoned", triggeredBy: "alice" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(ParentState.ABANDONED);
+    const abandonEffect = result!.sideEffects.find((e) => e.type === "abandon_children");
+    expect(abandonEffect).toBeDefined();
+    expect((abandonEffect as any).parentWorkflowId).toBe("wf-10");
+  });
+
+  it("TRIAGED -> ABANDONED produces abandon_children effect", () => {
+    const wf = makeParent(ParentState.TRIAGED);
+    const result = apply(wf, { type: "label_abandoned", triggeredBy: "alice" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(ParentState.ABANDONED);
+    const abandonEffect = result!.sideEffects.find((e) => e.type === "abandon_children");
+    expect(abandonEffect).toBeDefined();
+    expect((abandonEffect as any).parentWorkflowId).toBe("wf-10");
+  });
+});
+
+describe("DRAFT_REVIEW self-transition on changes_requested", () => {
+  it("stays in DRAFT_REVIEW and posts comment", () => {
+    const wf = makeSub(SubState.DRAFT_REVIEW);
+    const result = apply(wf, { type: "changes_requested", triggeredBy: "reviewer" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DRAFT_REVIEW);
+    expect(result!.transition.from).toBe(SubState.DRAFT_REVIEW);
+    expect(result!.transition.to).toBe(SubState.DRAFT_REVIEW);
+    expect(result!.sideEffects.some((e) => e.type === "post_comment")).toBe(true);
+  });
+
+  it("does not swap labels on self-transition", () => {
+    const wf = makeSub(SubState.DRAFT_REVIEW);
+    const result = apply(wf, { type: "changes_requested", triggeredBy: "reviewer" });
+    expect(result).not.toBeNull();
+    expect(result!.sideEffects.some((e) => e.type === "remove_label")).toBe(false);
+    expect(result!.sideEffects.some((e) => e.type === "add_label")).toBe(false);
+  });
+});

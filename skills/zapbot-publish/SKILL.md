@@ -4,77 +4,199 @@ description: Publish current plan to a GitHub issue with a plannotator share lin
 allowed-tools:
   - Bash
   - Read
+  - Write
   - AskUserQuestion
 ---
 
 ## Preamble
 
 ```bash
-_UPD=$(~/.claude/skills/zapbot/bin/zapbot-update-check 2>/dev/null || true)
-[ -n "$_UPD" ] && echo "$_UPD" || true
+# Check plannotator
+command -v plannotator >/dev/null 2>&1 && echo "PLANNOTATOR: installed" || echo "PLANNOTATOR: missing"
+
+# Check config
+[ -f ~/.zapbot/config.json ] && echo "CONFIG: exists" || echo "CONFIG: missing"
+
+# Detect repo
+REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]\(.*\)\.git/\1/' | sed 's/.*github.com[:/]\(.*\)/\1/')
+echo "REPO: $REPO"
+
+# Ensure state dir exists
+mkdir -p ~/.zapbot
+
+# Print raw config for Claude to parse
+[ -f ~/.zapbot/config.json ] && cat ~/.zapbot/config.json || echo "{}"
+
+# Check if this is the first publish for this repo
+REPO_HASH=$(echo "$REPO" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$REPO" | tr '/' '-')
+[ -f ~/.zapbot/first-publish-done."$REPO_HASH" ] && echo "FIRST_PUBLISH: no" || echo "FIRST_PUBLISH: yes"
 ```
-
-If output shows `UPGRADE_AVAILABLE <old> <new>`:
-  1. Run: `cd ~/.claude/skills/zapbot && git pull origin main && ./setup`
-  2. Tell user: "Zapbot upgraded v{old} → v{new}."
-  3. Continue with the skill.
-
-If output shows `JUST_UPGRADED <old> <new>`:
-  Tell user: "Running zapbot v{new} (just updated!)" and continue.
 
 # /zapbot-publish
 
-Publish the current plan to a GitHub issue for team review.
+Publish the current plan to a GitHub issue for team review. Follow these steps in order, reacting to the preamble output and handling failures gracefully.
 
 ## Steps
 
-### 1. Find the plan file
+### 1. Ensure config exists
 
-**Conversation context (primary):** Check if there is an active plan file in this conversation. The host agent's system messages include plan file paths when in plan mode. If found, use it directly.
+If preamble shows `CONFIG: missing`, create a skeleton config:
 
-**Content-based search (fallback):** If no plan file is referenced in conversation context, search by content:
+Use the Write tool to create `~/.zapbot/config.json` with contents:
+```json
+{"bridges":{}}
+```
+
+Then re-read the config file so you have it in memory.
+
+If `CONFIG: exists`, read `~/.zapbot/config.json` to load current config.
+
+### 2. Ensure bridge URL is configured for this repo
+
+Parse the config JSON. Look up `bridges[REPO]` where REPO is the value from the preamble.
+
+If `bridges[REPO]` does not exist or has no `url` field, use AskUserQuestion:
+> "What's your zapbot bridge URL? (Ask your eng lead if you don't have it.)"
+
+Write the answer into the config under `bridges[REPO].url` using the Write tool to update `~/.zapbot/config.json`.
+
+### 3. Ensure bridge secret is configured for this repo
+
+If `bridges[REPO].secret` is missing or empty, use AskUserQuestion:
+> "What's the bridge API secret? (Your eng lead has this.)"
+
+Write the answer into the config under `bridges[REPO].secret` using the Write tool to update `~/.zapbot/config.json`.
+
+### 4. Ensure plannotator is installed
+
+If preamble shows `PLANNOTATOR: missing`, auto-install it:
 
 ```bash
-setopt +o nomatch 2>/dev/null || true  # zsh compat
-BRANCH=$(git branch --show-current 2>/dev/null | tr '/' '-')
-REPO=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)")
-_PLAN_SLUG=$(git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-' | tr -cd 'a-zA-Z0-9._-') || true
-_PLAN_SLUG="${_PLAN_SLUG:-$(basename "$PWD" | tr -cd 'a-zA-Z0-9._-')}"
-PLAN=""
-for PLAN_DIR in "$HOME/.gstack/projects/$_PLAN_SLUG" "$HOME/.claude/plans" "$HOME/.codex/plans" ".gstack/plans"; do
-  [ -d "$PLAN_DIR" ] || continue
-  PLAN=$(ls -t "$PLAN_DIR"/*.md 2>/dev/null | xargs grep -l "$BRANCH" 2>/dev/null | head -1)
-  [ -z "$PLAN" ] && PLAN=$(ls -t "$PLAN_DIR"/*.md 2>/dev/null | xargs grep -l "$REPO" 2>/dev/null | head -1)
-  [ -z "$PLAN" ] && PLAN=$(find "$PLAN_DIR" -name '*.md' -mmin -1440 -maxdepth 1 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
-  [ -n "$PLAN" ] && break
+curl -fsSL https://plannotator.ai/install.sh | bash
+```
+
+If the install fails, warn the user:
+> "Plannotator install failed. I can still publish the plan without a review link (degraded mode)."
+
+Continue in degraded mode -- skip the plannotator share step later (step 8) but complete all other steps.
+
+### 5. Dry Run
+
+If the user passed `--dry-run` as an argument OR the preamble shows `FIRST_PUBLISH: yes`, perform a dry run before proceeding.
+
+First, check bridge reachability:
+
+```bash
+curl -sf $BRIDGE_URL/healthz >/dev/null 2>&1 && echo "reachable" || echo "unreachable"
+```
+
+Then show the following preview (filling in values from preamble and config):
+
+```
+DRY RUN — config check:
+  Repo:     {REPO from preamble}
+  Bridge:   {BRIDGE_URL from config} (reachable ✓/✗)
+  Labels:   [planning]
+  Review:   Plannotator link will be generated
+  Callback: Token will be registered at bridge
+
+  Run /zapbot-publish to execute for real.
+```
+
+**If triggered by explicit `--dry-run`:** Stop here. Do not proceed to the real publish.
+
+**If triggered by `FIRST_PUBLISH: yes` (not explicit `--dry-run`):** Use AskUserQuestion:
+> "This is your first publish. Everything looks configured correctly. Proceed?"
+> A) Yes, publish now
+> B) Cancel
+
+If the user chooses A, continue with the real publish (step 6 onward). If the user chooses B, stop.
+
+### 6. Find the plan file
+
+**Conversation context (primary):** Check if there is an active plan file referenced in this conversation. If found, use it directly.
+
+**Auto-detect (fallback):** Search common locations:
+
+```bash
+for f in plan.md .claude/plan.md PLAN.md; do
+  [ -f "$f" ] && echo "PLAN_FILE: $f" && break
 done
-# Legacy fallback: check CWD
-if [ -z "$PLAN" ]; then
-  for f in plan.md .claude/plan.md PLAN.md; do
-    [ -f "$f" ] && PLAN="$f" && break
-  done
-fi
-[ -n "$PLAN" ] && echo "PLAN_FILE: $PLAN" || echo "NO_PLAN_FILE"
 ```
 
-**Validation:** If a plan file was found via content-based search (not conversation context), read the first 20 lines and verify it is relevant to the current branch's work. If unrelated, treat as "no plan file found."
-
-Use the discovered path as `PLAN_FILE`. If `NO_PLAN_FILE`, ask the user: "Where is the plan file? Provide the path."
-
-### 2. Determine the feature key
-
-Use the `BRANCH` value from step 1. If branch is `main`, `master`, or `develop`, use AskUserQuestion:
-"You're on a shared branch. What short name describes this plan? (e.g., 'auth-refactor', 'add-billing')"
-
-Use the answer as `KEY`. Otherwise use the branch name.
-
-### 3. Publish
+Also check `~/.gstack/projects/` and `~/.claude/plans/` for recently modified .md files:
 
 ```bash
-bash ~/.claude/skills/zapbot/bin/zapbot-publish.sh "$PLAN_FILE" --key "$KEY"
+find ~/.gstack/projects/ ~/.claude/plans/ -name '*.md' -mmin -1440 -maxdepth 2 2>/dev/null | xargs ls -t 2>/dev/null | head -3
 ```
 
-### 4. Report result
+If no plan file is found, use AskUserQuestion:
+> "I couldn't find a plan file. What's the path to your plan?"
 
-Tell the user the issue URL and remind them:
-"When the team is ready, add the 'plan-approved' label to trigger implementation."
+Use the discovered path as `PLAN_FILE`.
+
+### 7. Extract title
+
+Read the plan file and extract the title from the first `# heading` line.
+
+### 8. Generate plannotator share link
+
+Skip this step if plannotator is not installed (degraded mode from step 4).
+
+```bash
+plannotator share "$PLAN_FILE"
+```
+
+Capture the share link URL from the output. If the command fails, warn the user and continue without a share link.
+
+### 9. Create or update GitHub issue
+
+Create a GitHub issue with the plan content:
+
+```bash
+gh issue create --title "$TITLE" --body "$BODY" --repo "$REPO"
+```
+
+The body should include:
+- The plan content (or a summary with the plannotator share link)
+- A link to the plannotator share URL (if available)
+- A note that adding the `plan-approved` label triggers implementation
+
+If an issue for this plan already exists, use `gh issue edit` instead of creating a new one.
+
+Capture the `ISSUE_NUMBER` from the output.
+
+### 10. Register callback token with bridge
+
+Read the bridge URL and secret from the config (loaded in steps 2-3).
+
+```bash
+curl -X POST "$BRIDGE_URL/api/tokens" \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"'"$TOKEN"'","issueNumber":'"$ISSUE_NUMBER"',"repo":"'"$REPO"'"}'
+```
+
+Generate `TOKEN` as a random string (e.g., `uuidgen` or `openssl rand -hex 16`).
+
+### 11. Notify bridge of plan_published
+
+```bash
+curl -X POST "$BRIDGE_URL/api/callbacks/plannotator/$ISSUE_NUMBER" \
+  -H "Content-Type: application/json" \
+  -d '{"event":"plan_published","author":"'"$(git config user.name 2>/dev/null || echo unknown)"'"}'
+```
+
+### 12. Confirm success
+
+Tell the user:
+- The GitHub issue URL
+- The plannotator share link (if available, otherwise note degraded mode)
+- Remind them: "When the team is ready, add the 'plan-approved' label to trigger implementation."
+
+After displaying the success message, mark first publish as done:
+
+```bash
+REPO_HASH=$(echo "$REPO" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$REPO" | tr '/' '-')
+touch ~/.zapbot/first-publish-done."$REPO_HASH"
+```

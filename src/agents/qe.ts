@@ -9,6 +9,15 @@ const log = createLogger("qe-agent");
  * Called when the QE agent finishes verification successfully.
  * The QE agent posts a "QE Approved" comment/label but does NOT merge directly —
  * branch protection rules are the merge gate.
+ *
+ * @deprecated This function bypasses the state machine engine and skips side effects
+ * (label swaps, comments, issue closing, parent completion checks). The webhook-driven
+ * flow in webhook-bridge.ts handles these transitions correctly via apply() + executeSideEffects().
+ * This function exists for potential future direct-completion paths but is not currently
+ * called by any production code path.
+ *
+ * Note: The verification_failed path also bypasses the MAX_DRAFT_REVIEW_CYCLES guard
+ * defined in the state machine transitions, allowing unlimited review cycles.
  */
 export async function completeQEVerification(
   db: Kysely<Database>,

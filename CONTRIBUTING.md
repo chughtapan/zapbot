@@ -5,14 +5,23 @@
 ```bash
 # Install zapbot globally
 git clone https://github.com/chughtapan/zapbot ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot && ./setup
+cd ~/.claude/skills/zapbot
+
+# Teammate setup (installs bun, skills only — no infra)
+./setup
+
+# Eng lead / server setup (also installs ngrok, ao)
+./setup --server
 
 # Onboard a project
 cd ~/your-project
 ~/.claude/skills/zapbot/bin/zapbot-team-init
 ```
 
-Prerequisites: node 20+, git 2.25+, bun, jq, gh CLI (authenticated), tmux, claude, ngrok (with auth token).
+Prerequisites depend on your role:
+
+- **Teammate** (publishes plans, checks status): git 2.25+, gh CLI (authenticated). Bun is auto-installed by `./setup`.
+- **Server / eng lead** (runs the bridge): git 2.25+, gh CLI (authenticated), tmux, jq, node 20+. Bun, ngrok, and ao are installed by `./setup --server`.
 
 ## Project structure
 
@@ -33,6 +42,12 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   │   └── qe.ts                    # QE role logic
 │   ├── config/
 │   │   └── loader.ts                # Parses agent-orchestrator.yaml, builds repo map
+│   ├── http/
+│   │   ├── error-response.ts        # Structured JSON error helper (errorResponse)
+│   │   └── verify-signature.ts      # GitHub HMAC signature verification
+│   ├── webhook/
+│   │   └── mapper.ts                # Maps GitHub webhook payloads to typed events
+│   ├── workflow-id.ts               # Canonical workflow ID from repo + issue number
 │   ├── state-machine/
 │   │   ├── states.ts                # State enums and label mappings
 │   │   ├── transitions.ts           # Transition table definitions
@@ -46,8 +61,12 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   │   └── dialect.ts               # Bun SQLite dialect
 │   └── logger.ts                    # Structured logging (createLogger)
 ├── skills/
-│   └── zapbot-publish/
-│       └── SKILL.md                 # Claude Code skill (thin wrapper)
+│   ├── zapbot-meta/
+│   │   └── SKILL.md                 # Meta-skill: onboarding + routing (/zapbot)
+│   ├── zapbot-publish/
+│   │   └── SKILL.md                 # Plan publisher with Claude orchestration
+│   └── zapbot-status/
+│       └── SKILL.md                 # Workflow status checker (/zapbot-status)
 ├── templates/
 │   ├── agent-orchestrator.yaml.tmpl # Config template (templated per-repo)
 │   ├── agent-rules.md.tmpl          # Base agent instructions template
@@ -59,8 +78,16 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   ├── state-machine.test.ts        # State machine unit tests
 │   ├── store.test.ts                # Store/query unit tests
 │   ├── config-loader.test.ts        # Config loader unit tests
+│   ├── webhook-mapper.test.ts       # Webhook event mapping tests
+│   ├── bridge-endpoints.test.ts     # Bridge HTTP endpoint tests
+│   ├── error-response.test.ts       # Structured error response tests
+│   ├── verify-signature.test.ts     # HMAC signature verification tests
+│   ├── heartbeat.test.ts            # Agent heartbeat tests
+│   ├── workflow-id.test.ts          # Workflow ID generation tests
+│   ├── agent-completions.test.ts    # Agent completion function tests
+│   ├── github-client.test.ts        # GitHub client tests
 │   └── e2e-smoke.sh                 # E2E smoke tests
-├── setup                            # Tool installer (bun, ngrok, plannotator, ao)
+├── setup                            # Tool installer: ./setup (teammate) or ./setup --server (eng lead)
 ├── start.sh                         # Start bridge + AO + ngrok from a project dir
 ├── VERSION                          # Used by update-check
 └── .gitignore
@@ -78,16 +105,17 @@ your-project/
 ## Running tests
 
 ```bash
-# Unit tests (57 tests across 3 files, runs in ~400ms)
+# Unit tests (136 tests across 11 files, runs in ~400ms)
 bun test
 
 # E2E smoke tests (needs gh CLI, a test repo, and running bridge)
 ./test/e2e-smoke.sh
 ```
 
-Unit tests cover the state machine, store queries, and config loader. They run
-in-memory with no external dependencies. E2E tests create real GitHub issues and
-need the bridge running.
+Unit tests cover the state machine, store queries, config loader, webhook mapper,
+bridge endpoints, error responses, signature verification, heartbeat, workflow IDs,
+and agent completions. They run in-memory with no external dependencies. E2E tests
+create real GitHub issues and need the bridge running.
 
 ## Development workflow
 
@@ -109,7 +137,13 @@ need the bridge running.
 | `src/state-machine/engine.ts` | Pure-function state machine (apply transitions) | Adding new states or transitions |
 | `src/store/queries.ts` | All database queries (workflows, agents, transitions) | Adding new queries or changing data access |
 | `templates/agent-rules-*.md` | Per-role agent instructions | Changing agent behavior for a specific role |
-| `test/*.test.ts` | Vitest unit tests | Adding tests for new features |
+| `src/http/error-response.ts` | Structured JSON error responses | Changing error format or adding error types |
+| `src/http/verify-signature.ts` | GitHub HMAC signature verification | Changing webhook auth |
+| `src/webhook/mapper.ts` | Maps GitHub webhook payloads to typed events | Adding new webhook event types |
+| `src/workflow-id.ts` | Canonical workflow ID from repo + issue | Changing ID format |
+| `skills/zapbot-meta/SKILL.md` | Meta-skill: onboarding + routing | Changing /zapbot behavior |
+| `skills/zapbot-status/SKILL.md` | Workflow status checker | Changing /zapbot-status behavior |
+| `test/*.test.ts` | Vitest unit tests (136 tests across 11 files) | Adding tests for new features |
 | `test/e2e-smoke.sh` | E2E test suite | Adding integration tests |
 
 ## Adding a new repo
