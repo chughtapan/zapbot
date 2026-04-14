@@ -58,10 +58,21 @@ if [ -z "$REPO" ]; then
   exit 1
 fi
 
-# Generate plannotator annotate link
+# Generate plannotator review link
 SHARE_LINK=""
 if command -v plannotator >/dev/null 2>&1; then
-  SHARE_LINK=$(plannotator annotate "$PLAN_FILE" 2>/dev/null || echo "")
+  # plannotator annotate prints the URL then starts a server (blocks indefinitely).
+  # Use timeout to kill it after extracting the URL.
+  PLANNOTATOR_OUTPUT=$(timeout 10 plannotator annotate "$PLAN_FILE" 2>&1 || true)
+  SHARE_LINK=$(echo "$PLANNOTATOR_OUTPUT" | grep -oE 'https://share\.plannotator\.ai/[^ ]+' | head -1)
+  if [ -z "$SHARE_LINK" ]; then
+    echo "ERROR: plannotator annotate produced no review link."
+    echo "  Output: $PLANNOTATOR_OUTPUT"
+    echo "  Publishing without review link."
+  fi
+else
+  echo "WARNING: plannotator not installed. Publishing without review link."
+  echo "  Install: curl -fsSL https://plannotator.ai/install.sh | bash"
 fi
 
 # Build issue body

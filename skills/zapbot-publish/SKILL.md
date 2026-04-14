@@ -139,15 +139,21 @@ Use the discovered path as `PLAN_FILE`.
 
 Read the plan file and extract the title from the first `# heading` line.
 
-### 8. Generate plannotator annotate link
+### 8. Generate plannotator review link
 
 Skip this step if plannotator is not installed (degraded mode from step 4).
 
+Run via Bash:
 ```bash
-plannotator annotate "$PLAN_FILE"
+plannotator annotate "$PLAN_FILE" 2>&1
 ```
 
-Capture the share link URL from the output. If the command fails, warn the user and continue without a share link.
+Check the exit code AND the output:
+- If exit code is non-zero: **tell the user explicitly** what failed. Show the error output. Do NOT silently continue.
+- If exit code is 0: extract the URL from the output (it contains `https://share.plannotator.ai/...`).
+- If no URL found in successful output: warn the user that plannotator produced no link.
+
+**Never swallow errors silently.** The user must know if plannotator failed and why.
 
 ### 9. Create or update GitHub issue
 
