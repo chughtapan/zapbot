@@ -88,11 +88,20 @@ else
   echo "Created issue #$ISSUE_NUM"
 fi
 
+# Register callback token with repo context for plannotator
+CB_TOKEN=$(openssl rand -hex 16)
+if [ -n "$ISSUE_NUM" ]; then
+  curl -s -X POST "${BRIDGE_URL}/api/tokens" \
+    -H "Content-Type: application/json" \
+    -d "{\"token\":\"${CB_TOKEN}\",\"issueNumber\":${ISSUE_NUM},\"repo\":\"${REPO}\"}" \
+    >/dev/null 2>&1 || true
+fi
+
 # Notify the bridge about the plan publication
 if [ -n "$ISSUE_NUM" ]; then
   curl -s -X POST "$BRIDGE_URL/api/callbacks/plannotator/$ISSUE_NUM" \
     -H "Content-Type: application/json" \
-    -d "{\"repo\": \"$REPO\", \"event\": \"plan_published\"}" \
+    -d "{\"token\":\"${CB_TOKEN}\",\"repo\":\"${REPO}\",\"event\":\"plan_published\"}" \
     >/dev/null 2>&1 || true
 fi
 

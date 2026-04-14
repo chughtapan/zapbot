@@ -81,6 +81,22 @@ if (!WEBHOOK_SECRET) {
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
 const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
+// ── Plannotator callback token store ────────────────────────────────
+// Maps callback tokens to { issueNumber, repo, createdAt } so plannotator
+// callbacks resolve to the correct repo without relying on a global env var.
+// Tokens expire after TOKEN_TTL_MS to prevent unbounded memory growth.
+const callbackTokens = new Map<string, { issueNumber: number; repo: string; createdAt: number }>();
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function pruneExpiredTokens(): void {
+  const now = Date.now();
+  for (const [key, val] of callbackTokens) {
+    if (now - val.createdAt > TOKEN_TTL_MS) {
+      callbackTokens.delete(key);
+    }
+  }
+}
+
 // ── HMAC verification ───────────────────────────────────────────────
 
 async function verifySignature(
@@ -787,9 +803,12 @@ async function main() {
 
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
-        const repo = body.repo || "";
 
-        log.info(`Plannotator callback for #${issueNumber}`, { issueNumber });
+        // Resolve repo: token store first, then request body, then env var fallback
+        const stored = body.token ? callbackTokens.get(body.token) : undefined;
+        const repo = stored?.repo || body.repo || process.env.ZAPBOT_REPO || "";
+
+        log.info(`Plannotator callback for #${issueNumber}`, { issueNumber, repo });
 
         // Handle plan_published event from zapbot-publish.sh
         if (body.event === "plan_published") {
@@ -867,9 +886,24 @@ async function main() {
         return resp;
       }
 
-      // Token management (passthrough to AO)
+      // Token registration for plannotator callbacks
       if (pathname === "/api/tokens" && req.method === "POST") {
-        return proxyToAO(req, pathname);
+        const body = await req.json().catch(() => ({}));
+        const { token, issueNumber, repo } = body;
+        if (!token || typeof token !== "string" || issueNumber == null || typeof issueNumber !== "number") {
+          return new Response("missing or invalid token/issueNumber", { status: 400 });
+        }
+        pruneExpiredTokens();
+        callbackTokens.set(token, {
+          issueNumber,
+          repo: repo || process.env.ZAPBOT_REPO || "",
+          createdAt: Date.now(),
+        });
+        log.info(`Registered callback token for #${issueNumber}`, {
+          issueNumber,
+          repo: repo || process.env.ZAPBOT_REPO || "",
+        });
+        return Response.json({ ok: true });
       }
 
       return new Response("not found", { status: 404 });
@@ -878,11 +912,15 @@ async function main() {
 
   log.info(`Webhook bridge listening on http://localhost:${PORT}`);
 
+  // Periodic token cleanup (every hour)
+  const tokenCleanupInterval = setInterval(pruneExpiredTokens, 60 * 60 * 1000);
+
   // Graceful shutdown
   process.on("SIGINT", async () => {
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
+    clearInterval(tokenCleanupInterval);
     server.stop();
     await db.destroy();
     process.exit(0);
@@ -892,6 +930,7 @@ async function main() {
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
+    clearInterval(tokenCleanupInterval);
     server.stop();
     await db.destroy();
     process.exit(0);
