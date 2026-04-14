@@ -81,6 +81,11 @@ if (!WEBHOOK_SECRET) {
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
 const AO_URL = process.env.AO_URL || "http://localhost:3001";
 
+// ── Plannotator callback token store ────────────────────────────────
+// Maps callback tokens to { issueNumber, repo, createdAt } so plannotator
+// callbacks resolve to the correct repo without relying on a global env var.
+const callbackTokens = new Map<string, { issueNumber: number; repo: string; createdAt: number }>();
+
 // ── HMAC verification ───────────────────────────────────────────────
 
 async function verifySignature(
@@ -787,9 +792,12 @@ async function main() {
 
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
-        const repo = body.repo || "";
 
-        log.info(`Plannotator callback for #${issueNumber}`, { issueNumber });
+        // Resolve repo: token store first, then request body, then env var fallback
+        const stored = body.token ? callbackTokens.get(body.token) : undefined;
+        const repo = stored?.repo || body.repo || process.env.ZAPBOT_REPO || "";
+
+        log.info(`Plannotator callback for #${issueNumber}`, { issueNumber, repo });
 
         // Handle plan_published event from zapbot-publish.sh
         if (body.event === "plan_published") {
@@ -867,9 +875,23 @@ async function main() {
         return resp;
       }
 
-      // Token management (passthrough to AO)
+      // Token registration for plannotator callbacks
       if (pathname === "/api/tokens" && req.method === "POST") {
-        return proxyToAO(req, pathname);
+        const body = await req.json().catch(() => ({}));
+        const { token, issueNumber, repo } = body;
+        if (!token || issueNumber == null) {
+          return new Response("missing token or issueNumber", { status: 400 });
+        }
+        callbackTokens.set(token, {
+          issueNumber,
+          repo: repo || process.env.ZAPBOT_REPO || "",
+          createdAt: Date.now(),
+        });
+        log.info(`Registered callback token for #${issueNumber}`, {
+          issueNumber,
+          repo: repo || process.env.ZAPBOT_REPO || "",
+        });
+        return Response.json({ ok: true });
       }
 
       return new Response("not found", { status: 404 });
