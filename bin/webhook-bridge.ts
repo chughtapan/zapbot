@@ -84,7 +84,18 @@ const AO_URL = process.env.AO_URL || "http://localhost:3001";
 // ── Plannotator callback token store ────────────────────────────────
 // Maps callback tokens to { issueNumber, repo, createdAt } so plannotator
 // callbacks resolve to the correct repo without relying on a global env var.
+// Tokens expire after TOKEN_TTL_MS to prevent unbounded memory growth.
 const callbackTokens = new Map<string, { issueNumber: number; repo: string; createdAt: number }>();
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function pruneExpiredTokens(): void {
+  const now = Date.now();
+  for (const [key, val] of callbackTokens) {
+    if (now - val.createdAt > TOKEN_TTL_MS) {
+      callbackTokens.delete(key);
+    }
+  }
+}
 
 // ── HMAC verification ───────────────────────────────────────────────
 
@@ -879,9 +890,10 @@ async function main() {
       if (pathname === "/api/tokens" && req.method === "POST") {
         const body = await req.json().catch(() => ({}));
         const { token, issueNumber, repo } = body;
-        if (!token || issueNumber == null) {
-          return new Response("missing token or issueNumber", { status: 400 });
+        if (!token || typeof token !== "string" || issueNumber == null || typeof issueNumber !== "number") {
+          return new Response("missing or invalid token/issueNumber", { status: 400 });
         }
+        pruneExpiredTokens();
         callbackTokens.set(token, {
           issueNumber,
           repo: repo || process.env.ZAPBOT_REPO || "",
@@ -900,11 +912,15 @@ async function main() {
 
   log.info(`Webhook bridge listening on http://localhost:${PORT}`);
 
+  // Periodic token cleanup (every hour)
+  const tokenCleanupInterval = setInterval(pruneExpiredTokens, 60 * 60 * 1000);
+
   // Graceful shutdown
   process.on("SIGINT", async () => {
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
+    clearInterval(tokenCleanupInterval);
     server.stop();
     await db.destroy();
     process.exit(0);
@@ -914,6 +930,7 @@ async function main() {
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
+    clearInterval(tokenCleanupInterval);
     server.stop();
     await db.destroy();
     process.exit(0);
