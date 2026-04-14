@@ -3,67 +3,117 @@ set -euo pipefail
 
 # Zapbot setup — installs dependencies for the zapbot tool itself.
 # Run once after cloning: cd ~/.claude/skills/zapbot && ./setup
+#
+# Modes:
+#   ./setup            Teammate install (skill only, no server deps)
+#   ./setup --server   Server install (adds ngrok, agent-orchestrator, tmux/jq/node prereqs)
+#   ./setup --help     Show usage
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "=== Zapbot Setup ==="
+# --- Parse flags ---
+SERVER_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --server) SERVER_MODE=true ;;
+    --help|-h)
+      echo "Usage: ./setup [--server]"
+      echo ""
+      echo "  (no flags)   Teammate install — skill + minimal deps"
+      echo "  --server     Server install — adds orchestrator deps (ngrok, ao, tmux, jq, node)"
+      echo "  --help       Show this help"
+      exit 0
+      ;;
+    *)
+      echo "Unknown flag: $arg"
+      echo "Run ./setup --help for usage."
+      exit 1
+      ;;
+  esac
+done
+
+if $SERVER_MODE; then
+  echo "=== Zapbot Server Setup ==="
+else
+  echo "=== Zapbot Setup ==="
+fi
 echo ""
 
-# Check prerequisites
+# --- Check prerequisites ---
 MISSING=""
-command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
 command -v git >/dev/null 2>&1 || MISSING="$MISSING git"
 command -v gh >/dev/null 2>&1 || MISSING="$MISSING gh"
-command -v tmux >/dev/null 2>&1 || MISSING="$MISSING tmux"
-command -v jq >/dev/null 2>&1 || MISSING="$MISSING jq"
+
+if $SERVER_MODE; then
+  command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
+  command -v tmux >/dev/null 2>&1 || MISSING="$MISSING tmux"
+  command -v jq >/dev/null 2>&1 || MISSING="$MISSING jq"
+fi
 
 if [ -n "$MISSING" ]; then
   echo "ERROR: Missing:$MISSING"
   exit 1
 fi
 
-# Install bun (if missing)
+# --- Install bun (if missing) ---
 if ! command -v bun >/dev/null 2>&1; then
   echo "Installing bun..."
   curl -fsSL https://bun.sh/install | bash
 fi
 
-# Install npm dependencies (kysely, etc.)
+# --- Install npm dependencies (kysely, etc.) ---
 echo "Installing dependencies..."
 (cd "$ZAPBOT_DIR" && bun install --frozen-lockfile 2>/dev/null || cd "$ZAPBOT_DIR" && bun install)
 
-# Install ngrok (if missing)
-if ! command -v ngrok >/dev/null 2>&1; then
-  echo "Installing ngrok..."
-  if [[ "$(uname)" == "Darwin" ]]; then
-    brew install ngrok 2>/dev/null || {
-      ARCH=$(uname -m)
-      [ "$ARCH" = "x86_64" ] && ARCH="amd64"
-      [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ] && ARCH="arm64"
-      curl -fsSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-${ARCH}.tgz" -o /tmp/ngrok.tgz
-      tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
-    }
-  else
-    curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz
-    sudo tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
-  fi
-fi
-
-# Install plannotator (if missing)
+# --- Install plannotator (if missing) ---
 if ! command -v plannotator >/dev/null 2>&1; then
   echo "Installing plannotator..."
   curl -fsSL https://plannotator.ai/install.sh | bash
 fi
 
-# Install agent-orchestrator (if missing)
-if ! command -v ao >/dev/null 2>&1; then
-  echo "Installing agent-orchestrator..."
-  if command -v npm >/dev/null 2>&1; then
-    npm install -g @aoagents/ao
-  elif command -v bun >/dev/null 2>&1; then
-    bun install -g @aoagents/ao
+# --- Server-only installs ---
+if $SERVER_MODE; then
+  # Install ngrok (if missing)
+  if ! command -v ngrok >/dev/null 2>&1; then
+    echo "Installing ngrok..."
+    if [[ "$(uname)" == "Darwin" ]]; then
+      brew install ngrok 2>/dev/null || {
+        ARCH=$(uname -m)
+        [ "$ARCH" = "x86_64" ] && ARCH="amd64"
+        [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ] && ARCH="arm64"
+        curl -fsSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-${ARCH}.tgz" -o /tmp/ngrok.tgz
+        tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
+      }
+    else
+      curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz
+      sudo tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
+    fi
+  fi
+
+  # Install agent-orchestrator (if missing)
+  if ! command -v ao >/dev/null 2>&1; then
+    echo "Installing agent-orchestrator..."
+    if command -v npm >/dev/null 2>&1; then
+      npm install -g @aoagents/ao
+    elif command -v bun >/dev/null 2>&1; then
+      bun install -g @aoagents/ao
+    else
+      echo "WARNING: Neither npm nor bun found. Install @aoagents/ao manually."
+    fi
+  fi
+
+  # Validate server installs
+  echo ""
+  echo "Validating server dependencies..."
+  if command -v ngrok >/dev/null 2>&1; then
+    echo "  ngrok: $(ngrok version 2>&1 || echo 'installed')"
   else
-    echo "WARNING: Neither npm nor bun found. Install @aoagents/ao manually."
+    echo "  WARNING: ngrok not found after install"
+  fi
+  if command -v ao >/dev/null 2>&1; then
+    echo "  agent-orchestrator: $(ao --version 2>&1 || echo 'installed')"
+  else
+    echo "  WARNING: ao not found after install"
   fi
 fi
 
@@ -99,8 +149,11 @@ link_skill_dirs "$ZAPBOT_DIR" "$SKILLS_DIR"
 # Make scripts executable
 chmod +x "$ZAPBOT_DIR/bin/"* "$ZAPBOT_DIR/setup" "$ZAPBOT_DIR/start.sh" "$ZAPBOT_DIR/test/e2e-smoke.sh" 2>/dev/null || true
 
-# Write upgrade marker if version changed (for manual `git pull && ./setup` upgrades)
+# Create ~/.zapbot/ dir
 STATE_DIR="$HOME/.zapbot"
+mkdir -p "$STATE_DIR"
+
+# Write upgrade marker if version changed (for manual `git pull && ./setup` upgrades)
 MARKER_FILE="$STATE_DIR/just-upgraded-from"
 NEW_VERSION=$(cat "$ZAPBOT_DIR/VERSION" 2>/dev/null || echo "0.0.0")
 if [ -f "$MARKER_FILE.prev" ]; then
@@ -117,19 +170,25 @@ elif [ -f "$STATE_DIR/installed-version" ]; then
     echo "$PREV_VERSION" > "$MARKER_FILE"
   fi
 fi
-mkdir -p "$STATE_DIR"
 echo "$NEW_VERSION" > "$STATE_DIR/installed-version"
 
 echo ""
 echo "================================================"
-echo "  Zapbot v$(cat "$ZAPBOT_DIR/VERSION") installed!"
-echo "================================================"
-echo ""
-echo "To onboard a repo:"
-echo "  cd ~/your-project"
-echo "  ~/.claude/skills/zapbot/bin/zapbot-team-init"
-echo ""
-echo "To start the server:"
-echo "  cd ~/your-project"
-echo "  ~/.claude/skills/zapbot/start.sh"
+if $SERVER_MODE; then
+  echo "  Zapbot server v$(cat "$ZAPBOT_DIR/VERSION") installed!"
+  echo "================================================"
+  echo ""
+  echo "To onboard a repo:"
+  echo "  cd ~/your-project"
+  echo "  ~/.claude/skills/zapbot/bin/zapbot-team-init"
+  echo ""
+  echo "To start the server:"
+  echo "  cd ~/your-project"
+  echo "  ~/.claude/skills/zapbot/start.sh"
+else
+  echo "  Zapbot skill v$(cat "$ZAPBOT_DIR/VERSION") installed!"
+  echo "================================================"
+  echo ""
+  echo "Zapbot skill installed! Run /zapbot-publish in Claude Code to get started."
+fi
 echo ""

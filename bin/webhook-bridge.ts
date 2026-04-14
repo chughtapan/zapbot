@@ -36,6 +36,10 @@ process.on("unhandledRejection", (err) => {
 const log = createLogger("bridge");
 const gh = createGitHubClient();
 
+function errorResponse(status: number, type: string, message: string): Response {
+  return Response.json({ error: { type, message, status } }, { status });
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function toWorkflow(row: WorkflowTable): Workflow {
@@ -609,7 +613,7 @@ async function main() {
         try {
           payload = JSON.parse(body);
         } catch {
-          return new Response("invalid JSON", { status: 400 });
+          return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
         }
 
         const repoFullName: string = payload.repository?.full_name || "";
@@ -617,13 +621,13 @@ async function main() {
         // Reject webhooks from unconfigured repos (only when config is loaded)
         if (repoMap.size > 0 && repoFullName && !repoMap.has(repoFullName)) {
           log.warn("Webhook from unconfigured repo, rejecting", { repo: repoFullName, deliveryId });
-          return new Response(`repo '${repoFullName}' is not configured`, { status: 403 });
+          return errorResponse(403, "configuration_error", `Repo '${repoFullName}' is not configured on this bridge.`);
         }
 
         // Per-repo HMAC verification with shared secret fallback
         const secret = resolveWebhookSecret(repoFullName, repoMap, WEBHOOK_SECRET!);
         if (!(await verifySignature(body, signature, secret))) {
-          return new Response("invalid signature", { status: 401 });
+          return errorResponse(401, "signature_error", "Webhook signature verification failed.");
         }
 
         const result = await handleWebhook(eventType, deliveryId, payload);
@@ -634,12 +638,12 @@ async function main() {
       if (pathname.match(/^\/api\/workflows\/(\d+)$/) && req.method === "GET") {
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const repo = url.searchParams.get("repo") || "";
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
-        if (!wf) return new Response("not found", { status: 404 });
+        if (!wf) return errorResponse(404, "not_found", `No workflow found for issue #${issueNumber}.`);
 
         const subs = wf.level === "parent" ? await getSubWorkflows(db, wf.id) : [];
         const agents = await getAgentSessions(db, wf.id);
@@ -651,12 +655,12 @@ async function main() {
       if (pathname.match(/^\/api\/workflows\/(\d+)\/history$/) && req.method === "GET") {
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const issueNumber = parseInt(pathname.split("/")[3], 10);
         const repo = url.searchParams.get("repo") || "";
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
-        if (!wf) return new Response("not found", { status: 404 });
+        if (!wf) return errorResponse(404, "not_found", `No workflow found for issue #${issueNumber}.`);
 
         const history = await getTransitionHistory(db, wf.id);
         return Response.json({ history });
@@ -667,10 +671,10 @@ async function main() {
         const agentId = pathname.split("/")[3];
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const session = await getAgentSession(db, agentId);
-        if (!session) return new Response("not found", { status: 404 });
+        if (!session) return errorResponse(404, "not_found", `Agent '${agentId}' not found.`);
         await updateAgentHeartbeat(db, agentId);
         return new Response("ok", { status: 200 });
       }
@@ -680,10 +684,10 @@ async function main() {
         const agentId = pathname.split("/")[3];
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const session = await getAgentSession(db, agentId);
-        if (!session) return new Response("not found", { status: 404 });
+        if (!session) return errorResponse(404, "not_found", `Agent '${agentId}' not found.`);
 
         const body = await req.json().catch(() => ({}));
         await updateAgentStatus(db, agentId, body.status || "completed", body.prNumber);
@@ -788,12 +792,12 @@ async function main() {
       if (pathname === "/api/tokens" && req.method === "POST") {
         const auth = req.headers.get("authorization");
         if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
-          return new Response("unauthorized", { status: 401 });
+          return errorResponse(401, "authentication_error", "Invalid API key. Check your ~/.zapbot/config.json secret field.");
         }
         const body = await req.json().catch(() => ({}));
         const { token, issueNumber, repo } = body;
         if (!token || typeof token !== "string" || issueNumber == null || typeof issueNumber !== "number") {
-          return new Response("missing or invalid token/issueNumber", { status: 400 });
+          return errorResponse(400, "invalid_request", "Missing or invalid token/issueNumber in request body.");
         }
         pruneExpiredTokens();
         callbackTokens.set(token, {
@@ -808,7 +812,7 @@ async function main() {
         return Response.json({ ok: true });
       }
 
-      return new Response("not found", { status: 404 });
+      return errorResponse(404, "not_found", "Resource not found.");
     },
   });
 

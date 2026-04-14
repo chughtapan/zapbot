@@ -21,42 +21,65 @@ Zapbot uses an SDS-inspired two-level state machine:
 | **Implementer** | Writes code from approved plan, creates draft PR |
 | **QE** | Runs tests, verifies quality, ships the PR |
 
-## Install
+---
+
+## For Teammates
+
+### Install (30 seconds)
 
 ```bash
-git clone https://github.com/chughtapan/zapbot.git
-cd zapbot
-./setup
+git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
+cd ~/.claude/skills/zapbot && ./setup
 ```
 
-## Onboard a Repo (one-time, by eng lead)
+This installs the Claude Code skill only. No server infrastructure.
 
-Run `bin/zapbot-team-init` once per repo to generate `agent-orchestrator.yaml`,
-`.env`, labels, and CLAUDE.md routing. This is a one-time setup done by the
-engineering lead, not by each developer.
+### Configure
 
-## Start
+Your eng lead will share a bridge config snippet. When you first run `/zapbot-publish`,
+Claude will ask for your bridge URL and secret and save them to `~/.zapbot/config.json`.
+
+### Use
+
+In Claude Code:
+- `/zapbot-publish` — publish a plan as a GitHub issue with review link
+- `/zapbot-status` — check workflow status for an issue
+
+---
+
+## For Eng Leads
+
+### Server Setup
 
 ```bash
-./start.sh
+git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
+cd ~/.claude/skills/zapbot && ./setup --server
 ```
 
-This starts ngrok, configures GitHub webhooks, and launches the
-agent-orchestrator. Webhook bridge on `http://localhost:3000`,
-dashboard at `http://localhost:3001`.
+The `--server` flag installs additional dependencies: ngrok, agent-orchestrator,
+and validates each installation.
 
-## Development
+### Onboard a Repo
 
 ```bash
-bun test              # run unit tests
-bun run bridge        # start webhook bridge directly
-./test/e2e-smoke.sh   # end-to-end smoke test
+bin/zapbot-team-init <owner/repo>
 ```
 
-## Multi-Repo Support
+This generates `agent-orchestrator.yaml`, `.env`, GitHub labels, and a config
+snippet to share with teammates.
 
-Zapbot can manage multiple repos from a single bridge instance. Define projects
-in `agent-orchestrator.yaml`:
+### Start the Bridge
+
+```bash
+./start.sh [project-dir]
+```
+
+Starts ngrok, configures GitHub webhooks, and launches the agent-orchestrator.
+Webhook bridge on `http://localhost:3000`, dashboard at `http://localhost:3001`.
+
+### Multi-Repo Support
+
+Define multiple projects in `agent-orchestrator.yaml`:
 
 ```yaml
 projects:
@@ -77,8 +100,15 @@ projects:
 ```
 
 The bridge routes webhooks by `repository.full_name`, verifies HMAC signatures
-with per-repo secrets, and passes `--project` context to `ao spawn`. Webhooks
-from unconfigured repos are rejected with 403.
+with per-repo secrets, and passes `--project` context to `ao spawn`.
+
+### Development
+
+```bash
+bun test              # run unit tests
+bun run bridge        # start webhook bridge directly
+./test/e2e-smoke.sh   # end-to-end smoke test
+```
 
 ## Architecture
 
