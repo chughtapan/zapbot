@@ -6,6 +6,9 @@ set -euo pipefail
 # After creating/updating the issue, it emits a plan_published event to the bridge.
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Load zapbot env for secrets
+[ -f "$HOME/.zapbot/.env" ] && set -a && source "$HOME/.zapbot/.env" && set +a
+[ -f ".env" ] && set -a && source ".env" && set +a
 # Resolve bridge URL: agent-orchestrator.yaml > env var > default
 BRIDGE_URL=""
 if [ -f "agent-orchestrator.yaml" ]; then
@@ -14,6 +17,8 @@ fi
 if [ -z "$BRIDGE_URL" ]; then
   BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
 fi
+# API key for authenticated bridge endpoints
+API_KEY="${GITHUB_WEBHOOK_SECRET:-}"
 PLAN_FILE="${1:-}"
 
 if [ -z "$PLAN_FILE" ]; then
@@ -100,6 +105,7 @@ CB_TOKEN=$(openssl rand -hex 16)
 if [ -n "$ISSUE_NUM" ]; then
   curl -s -X POST "${BRIDGE_URL}/api/tokens" \
     -H "Content-Type: application/json" \
+    ${API_KEY:+-H "Authorization: Bearer ${API_KEY}"} \
     -d "{\"token\":\"${CB_TOKEN}\",\"issueNumber\":${ISSUE_NUM},\"repo\":\"${REPO}\"}" \
     >/dev/null 2>&1 || true
 fi

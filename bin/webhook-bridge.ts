@@ -894,8 +894,12 @@ async function main() {
         return resp;
       }
 
-      // Token registration for plannotator callbacks
+      // Token registration for plannotator callbacks (requires API key)
       if (pathname === "/api/tokens" && req.method === "POST") {
+        const auth = req.headers.get("authorization");
+        if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+          return new Response("unauthorized", { status: 401 });
+        }
         const body = await req.json().catch(() => ({}));
         const { token, issueNumber, repo } = body;
         if (!token || typeof token !== "string" || issueNumber == null || typeof issueNumber !== "number") {
