@@ -24,17 +24,45 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   ├── share-link.ts                # Plannotator URL generator
 │   ├── zapbot-team-init             # Onboards a repo (creates config, .env, labels)
 │   └── zapbot-update-check          # VERSION check against remote
+├── src/
+│   ├── agents/
+│   │   ├── spawner.ts               # ao spawn lifecycle, retries, prompt re-delivery
+│   │   ├── heartbeat.ts             # Agent liveness checker
+│   │   ├── triage.ts                # Triage role logic
+│   │   ├── planner.ts               # Planner role logic
+│   │   └── qe.ts                    # QE role logic
+│   ├── config/
+│   │   └── loader.ts                # Parses agent-orchestrator.yaml, builds repo map
+│   ├── state-machine/
+│   │   ├── states.ts                # State enums and label mappings
+│   │   ├── transitions.ts           # Transition table definitions
+│   │   ├── engine.ts                # Pure-function state machine engine
+│   │   ├── events.ts                # Event type definitions
+│   │   └── effects.ts               # Side effect type definitions
+│   ├── store/
+│   │   ├── database.ts              # Kysely + SQLite schema
+│   │   ├── queries.ts               # All DB queries (workflows, agents, transitions)
+│   │   ├── migrations.ts            # Schema migrations
+│   │   └── dialect.ts               # Bun SQLite dialect
+│   └── logger.ts                    # Structured logging (createLogger)
 ├── skills/
 │   └── zapbot-publish/
 │       └── SKILL.md                 # Claude Code skill (thin wrapper)
 ├── templates/
 │   ├── agent-orchestrator.yaml.tmpl # Config template (templated per-repo)
-│   └── agent-rules.md.tmpl         # Agent instructions template
+│   ├── agent-rules.md.tmpl          # Base agent instructions template
+│   ├── agent-rules-triage.md        # Triage agent rules
+│   ├── agent-rules-planner.md       # Planner agent rules
+│   ├── agent-rules-implementer.md   # Implementer agent rules
+│   └── agent-rules-qe.md            # QE agent rules
 ├── test/
-│   └── e2e-smoke.sh                # E2E tests (14 tests)
-├── setup                           # Tool installer (bun, ngrok, plannotator, ao)
-├── start.sh                        # Start bridge + AO + ngrok from a project dir
-├── VERSION                         # Used by update-check
+│   ├── state-machine.test.ts        # State machine unit tests
+│   ├── store.test.ts                # Store/query unit tests
+│   ├── config-loader.test.ts        # Config loader unit tests
+│   └── e2e-smoke.sh                 # E2E smoke tests
+├── setup                            # Tool installer (bun, ngrok, plannotator, ao)
+├── start.sh                         # Start bridge + AO + ngrok from a project dir
+├── VERSION                          # Used by update-check
 └── .gitignore
 ```
 
@@ -50,12 +78,16 @@ your-project/
 ## Running tests
 
 ```bash
-cd ~/.claude/skills/zapbot
+# Unit tests (57 tests across 3 files, runs in ~400ms)
+bun test
+
+# E2E smoke tests (needs gh CLI, a test repo, and running bridge)
 ./test/e2e-smoke.sh
 ```
 
-Tests need `gh` CLI authenticated and a test repo. The bridge must be running for
-Test 6 (bridge endpoint tests). Tests create and clean up real GitHub issues.
+Unit tests cover the state machine, store queries, and config loader. They run
+in-memory with no external dependencies. E2E tests create real GitHub issues and
+need the bridge running.
 
 ## Development workflow
 
@@ -68,12 +100,17 @@ Test 6 (bridge endpoint tests). Tests create and clean up real GitHub issues.
 
 | File | What it does | When to modify |
 |------|-------------|----------------|
-| `bin/webhook-bridge.ts` | Webhook routing, spawn triggers, callbacks | Adding new webhook handlers or callback types |
-| `bin/zapbot-publish.sh` | Issue creation/update logic | Changing how plans are published |
+| `bin/webhook-bridge.ts` | Webhook routing, spawn triggers, callbacks, token store | Adding new webhook handlers or callback types |
+| `bin/zapbot-publish.sh` | Issue creation/update logic, token registration | Changing how plans are published |
 | `bin/share-link.ts` | Plannotator URL generation | Changing share link format |
 | `bin/zapbot-team-init` | Per-repo onboarding | Changing what config is generated |
-| `templates/*.tmpl` | Config templates | Changing default AO config or agent rules |
-| `test/e2e-smoke.sh` | E2E test suite | Adding tests for new features |
+| `src/config/loader.ts` | Parses agent-orchestrator.yaml, repo map, per-repo secrets | Adding config options or new repo-level settings |
+| `src/agents/spawner.ts` | Agent spawn lifecycle, retries, prompt re-delivery | Changing spawn behavior or adding agent options |
+| `src/state-machine/engine.ts` | Pure-function state machine (apply transitions) | Adding new states or transitions |
+| `src/store/queries.ts` | All database queries (workflows, agents, transitions) | Adding new queries or changing data access |
+| `templates/agent-rules-*.md` | Per-role agent instructions | Changing agent behavior for a specific role |
+| `test/*.test.ts` | Vitest unit tests | Adding tests for new features |
+| `test/e2e-smoke.sh` | E2E test suite | Adding integration tests |
 
 ## Adding a new repo
 
