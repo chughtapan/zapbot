@@ -1,6 +1,6 @@
 ---
 name: zapbot-publish
-description: Publish current plan to a GitHub issue with a plannotator share link for team review.
+description: Publish current plan to a GitHub issue with a plannotator review link for team review.
 allowed-tools:
   - Bash
   - Read
@@ -78,7 +78,7 @@ curl -fsSL https://plannotator.ai/install.sh | bash
 If the install fails, warn the user:
 > "Plannotator install failed. I can still publish the plan without a review link (degraded mode)."
 
-Continue in degraded mode -- skip the plannotator share step later (step 8) but complete all other steps.
+Continue in degraded mode -- skip the plannotator annotate step later (step 8) but complete all other steps.
 
 ### 5. Dry Run
 
@@ -139,12 +139,12 @@ Use the discovered path as `PLAN_FILE`.
 
 Read the plan file and extract the title from the first `# heading` line.
 
-### 8. Generate plannotator share link
+### 8. Generate plannotator annotate link
 
 Skip this step if plannotator is not installed (degraded mode from step 4).
 
 ```bash
-plannotator share "$PLAN_FILE"
+plannotator annotate "$PLAN_FILE"
 ```
 
 Capture the share link URL from the output. If the command fails, warn the user and continue without a share link.
@@ -158,8 +158,8 @@ gh issue create --title "$TITLE" --body "$BODY" --repo "$REPO"
 ```
 
 The body should include:
-- The plan content (or a summary with the plannotator share link)
-- A link to the plannotator share URL (if available)
+- The plan content (or a summary with the plannotator annotate link)
+- A link to the plannotator annotate URL (if available)
 - A note that adding the `plan-approved` label triggers implementation
 
 If an issue for this plan already exists, use `gh issue edit` instead of creating a new one.
@@ -191,7 +191,7 @@ curl -X POST "$BRIDGE_URL/api/callbacks/plannotator/$ISSUE_NUMBER" \
 
 Tell the user:
 - The GitHub issue URL
-- The plannotator share link (if available, otherwise note degraded mode)
+- The plannotator annotate link (if available, otherwise note degraded mode)
 - Remind them: "When the team is ready, add the 'plan-approved' label to trigger implementation."
 
 After displaying the success message, mark first publish as done:
