@@ -23,6 +23,9 @@ echo "REPO: $REPO"
 
 # Print raw config for Claude to parse
 [ -f ~/.zapbot/config.json ] && cat ~/.zapbot/config.json || echo "{}"
+
+# Check if this is the first publish
+[ -f ~/.zapbot/first-publish-done ] && echo "FIRST_PUBLISH: no" || echo "FIRST_PUBLISH: yes"
 ```
 
 # /zapbot-publish
@@ -71,9 +74,43 @@ curl -fsSL https://plannotator.ai/install.sh | bash
 If the install fails, warn the user:
 > "Plannotator install failed. I can still publish the plan without a review link (degraded mode)."
 
-Continue in degraded mode -- skip the plannotator share step later (step 7) but complete all other steps.
+Continue in degraded mode -- skip the plannotator share step later (step 8) but complete all other steps.
 
-### 5. Find the plan file
+### 5. Dry Run
+
+If the user passed `--dry-run` as an argument OR the preamble shows `FIRST_PUBLISH: yes`, perform a dry run before proceeding.
+
+First, check bridge reachability:
+
+```bash
+curl -sf $BRIDGE_URL/healthz >/dev/null 2>&1 && echo "reachable" || echo "unreachable"
+```
+
+Then show the following preview (filling in values from preamble and config):
+
+```
+DRY RUN — what would happen:
+  Repo:     {REPO from preamble}
+  Bridge:   {BRIDGE_URL from config} (reachable ✓/✗)
+  Title:    "{first # heading from plan file}"
+  Action:   Create new issue / Update existing issue #{N}
+  Labels:   [planning]
+  Review:   Plannotator link will be generated
+  Callback: Token will be registered at bridge
+
+  Run /zapbot-publish to execute for real.
+```
+
+**If triggered by explicit `--dry-run`:** Stop here. Do not proceed to the real publish.
+
+**If triggered by `FIRST_PUBLISH: yes` (not explicit `--dry-run`):** Use AskUserQuestion:
+> "This is your first publish. Everything looks configured correctly. Proceed?"
+> A) Yes, publish now
+> B) Cancel
+
+If the user chooses A, continue with the real publish (step 6 onward). If the user chooses B, stop.
+
+### 6. Find the plan file
 
 **Conversation context (primary):** Check if there is an active plan file referenced in this conversation. If found, use it directly.
 
@@ -96,11 +133,11 @@ If no plan file is found, use AskUserQuestion:
 
 Use the discovered path as `PLAN_FILE`.
 
-### 6. Extract title
+### 7. Extract title
 
 Read the plan file and extract the title from the first `# heading` line.
 
-### 7. Generate plannotator share link
+### 8. Generate plannotator share link
 
 Skip this step if plannotator is not installed (degraded mode from step 4).
 
@@ -110,7 +147,7 @@ plannotator share "$PLAN_FILE"
 
 Capture the share link URL from the output. If the command fails, warn the user and continue without a share link.
 
-### 8. Create or update GitHub issue
+### 9. Create or update GitHub issue
 
 Create a GitHub issue with the plan content:
 
@@ -127,7 +164,7 @@ If an issue for this plan already exists, use `gh issue edit` instead of creatin
 
 Capture the `ISSUE_NUMBER` from the output.
 
-### 9. Register callback token with bridge
+### 10. Register callback token with bridge
 
 Read the bridge URL and secret from the config (loaded in steps 2-3).
 
@@ -140,7 +177,7 @@ curl -X POST "$BRIDGE_URL/api/tokens" \
 
 Generate `TOKEN` as a random string (e.g., `uuidgen` or `openssl rand -hex 16`).
 
-### 10. Notify bridge of plan_published
+### 11. Notify bridge of plan_published
 
 ```bash
 curl -X POST "$BRIDGE_URL/api/callbacks/plannotator/$ISSUE_NUMBER" \
@@ -148,9 +185,15 @@ curl -X POST "$BRIDGE_URL/api/callbacks/plannotator/$ISSUE_NUMBER" \
   -d '{"event":"plan_published","author":"'"$(git config user.name 2>/dev/null || echo unknown)"'"}'
 ```
 
-### 11. Confirm success
+### 12. Confirm success
 
 Tell the user:
 - The GitHub issue URL
 - The plannotator share link (if available, otherwise note degraded mode)
 - Remind them: "When the team is ready, add the 'plan-approved' label to trigger implementation."
+
+After displaying the success message, mark first publish as done:
+
+```bash
+touch ~/.zapbot/first-publish-done
+```
