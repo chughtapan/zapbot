@@ -52,7 +52,7 @@ const parentTransitions: TransitionDef[] = [
     to: ParentState.TRIAGED,
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, ParentState.TRIAGE, ParentState.TRIAGED),
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Triage complete. Sub-issues created and tracked." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Triage complete. Sub-issues have been created and are being tracked. Each sub-issue will follow its own lifecycle: planning, review, implementation, and verification." },
     ],
   },
   {
@@ -62,7 +62,7 @@ const parentTransitions: TransitionDef[] = [
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, ParentState.TRIAGED, ParentState.COMPLETED),
       { type: "close_issue", issueNumber: wf.issueNumber },
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "All sub-issues complete. Closing parent issue." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** All sub-issues are complete. Closing this parent issue. Nice work." },
     ],
   },
 ];
@@ -74,16 +74,20 @@ const subTransitions: TransitionDef[] = [
     from: SubState.PLANNING,
     eventType: "plan_published",
     to: SubState.REVIEW,
-    effects: (wf) => labelSwap(wf.issueNumber, SubState.PLANNING, SubState.REVIEW),
+    effects: (wf) => [
+      ...labelSwap(wf.issueNumber, SubState.PLANNING, SubState.REVIEW),
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Plan published and ready for review. Add the `plan-approved` label when you're satisfied with the plan." },
+    ],
   },
   {
     from: SubState.PLANNING,
     eventType: "label_added",
     to: SubState.IMPLEMENTING,
     guard: (_wf, event) => event.type === "label_added" && event.label === "plan-approved",
-    effects: (wf) => [
+    effects: (wf, event) => [
       ...labelSwap(wf.issueNumber, SubState.PLANNING, SubState.IMPLEMENTING),
       { type: "spawn_agent", role: "implementer", issueNumber: wf.issueNumber },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: `**Zapbot:** Plan approved by @${event.triggeredBy}. Spawning implementer agent to write the code.` },
     ],
   },
   {
@@ -91,9 +95,10 @@ const subTransitions: TransitionDef[] = [
     eventType: "label_added",
     to: SubState.IMPLEMENTING,
     guard: (_wf, event) => event.type === "label_added" && event.label === "plan-approved",
-    effects: (wf) => [
+    effects: (wf, event) => [
       ...labelSwap(wf.issueNumber, SubState.REVIEW, SubState.IMPLEMENTING),
       { type: "spawn_agent", role: "implementer", issueNumber: wf.issueNumber },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: `**Zapbot:** Plan approved by @${event.triggeredBy}. Spawning implementer agent to write the code.` },
     ],
   },
   {
@@ -102,7 +107,7 @@ const subTransitions: TransitionDef[] = [
     to: SubState.PLANNING,
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.REVIEW, SubState.PLANNING),
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Feedback received. Revise the plan and re-publish." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Feedback received on the plan. Moving back to planning. Revise the plan based on the review comments and re-publish when ready." },
     ],
   },
   {
@@ -111,7 +116,7 @@ const subTransitions: TransitionDef[] = [
     to: SubState.DRAFT_REVIEW,
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.IMPLEMENTING, SubState.DRAFT_REVIEW),
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Draft PR opened. Review the changes and click \"Ready for review\" when satisfied." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Draft PR opened by the implementer agent. Review the changes, leave comments, and click **Ready for review** when satisfied. The agent will iterate on any requested changes." },
     ],
   },
   {
@@ -121,7 +126,7 @@ const subTransitions: TransitionDef[] = [
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.IMPLEMENTING, SubState.VERIFYING),
       { type: "spawn_agent", role: "qe", issueNumber: wf.issueNumber },
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Non-draft PR opened. Spawning QE agent to verify." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** PR opened (non-draft). Spawning QE agent to run tests and verify the implementation." },
     ],
   },
   {
@@ -129,7 +134,7 @@ const subTransitions: TransitionDef[] = [
     eventType: "changes_requested",
     to: SubState.DRAFT_REVIEW,
     effects: (wf) => [
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Changes requested on draft PR. Implementer agent is iterating." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Changes requested on the draft PR. The implementer agent is reviewing your feedback and iterating." },
     ],
   },
   {
@@ -139,6 +144,7 @@ const subTransitions: TransitionDef[] = [
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.DRAFT_REVIEW, SubState.VERIFYING),
       { type: "spawn_agent", role: "qe", issueNumber: wf.issueNumber },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** PR marked ready for review. Spawning QE agent to run tests, verify the implementation, and ship." },
     ],
   },
   {
@@ -147,6 +153,7 @@ const subTransitions: TransitionDef[] = [
     to: SubState.DONE,
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.VERIFYING, SubState.DONE),
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Verified and shipped. PR merged, tests passing. Closing issue." },
       { type: "close_issue", issueNumber: wf.issueNumber },
       ...(wf.parentWorkflowId
         ? [{ type: "check_parent_completion" as const, parentWorkflowId: wf.parentWorkflowId }]
@@ -160,7 +167,7 @@ const subTransitions: TransitionDef[] = [
     guard: (wf) => wf.draftReviewCycles < MAX_DRAFT_REVIEW_CYCLES,
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.VERIFYING, SubState.DRAFT_REVIEW),
-      { type: "post_comment", issueNumber: wf.issueNumber, body: `Verification failed. Returning to draft review (cycle ${wf.draftReviewCycles + 1}/${MAX_DRAFT_REVIEW_CYCLES}).` },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: `**Zapbot:** Verification failed. Returning to draft review for another iteration (cycle ${wf.draftReviewCycles + 1}/${MAX_DRAFT_REVIEW_CYCLES}). The implementer agent will address the failures.` },
     ],
   },
   {
@@ -170,7 +177,7 @@ const subTransitions: TransitionDef[] = [
     guard: (wf) => wf.draftReviewCycles >= MAX_DRAFT_REVIEW_CYCLES,
     effects: (wf) => [
       ...labelSwap(wf.issueNumber, SubState.VERIFYING, SubState.ABANDONED),
-      { type: "post_comment", issueNumber: wf.issueNumber, body: `Verification failed after ${MAX_DRAFT_REVIEW_CYCLES} cycles. Abandoning — human intervention needed.` },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: `**Zapbot:** Verification failed after ${MAX_DRAFT_REVIEW_CYCLES} review cycles. Abandoning this issue. A human needs to investigate and either fix the remaining failures or re-open with a revised plan.` },
       { type: "notify_human", message: `Issue #${wf.issueNumber} abandoned after ${MAX_DRAFT_REVIEW_CYCLES} failed verification cycles.` },
       ...(wf.parentWorkflowId
         ? [{ type: "check_parent_completion" as const, parentWorkflowId: wf.parentWorkflowId }]
@@ -195,7 +202,7 @@ function buildAbandonTransitions(): TransitionDef[] {
     effects: (wf: Workflow) => [
       ...labelSwap(wf.issueNumber, from, ParentState.ABANDONED),
       { type: "abandon_children", parentWorkflowId: wf.id },
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Workflow abandoned." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Workflow abandoned. All child sub-issues will also be abandoned." },
     ],
   }));
 
@@ -205,7 +212,7 @@ function buildAbandonTransitions(): TransitionDef[] {
     to: SubState.ABANDONED,
     effects: (wf: Workflow) => [
       ...labelSwap(wf.issueNumber, from, SubState.ABANDONED),
-      { type: "post_comment", issueNumber: wf.issueNumber, body: "Sub-issue abandoned." },
+      { type: "post_comment", issueNumber: wf.issueNumber, body: "**Zapbot:** Sub-issue abandoned. Any running agents for this issue will be stopped." },
       ...(wf.parentWorkflowId
         ? [{ type: "check_parent_completion" as const, parentWorkflowId: wf.parentWorkflowId }]
         : []),
