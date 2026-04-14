@@ -34,7 +34,7 @@ export async function completeTriageAgent(
   await withTransaction(db, async (trx) => {
     // Register each sub-issue as a sub-workflow in PLANNING
     for (const issueNumber of subIssueNumbers) {
-      const subId = `wf-${issueNumber}`;
+      const subId = `wf-${repo.replace("/", "-")}-${issueNumber}`;
       await upsertWorkflow(trx, {
         id: subId,
         issue_number: issueNumber,

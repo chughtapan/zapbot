@@ -132,115 +132,8 @@ async function verifySignature(
 let db: Kysely<Database>;
 
 // ── Webhook event mapping ───────────────────────────────────────────
-
-function mapWebhookToEvent(
-  eventType: string,
-  payload: any
-): { event: WorkflowEvent; issueNumber: number; repo: string } | null {
-  const repo: string = payload.repository?.full_name || "";
-
-  if (eventType === "issues" && payload.action === "labeled") {
-    const label: string = payload.label?.name || "";
-    const actor: string = payload.sender?.login || "";
-    const issueNumber: number = payload.issue?.number;
-
-    // Self-label loop prevention
-    if (actor === BOT_USERNAME) {
-      log.debug("Ignoring self-authored label event", { label, actor });
-      return null;
-    }
-
-    if (label === "abandoned") {
-      return { event: { type: "label_abandoned", triggeredBy: actor }, issueNumber, repo };
-    }
-
-    if (label === "plan-approved") {
-      return { event: { type: "label_added", label, triggeredBy: actor }, issueNumber, repo };
-    }
-
-    if (label === "triage") {
-      return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
-    }
-
-    return null;
-  }
-
-  if (eventType === "issues" && payload.action === "opened") {
-    const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
-    const issueNumber: number = payload.issue?.number;
-    const actor: string = payload.sender?.login || "";
-
-    if (labels.includes("triage")) {
-      // New parent issue with triage label -> will create workflow in TRIAGE state
-      return null; // Handled specially below
-    }
-
-    return null;
-  }
-
-  if (eventType === "issue_comment" && payload.action === "created") {
-    // Could be agent status updates or slash commands
-    return null;
-  }
-
-  if (eventType === "pull_request" && payload.action === "opened") {
-    const prNumber: number = payload.pull_request?.number;
-    const isDraft: boolean = payload.pull_request?.draft || false;
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    // Look for linked issue in PR body (e.g., "Closes #11", "Part of #10")
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    if (isDraft) {
-      return { event: { type: "draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
-    } else {
-      // Non-draft PR: skip DRAFT_REVIEW, go straight to VERIFYING
-      return { event: { type: "non_draft_pr_opened", triggeredBy: actor, prNumber }, issueNumber, repo };
-    }
-  }
-
-  if (eventType === "pull_request" && payload.action === "ready_for_review") {
-    const prNumber: number = payload.pull_request?.number;
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    return { event: { type: "pr_ready_for_review", triggeredBy: actor, prNumber }, issueNumber, repo };
-  }
-
-  if (eventType === "pull_request" && payload.action === "closed" && payload.pull_request?.merged) {
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    return { event: { type: "verified_and_shipped", triggeredBy: actor }, issueNumber, repo };
-  }
-
-  if (eventType === "pull_request_review" && payload.action === "submitted") {
-    const state: string = payload.review?.state || "";
-    const body: string = payload.pull_request?.body || "";
-    const actor: string = payload.sender?.login || "";
-
-    if (state !== "changes_requested") return null;
-
-    const issueMatch = body.match(/(?:closes|fixes|resolves|part of)\s+#(\d+)/i);
-    if (!issueMatch) return null;
-    const issueNumber = parseInt(issueMatch[1], 10);
-
-    return { event: { type: "changes_requested", triggeredBy: actor }, issueNumber, repo };
-  }
-
-  return null;
-}
+// Extracted to src/webhook/mapper.ts for testability
+import { mapWebhookToEvent } from "../src/webhook/mapper.js";
 
 // ── Side effect execution ───────────────────────────────────────────
 
@@ -495,7 +388,7 @@ async function handleWebhook(
   }
 
   // Handle triage label on existing issue (creates parent workflow if none exists)
-  const mapped_pre = mapWebhookToEvent(eventType, payload);
+  const mapped_pre = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
   if (mapped_pre && mapped_pre.event.type === "triage_label_added") {
     const existingWf = await getWorkflowByIssue(db, mapped_pre.issueNumber, repo);
     if (!existingWf) {
@@ -532,7 +425,7 @@ async function handleWebhook(
   }
 
   // Map webhook to state machine event
-  const mapped = mapWebhookToEvent(eventType, payload);
+  const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
   if (!mapped) {
     log.debug("No state machine event for this webhook", { eventType, action: payload.action });
     return { status: 200, body: "no-op" };
@@ -797,6 +690,18 @@ async function main() {
         return new Response("ok", { status: 200 });
       }
 
+      // CORS preflight for plannotator callbacks
+      if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+          },
+        });
+      }
+
       // Plannotator callback
       if (pathname.match(/^\/api\/callbacks\/plannotator\/(\d+)$/) && req.method === "POST") {
         // CORS headers for browser-based plannotator callbacks
@@ -805,9 +710,6 @@ async function main() {
           "Access-Control-Allow-Methods": "POST, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type",
         };
-        if (req.method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: corsHeaders });
-        }
 
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const body = await req.json().catch(() => ({}));
