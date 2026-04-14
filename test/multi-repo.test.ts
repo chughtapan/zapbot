@@ -858,11 +858,15 @@ describe("AO spawning: project name from config", () => {
 describe("AO spawning: spawner script structure", () => {
   const spawner = readFileSync(join(__dirname, "../src/agents/spawner.ts"), "utf-8");
 
-  it("builds ao spawn command with --project flag", () => {
-    expect(spawner).toContain('spawnArgs.push("--project", ctx.projectName)');
+  it("sets AO_PROJECT_ID env var for project selection", () => {
+    expect(spawner).toContain("AO_PROJECT_ID = ctx.projectName");
   });
 
-  it("conditionally adds --project only when projectName exists", () => {
+  it("sets AO_CONFIG_PATH from ZAPBOT_CONFIG", () => {
+    expect(spawner).toContain("AO_CONFIG_PATH = process.env.ZAPBOT_CONFIG");
+  });
+
+  it("conditionally sets AO_PROJECT_ID only when projectName exists", () => {
     expect(spawner).toContain("if (ctx.projectName)");
   });
 

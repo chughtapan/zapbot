@@ -138,20 +138,26 @@ export async function spawnAgent(
   }
 
   try {
-    const spawnArgs = ["ao", "spawn"];
-    if (ctx.projectName) {
-      spawnArgs.push("--project", ctx.projectName);
+    const spawnArgs = ["ao", "spawn", String(ctx.issueNumber)];
+
+    // Build env for ao spawn: it needs AO_CONFIG_PATH to find the yaml,
+    // and AO_PROJECT_ID to select the right project in multi-repo setups.
+    const spawnEnv: Record<string, string | undefined> = {
+      ...process.env,
+      ZAPBOT_AGENT_ID: agentId,
+      ZAPBOT_AGENT_ROLE: ctx.role,
+    };
+    if (process.env.ZAPBOT_CONFIG) {
+      spawnEnv.AO_CONFIG_PATH = process.env.ZAPBOT_CONFIG;
     }
-    spawnArgs.push(String(ctx.issueNumber));
+    if (ctx.projectName) {
+      spawnEnv.AO_PROJECT_ID = ctx.projectName;
+    }
 
     const proc = Bun.spawn(
       spawnArgs,
       {
-        env: {
-          ...process.env,
-          ZAPBOT_AGENT_ID: agentId,
-          ZAPBOT_AGENT_ROLE: ctx.role,
-        },
+        env: spawnEnv,
         stdout: "pipe",
         stderr: "pipe",
       }
