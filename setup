@@ -58,7 +58,13 @@ fi
 # Install agent-orchestrator (if missing)
 if ! command -v ao >/dev/null 2>&1; then
   echo "Installing agent-orchestrator..."
-  npm install -g @aoagents/ao
+  if command -v npm >/dev/null 2>&1; then
+    npm install -g @aoagents/ao
+  elif command -v bun >/dev/null 2>&1; then
+    bun install -g @aoagents/ao
+  else
+    echo "WARNING: Neither npm nor bun found. Install @aoagents/ao manually."
+  fi
 fi
 
 # Claude Code only scans ~/.claude/skills/*/SKILL.md (one level deep).
