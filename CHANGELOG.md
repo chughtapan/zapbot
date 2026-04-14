@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0 (2026-04-14)
+
+Teammates can now install zapbot in 30 seconds without touching server infrastructure. The skill and orchestrator are cleanly separated.
+
+### Added
+
+- **Skill/orchestrator split** — `./setup` installs only what teammates need (skill + plannotator). `./setup --server` adds ngrok and agent-orchestrator for eng leads.
+- **`/zapbot` meta-skill** — single entry point with onboarding wizard. First run asks for bridge URL and secret, writes `~/.zapbot/config.json`, validates bridge reachability.
+- **`/zapbot-status` skill** — check workflow status for any issue from Claude Code.
+- **Dry-run mode** — first publish shows a preview before executing. Also available via `--dry-run`.
+- **Auto-upgrade check** — preamble checks for new versions every 24h.
+- **Structured JSON errors** — all bridge API endpoints return `{error: {type, message, status}}`.
+- **Team-init config snippet** — outputs a ready-to-paste config for teammates.
+- **Per-user bridge config** — `~/.zapbot/config.json` maps repos to bridge URLs and secrets.
+
+### Changed
+
+- **zapbot-publish rewritten** — Claude orchestrates each step directly. No more silent bash failures.
+- **README split** — "For Teammates" and "For Eng Leads" sections.
+
+### Fixed
+
+- Workflow ID consistency (repo-scoped IDs in triage agent)
+- CORS preflight handler (OPTIONS before POST route check)
+- GraphQL injection (variable binding in convertPrToDraft)
+- Callback token auth (required, issue-scoped)
+- JSON injection in start.sh (jq for safe construction)
+- Webhook dedup on early-return paths
+
+### Tests
+
+- 61 → 136 tests: state machine, webhook mapper, agent completions, error responses, HMAC verification, bridge endpoints, heartbeat, store queries.
+
 ## 0.3.0 (2026-04-13)
 
 Multi-repo support. Run one bridge instance across multiple GitHub repos.
