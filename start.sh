@@ -98,7 +98,7 @@ pkill -f "ngrok http" 2>/dev/null || true
 
 # Start AO from the project directory
 echo "Starting agent-orchestrator on port ${AO_PORT}..."
-(cd "$PROJECT_DIR" && ao start > /tmp/zapbot-ao.log 2>&1) &
+(cd "$PROJECT_DIR" && PORT=$AO_PORT ao start > /tmp/zapbot-ao.log 2>&1) &
 AO_PID=$!
 
 for i in $(seq 1 20); do
@@ -110,7 +110,7 @@ echo "AO ready on port ${AO_PORT}"
 
 # Start webhook bridge
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
-export ZAPBOT_API_KEY ZAPBOT_REPO ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml" ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
+export ZAPBOT_API_KEY ZAPBOT_REPO ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml" ZAPBOT_PORT=$BRIDGE_PORT ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
 bun "$ZAPBOT_DIR/bin/webhook-bridge.ts" > /tmp/zapbot-bridge.log 2>&1 &
 BRIDGE_PID=$!
 

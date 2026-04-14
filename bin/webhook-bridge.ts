@@ -373,7 +373,10 @@ async function createTriageWorkflow(
     github_delivery_id: deliveryId,
   });
   log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
-  await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber }], repo);
+  await executeSideEffects([
+    { type: "spawn_agent", role: "triage", issueNumber },
+    { type: "post_comment", issueNumber, body: "**Zapbot:** Workflow started. Spawning triage agent to analyze this issue and break it into sub-tasks." },
+  ], repo);
 }
 
 // ── Core webhook handler ────────────────────────────────────────────
@@ -449,6 +452,9 @@ async function handleWebhook(
       });
 
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
+      await executeSideEffects([
+        { type: "post_comment", issueNumber, body: "**Zapbot:** Sub-issue tracked. Currently in **planning** state. Publish a plan or add the `plan-approved` label to start implementation." },
+      ], repo);
       return { status: 200, body: "sub workflow created" };
     }
   }
