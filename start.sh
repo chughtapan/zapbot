@@ -96,7 +96,7 @@ echo "AO ready on port ${AO_PORT}"
 
 # Start webhook bridge
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
-export GITHUB_WEBHOOK_SECRET ZAPBOT_REPO ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
+export GITHUB_WEBHOOK_SECRET ZAPBOT_REPO ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml" ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
 bun "$ZAPBOT_DIR/bin/webhook-bridge.ts" > /tmp/zapbot-bridge.log 2>&1 &
 BRIDGE_PID=$!
 
