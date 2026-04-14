@@ -21,11 +21,15 @@ command -v plannotator >/dev/null 2>&1 && echo "PLANNOTATOR: installed" || echo 
 REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]\(.*\)\.git/\1/' | sed 's/.*github.com[:/]\(.*\)/\1/')
 echo "REPO: $REPO"
 
+# Ensure state dir exists
+mkdir -p ~/.zapbot
+
 # Print raw config for Claude to parse
 [ -f ~/.zapbot/config.json ] && cat ~/.zapbot/config.json || echo "{}"
 
-# Check if this is the first publish
-[ -f ~/.zapbot/first-publish-done ] && echo "FIRST_PUBLISH: no" || echo "FIRST_PUBLISH: yes"
+# Check if this is the first publish for this repo
+REPO_HASH=$(echo "$REPO" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$REPO" | tr '/' '-')
+[ -f ~/.zapbot/first-publish-done."$REPO_HASH" ] && echo "FIRST_PUBLISH: no" || echo "FIRST_PUBLISH: yes"
 ```
 
 # /zapbot-publish
@@ -89,11 +93,9 @@ curl -sf $BRIDGE_URL/healthz >/dev/null 2>&1 && echo "reachable" || echo "unreac
 Then show the following preview (filling in values from preamble and config):
 
 ```
-DRY RUN — what would happen:
+DRY RUN — config check:
   Repo:     {REPO from preamble}
   Bridge:   {BRIDGE_URL from config} (reachable ✓/✗)
-  Title:    "{first # heading from plan file}"
-  Action:   Create new issue / Update existing issue #{N}
   Labels:   [planning]
   Review:   Plannotator link will be generated
   Callback: Token will be registered at bridge
@@ -195,5 +197,6 @@ Tell the user:
 After displaying the success message, mark first publish as done:
 
 ```bash
-touch ~/.zapbot/first-publish-done
+REPO_HASH=$(echo "$REPO" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "$REPO" | tr '/' '-')
+touch ~/.zapbot/first-publish-done."$REPO_HASH"
 ```

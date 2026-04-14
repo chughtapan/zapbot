@@ -11,6 +11,9 @@ allowed-tools:
 ## Preamble
 
 ```bash
+# Ensure state dir exists
+mkdir -p ~/.zapbot
+
 # Check if configured
 [ -f ~/.zapbot/config.json ] && echo "CONFIG: exists" || echo "CONFIG: missing"
 
@@ -67,16 +70,16 @@ If CONFIG is missing OR the current REPO has no bridge entry in config:
    - B) No, I'll enter URL and secret separately
    - C) I don't know what this is
 
-3. If A: User pastes JSON. Parse it and write to ~/.zapbot/config.json using Write tool. Merge with existing config if file exists.
+3. If A: User pastes JSON. If ~/.zapbot/config.json already exists, Read it first, deep-merge the new bridge entries into the existing `bridges` object (preserving other repos), then Write the merged result. If the file does not exist, write the pasted JSON directly.
 
 4. If B: Use AskUserQuestion to ask for bridge URL, then secret. Write to config.json.
 
 5. If C: Explain: "Zapbot needs to talk to your team's bridge server. Ask your eng lead for the bridge URL and secret. They can generate a config snippet by running: zapbot-team-init"
 
 6. After config is saved, validate by hitting the bridge healthz endpoint:
-   `curl -s $BRIDGE_URL/healthz`
-   If reachable, say "Bridge connected! You're ready to go."
-   If not reachable, say "Couldn't reach the bridge at $BRIDGE_URL. Check the URL or ask your eng lead."
+   `curl -sf $BRIDGE_URL/healthz && echo "OK" || echo "FAIL"`
+   If output contains "OK", say "Bridge connected! You're ready to go."
+   If output contains "FAIL", say "Couldn't reach the bridge at $BRIDGE_URL. Check the URL or ask your eng lead."
 
 7. If PLANNOTATOR is missing, install it:
    `curl -fsSL https://plannotator.ai/install.sh | bash`
