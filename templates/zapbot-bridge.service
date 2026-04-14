@@ -1,0 +1,17 @@
+[Unit]
+Description=Zapbot Webhook Bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=__PROJECT_DIR__/.env
+ExecStart=/usr/bin/env bun __ZAPBOT_DIR__/bin/webhook-bridge.ts
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/zapbot-bridge.log
+StandardError=append:/var/log/zapbot-bridge.log
+
+[Install]
+WantedBy=multi-user.target
