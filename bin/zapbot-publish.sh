@@ -58,10 +58,10 @@ if [ -z "$REPO" ]; then
   exit 1
 fi
 
-# Generate plannotator share link
+# Generate plannotator annotate link
 SHARE_LINK=""
 if command -v plannotator >/dev/null 2>&1; then
-  SHARE_LINK=$(plannotator share "$PLAN_FILE" 2>/dev/null || echo "")
+  SHARE_LINK=$(plannotator annotate "$PLAN_FILE" 2>/dev/null || echo "")
 fi
 
 # Build issue body
