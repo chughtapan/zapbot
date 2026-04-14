@@ -32,8 +32,9 @@ if [ ! -f "$PROJECT_DIR/agent-orchestrator.yaml" ]; then
   exit 1
 fi
 
-# Load .env FIRST (from project dir)
+# Load .env FIRST (from project dir), then zapbot-specific env
 [ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
+[ -f "$HOME/.zapbot/.env" ] && set -a && source "$HOME/.zapbot/.env" && set +a
 
 # THEN set defaults (env vars from .env take precedence)
 BRIDGE_PORT="${ZAPBOT_BRIDGE_PORT:-3000}"
@@ -147,20 +148,45 @@ if [ "$USE_NGROK" = true ]; then
       fi
     fi
 
-    EXISTING_HOOK=$(gh api "repos/${repo}/hooks" --jq '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
+    if [ -n "${ZAPBOT_GITHUB_TOKEN:-}" ]; then
+      EXISTING_HOOK=$(curl -s -H "Authorization: Bearer $ZAPBOT_GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/hooks" \
+        | jq -r '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
+    else
+      EXISTING_HOOK=$(gh api "repos/${repo}/hooks" --jq '[.[] | select(.config.url | test("ngrok|zapbot"))] | .[0].id // empty' 2>/dev/null || echo "")
+    fi
 
     if [ -n "$EXISTING_HOOK" ]; then
-      gh api "repos/${repo}/hooks/${EXISTING_HOOK}" --method PATCH \
-        -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
-        -f "config[secret]=${REPO_SECRET}" >/dev/null
+      if [ -n "${ZAPBOT_GITHUB_TOKEN:-}" ]; then
+        curl -s -X PATCH \
+          -H "Authorization: Bearer $ZAPBOT_GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${repo}/hooks/${EXISTING_HOOK}" \
+          -d "{\"config\":{\"url\":\"${WEBHOOK_URL}\",\"content_type\":\"json\",\"secret\":\"${REPO_SECRET}\"}}" \
+          >/dev/null
+      else
+        gh api "repos/${repo}/hooks/${EXISTING_HOOK}" --method PATCH \
+          -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
+          -f "config[secret]=${REPO_SECRET}" >/dev/null
+      fi
       WEBHOOK_IDS+=("${repo}:${EXISTING_HOOK}")
       echo "  Updated existing webhook for ${repo}"
     else
-      HOOK_ID=$(gh api "repos/${repo}/hooks" --method POST \
-        -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
-        -f "config[secret]=${REPO_SECRET}" \
-        -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
-        -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" --jq '.id')
+      if [ -n "${ZAPBOT_GITHUB_TOKEN:-}" ]; then
+        HOOK_ID=$(curl -s -X POST \
+          -H "Authorization: Bearer $ZAPBOT_GITHUB_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${repo}/hooks" \
+          -d "{\"config\":{\"url\":\"${WEBHOOK_URL}\",\"content_type\":\"json\",\"secret\":\"${REPO_SECRET}\"},\"events\":[\"issues\",\"pull_request\",\"pull_request_review\",\"check_run\",\"issue_comment\"],\"active\":true}" \
+          | jq -r '.id')
+      else
+        HOOK_ID=$(gh api "repos/${repo}/hooks" --method POST \
+          -f "config[url]=${WEBHOOK_URL}" -f "config[content_type]=json" \
+          -f "config[secret]=${REPO_SECRET}" \
+          -F "events[]=issues" -F "events[]=pull_request" -F "events[]=pull_request_review" \
+          -F "events[]=check_run" -F "events[]=issue_comment" -F "active=true" --jq '.id')
+      fi
       WEBHOOK_IDS+=("${repo}:${HOOK_ID}")
       echo "  Created webhook for ${repo}"
     fi
@@ -187,7 +213,15 @@ cleanup() {
     repo="${entry%%:*}"
     hook_id="${entry##*:}"
     echo "  Deactivating webhook #${hook_id} on ${repo}..."
-    gh api "repos/${repo}/hooks/${hook_id}" --method PATCH -F "active=false" >/dev/null 2>&1 || true
+    if [ -n "${ZAPBOT_GITHUB_TOKEN:-}" ]; then
+      curl -s -X PATCH \
+        -H "Authorization: Bearer $ZAPBOT_GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${repo}/hooks/${hook_id}" \
+        -d '{"active":false}' >/dev/null 2>&1 || true
+    else
+      gh api "repos/${repo}/hooks/${hook_id}" --method PATCH -F "active=false" >/dev/null 2>&1 || true
+    fi
   done
   [ -n "${NGROK_PID:-}" ] && kill $NGROK_PID 2>/dev/null || true
   kill $BRIDGE_PID $AO_PID 2>/dev/null || true

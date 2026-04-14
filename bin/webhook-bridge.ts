@@ -25,6 +25,7 @@ import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heart
 import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
+import { createGitHubClient } from "../src/github/client.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -32,6 +33,7 @@ process.on("unhandledRejection", (err) => {
 });
 
 const log = createLogger("bridge");
+const gh = createGitHubClient();
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -268,7 +270,7 @@ async function executeSideEffects(
             issueNumber: effect.issueNumber,
             label: effect.label,
           });
-          await runGh(["issue", "edit", String(effect.issueNumber), "--repo", repo, "--add-label", effect.label]);
+          await gh.addLabel(repo, effect.issueNumber, effect.label);
           break;
         }
         case "remove_label": {
@@ -276,17 +278,17 @@ async function executeSideEffects(
             issueNumber: effect.issueNumber,
             label: effect.label,
           });
-          await runGh(["issue", "edit", String(effect.issueNumber), "--repo", repo, "--remove-label", effect.label]);
+          await gh.removeLabel(repo, effect.issueNumber, effect.label);
           break;
         }
         case "post_comment": {
           log.info(`Posting comment on #${effect.issueNumber}`, { issueNumber: effect.issueNumber });
-          await runGh(["issue", "comment", String(effect.issueNumber), "--repo", repo, "--body", effect.body]);
+          await gh.postComment(repo, effect.issueNumber, effect.body);
           break;
         }
         case "close_issue": {
           log.info(`Closing issue #${effect.issueNumber}`, { issueNumber: effect.issueNumber });
-          await runGh(["issue", "close", String(effect.issueNumber), "--repo", repo]);
+          await gh.closeIssue(repo, effect.issueNumber);
           break;
         }
         case "check_parent_completion": {
@@ -299,19 +301,19 @@ async function executeSideEffects(
         }
         case "convert_pr_to_draft": {
           log.info(`Converting PR #${effect.prNumber} to draft`, { prNumber: effect.prNumber });
-          await runGh(["pr", "ready", String(effect.prNumber), "--repo", repo, "--undo"]);
+          await gh.convertPrToDraft(repo, effect.prNumber);
           break;
         }
         case "create_sub_issue": {
           log.info(`Creating sub-issue for parent #${effect.parentIssueNumber}`, {
             parentIssue: effect.parentIssueNumber,
           });
-          await runGh([
-            "issue", "create", "--repo", repo,
-            "--title", effect.title,
-            "--body", `${effect.body}\n\nPart of #${effect.parentIssueNumber}`,
-            "--label", "planning",
-          ]);
+          await gh.createIssue(
+            repo,
+            effect.title,
+            `${effect.body}\n\nPart of #${effect.parentIssueNumber}`,
+            ["planning"],
+          );
           break;
         }
         case "notify_human": {
@@ -323,19 +325,6 @@ async function executeSideEffects(
       log.error(`Failed to execute side effect ${effect.type}: ${err}`, { effect: effect.type });
     }
   }
-}
-
-async function runGh(args: string[]): Promise<string> {
-  const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
-  const output = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    const errMsg = `gh ${args.join(" ")} → ${stderr.trim()}`;
-    log.error(`gh command failed: ${errMsg}`);
-    throw new Error(errMsg);
-  }
-  return output.trim();
 }
 
 // ── Parent completion check ─────────────────────────────────────────

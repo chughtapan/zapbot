@@ -6,7 +6,14 @@ set -euo pipefail
 # After creating/updating the issue, it emits a plan_published event to the bridge.
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
+# Resolve bridge URL: agent-orchestrator.yaml > env var > default
+BRIDGE_URL=""
+if [ -f "agent-orchestrator.yaml" ]; then
+  BRIDGE_URL=$(grep '^bridge_url:' agent-orchestrator.yaml | awk '{print $2}' || echo "")
+fi
+if [ -z "$BRIDGE_URL" ]; then
+  BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
+fi
 PLAN_FILE="${1:-}"
 
 if [ -z "$PLAN_FILE" ]; then

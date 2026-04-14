@@ -218,11 +218,14 @@ echo ""
 echo "--- Generating agent-orchestrator.yaml ---"
 TEMPLATE="$REPO_DIR/templates/agent-orchestrator.yaml.tmpl"
 if [ -f "$TEMPLATE" ]; then
+  BRIDGE_URL_VALUE="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
   sed \
     -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
     -e "s|{{REPO_PATH}}|$REPO_PATH|g" \
     -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
     "$TEMPLATE" > "$REPO_DIR/agent-orchestrator.yaml"
+  # Set bridge_url from env or default
+  sed -i "s|^bridge_url:.*|bridge_url: ${BRIDGE_URL_VALUE}|" "$REPO_DIR/agent-orchestrator.yaml"
   echo "  Generated agent-orchestrator.yaml"
 else
   echo "  Template not found at $TEMPLATE, skipping"
