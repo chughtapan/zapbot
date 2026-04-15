@@ -117,7 +117,17 @@ export async function spawnAgent(
 
   await cleanStaleWorktree(ctx.issueNumber);
 
-  // Copy role-specific agent rules so AO gives the agent the right instructions
+  // Copy role-specific agent rules so AO gives the agent the right instructions.
+  //
+  // RACE CONDITION NOTE: This writes to a shared path (.agent-rules.md) in the
+  // project root. If two agents for different roles spawn concurrently, the second
+  // write stomps the first agent's rules file. This is mitigated by the fact that
+  // AO copies project files into each agent's worktree at spawn time, so the agent
+  // gets a snapshot of .agent-rules.md as it existed when `ao spawn` ran. The race
+  // window is limited to the gap between copyFileSync and AO reading the file during
+  // spawn (typically < 1 second). A lock or per-agent filename would eliminate this
+  // entirely, but AO expects `.agent-rules.md` specifically, so this is acceptable
+  // given the narrow window.
   const rulesFile = path.join(ZAPBOT_DIR, `templates/agent-rules-${ctx.role}.md`);
   const projectRules = path.join(process.cwd(), ".agent-rules.md");
   if (fs.existsSync(rulesFile)) {
@@ -165,6 +175,7 @@ export async function spawnAgent(
 
     proc.exited.then(async (code) => {
       if (code === 0) {
+        await updateAgentStatus(db, agentId, "running");
         log.info(`Agent ${agentId} spawn process exited successfully`, { agentId });
 
         // Re-deliver prompt after a delay to work around AO prompt delivery race.
@@ -219,7 +230,8 @@ export async function spawnAgent(
       if (opts.onFailed) await opts.onFailed(db, agentId);
     });
 
-    await updateAgentStatus(db, agentId, "running");
+    // Status stays "spawning" until .exited handler confirms success or failure.
+    // Don't set "running" prematurely — if spawn fails fast, DB would lie.
     log.info(`Agent ${agentId} spawned successfully`, { agentId, role: ctx.role });
   } catch (err) {
     log.error(`Failed to spawn agent ${agentId}: ${err}`, { agentId, role: ctx.role });

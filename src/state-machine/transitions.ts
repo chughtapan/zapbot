@@ -25,9 +25,14 @@ export interface TransitionResult {
 interface TransitionDef {
   from: string;
   eventType: string;
-  to: string;
+  to: string | ((workflow: Workflow, event: WorkflowEvent) => string);
   guard?: (workflow: Workflow, event: WorkflowEvent) => boolean;
   effects: (workflow: Workflow, event: WorkflowEvent) => SideEffect[];
+}
+
+/** Resolve a static or dynamic `to` field. */
+export function resolveTo(def: TransitionDef, workflow: Workflow, event: WorkflowEvent): string {
+  return typeof def.to === "function" ? def.to(workflow, event) : def.to;
 }
 
 const MAX_DRAFT_REVIEW_CYCLES = 3;
@@ -222,10 +227,97 @@ function buildAbandonTransitions(): TransitionDef[] {
   return [...parentAbandons, ...subAbandons];
 }
 
+// ── Label-based state override (human can move to any state) ──────
+
+/** States that require spawning an agent when entered via override. */
+const AGENT_SPAWN_STATES: Record<string, "triage" | "implementer" | "qe"> = {
+  [ParentState.TRIAGE]: "triage",
+  [SubState.IMPLEMENTING]: "implementer",
+  [SubState.VERIFYING]: "qe",
+};
+
+function buildOverrideTransitions(): TransitionDef[] {
+  // All non-terminal states that a human might want to override into
+  const allParentStates = [ParentState.TRIAGE, ParentState.TRIAGED];
+  const allSubStates = [
+    SubState.PLANNING, SubState.REVIEW, SubState.IMPLEMENTING,
+    SubState.DRAFT_REVIEW, SubState.VERIFYING,
+  ];
+  const allNonTerminal = [...allParentStates, ...allSubStates];
+
+  return allNonTerminal.map((from) => ({
+    from,
+    eventType: "label_state_override",
+    to: (_wf: Workflow, event: WorkflowEvent) => {
+      if (event.type === "label_state_override") return event.targetState;
+      return from; // should never happen
+    },
+    guard: (_wf: Workflow, event: WorkflowEvent) => {
+      // Only fire if the target is different from current state
+      if (event.type !== "label_state_override") return false;
+      return event.targetState !== from;
+    },
+    effects: (wf: Workflow, event: WorkflowEvent) => {
+      if (event.type !== "label_state_override") return [];
+      const targetState = event.targetState;
+      const role = AGENT_SPAWN_STATES[targetState];
+      const agentMsg = role ? ` Spawning **${role}** agent.` : "";
+      const effects: SideEffect[] = [
+        ...labelSwap(wf.issueNumber, from, targetState),
+        { type: "post_comment", issueNumber: wf.issueNumber,
+          body: `**Zapbot:** @${event.triggeredBy} manually moved this issue from **${from}** to **${targetState}**.${agentMsg}` },
+      ];
+      if (role) {
+        effects.push({ type: "spawn_agent", role, issueNumber: wf.issueNumber });
+      }
+      return effects;
+    },
+  }));
+}
+
+// ── External close (issue closed via GitHub UI) ──────────────────
+
+function buildExternalCloseTransitions(): TransitionDef[] {
+  const allParentStates = [ParentState.TRIAGE, ParentState.TRIAGED];
+  const allSubStates = [
+    SubState.PLANNING, SubState.REVIEW, SubState.IMPLEMENTING,
+    SubState.DRAFT_REVIEW, SubState.VERIFYING,
+  ];
+
+  const parentCloses: TransitionDef[] = allParentStates.map((from) => ({
+    from,
+    eventType: "issue_closed_externally",
+    to: ParentState.COMPLETED,
+    effects: (wf: Workflow, event: WorkflowEvent) => [
+      ...labelSwap(wf.issueNumber, from, ParentState.COMPLETED),
+      { type: "post_comment", issueNumber: wf.issueNumber,
+        body: `**Zapbot:** Issue closed by @${event.triggeredBy}. Marking workflow as completed.` },
+    ],
+  }));
+
+  const subCloses: TransitionDef[] = allSubStates.map((from) => ({
+    from,
+    eventType: "issue_closed_externally",
+    to: SubState.DONE,
+    effects: (wf: Workflow, event: WorkflowEvent) => [
+      ...labelSwap(wf.issueNumber, from, SubState.DONE),
+      { type: "post_comment", issueNumber: wf.issueNumber,
+        body: `**Zapbot:** Issue closed by @${event.triggeredBy}. Marking workflow as done.` },
+      ...(wf.parentWorkflowId
+        ? [{ type: "check_parent_completion" as const, parentWorkflowId: wf.parentWorkflowId }]
+        : []),
+    ],
+  }));
+
+  return [...parentCloses, ...subCloses];
+}
+
 export const ALL_TRANSITIONS: TransitionDef[] = [
   ...parentTransitions,
   ...subTransitions,
   ...buildAbandonTransitions(),
+  ...buildOverrideTransitions(),
+  ...buildExternalCloseTransitions(),
 ];
 
 export function findTransition(

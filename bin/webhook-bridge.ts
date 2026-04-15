@@ -608,6 +608,24 @@ async function recoverStuckWorkflows(): Promise<void> {
   const agentStates = new Set(["TRIAGE", "IMPLEMENTING", "VERIFYING"]);
 
   for (const wf of active) {
+    // Check if the GitHub issue is still open before attempting recovery.
+    // Issues closed externally (via GitHub UI or by agents) should not be re-spawned.
+    try {
+      const issueState = await gh.getIssueState(wf.repo, wf.issue_number);
+      if (issueState === "closed") {
+        log.info(`Recovery: ${wf.id} — GitHub issue #${wf.issue_number} is closed, marking workflow as DONE`, {
+          workflow: wf.id, state: wf.state,
+        });
+        await updateWorkflowState(db, wf.id, "DONE");
+        continue;
+      }
+    } catch (err) {
+      log.warn(`Recovery: ${wf.id} — could not check issue state, skipping (${err})`, {
+        workflow: wf.id,
+      });
+      continue;
+    }
+
     const agents = await getAgentSessions(db, wf.id);
 
     if (agentStates.has(wf.state) && allAgentsDead(agents)) {
@@ -620,7 +638,7 @@ async function recoverStuckWorkflows(): Promise<void> {
       await executeSideEffects([
         { type: "spawn_agent", role, issueNumber: wf.issue_number },
         { type: "post_comment", issueNumber: wf.issue_number,
-          body: `Zapbot: Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
+          body: `**Zapbot:** Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
       ], wf.repo);
     } else {
       const zombies = agents.filter((a) => a.status === "running" || a.status === "spawning");
@@ -694,6 +712,9 @@ async function main() {
         }
         const issueNumber = parseInt(pathname.split("/").pop()!, 10);
         const repo = url.searchParams.get("repo") || "";
+        if (!repo && repoMap.size > 1) {
+          return errorResponse(400, "missing_parameter", "Multi-repo bridge requires ?repo=owner/name parameter.");
+        }
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
         if (!wf) return errorResponse(404, "not_found", `No workflow found for issue #${issueNumber}.`);
 
@@ -711,6 +732,9 @@ async function main() {
         }
         const issueNumber = parseInt(pathname.split("/")[3], 10);
         const repo = url.searchParams.get("repo") || "";
+        if (!repo && repoMap.size > 1) {
+          return errorResponse(400, "missing_parameter", "Multi-repo bridge requires ?repo=owner/name parameter.");
+        }
         const wf = await getWorkflowByIssue(db, issueNumber, repo);
         if (!wf) return errorResponse(404, "not_found", `No workflow found for issue #${issueNumber}.`);
 
@@ -742,8 +766,66 @@ async function main() {
         if (!session) return errorResponse(404, "not_found", `Agent '${agentId}' not found.`);
 
         const body = await req.json().catch(() => ({}));
-        await updateAgentStatus(db, agentId, body.status || "completed", body.prNumber);
-        log.info(`Agent ${agentId} completed`, { agentId, status: body.status });
+        const completionStatus = body.status || "completed";
+        await updateAgentStatus(db, agentId, completionStatus, body.prNumber);
+        log.info(`Agent ${agentId} completed`, { agentId, status: completionStatus, role: session.role });
+
+        // Fire state machine events based on agent role when completion is successful.
+        // This connects agent completion to the workflow state machine so that
+        // finishing an agent actually advances the workflow.
+        if (completionStatus === "completed") {
+          const wfRow = await getWorkflow(db, session.workflow_id);
+          if (wfRow) {
+            const workflow: Workflow = toWorkflow(wfRow);
+            let event: WorkflowEvent | null = null;
+
+            if (session.role === "triage" && workflow.state === "TRIAGE") {
+              // Triage agent completed: fire triage_complete to move TRIAGE → TRIAGED
+              event = {
+                type: "triage_complete",
+                triggeredBy: agentId,
+                subIssueNumbers: Array.isArray(body.subIssueNumbers) ? body.subIssueNumbers : [],
+              };
+            } else if (session.role === "qe" && workflow.state === "VERIFYING") {
+              // QE agent completed: fire verified_and_shipped or verification_failed
+              if (body.passed === false) {
+                event = { type: "verification_failed", triggeredBy: agentId };
+              } else {
+                event = { type: "verified_and_shipped", triggeredBy: agentId };
+              }
+            }
+
+            if (event) {
+              const result = apply(workflow, event);
+              if (result) {
+                await withTransaction(db, async (trx) => {
+                  const stateUpdates: { draft_review_cycles?: number } = {};
+                  if (result.newState === "DRAFT_REVIEW" && workflow.state === "VERIFYING") {
+                    stateUpdates.draft_review_cycles = workflow.draftReviewCycles + 1;
+                  }
+                  await updateWorkflowState(trx, workflow.id, result.newState, stateUpdates);
+                  await addTransition(trx, {
+                    id: `t-${crypto.randomUUID()}`,
+                    workflow_id: workflow.id,
+                    from_state: result.transition.from,
+                    to_state: result.transition.to,
+                    event_type: result.transition.event,
+                    triggered_by: result.transition.triggeredBy,
+                    metadata: null,
+                    github_delivery_id: null,
+                  });
+                });
+                log.info(`Agent completion triggered: ${workflow.id} ${result.transition.from} → ${result.transition.to}`, {
+                  agentId,
+                  role: session.role,
+                  event: event.type,
+                });
+                await executeSideEffects(result.sideEffects, wfRow.repo);
+              }
+            }
+          }
+        }
+
         return new Response("ok", { status: 200 });
       }
 

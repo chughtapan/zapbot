@@ -210,10 +210,10 @@ if [ "$USE_NGROK" = true ]; then
   # Persist bridge URL in project .env (atomic via mktemp)
   if [ -f "$PROJECT_DIR/.env" ]; then
     TMPENV=$(mktemp "$PROJECT_DIR/.env.XXXXXX")
-    trap "rm -f '$TMPENV'" EXIT
     grep -v '^ZAPBOT_BRIDGE_URL=' "$PROJECT_DIR/.env" > "$TMPENV"
     echo "ZAPBOT_BRIDGE_URL=${NGROK_URL}" >> "$TMPENV"
     mv "$TMPENV" "$PROJECT_DIR/.env"
+    # No trap needed — mv succeeded, temp file is gone
   fi
   export ZAPBOT_BRIDGE_URL="${NGROK_URL}"
 else
@@ -241,7 +241,11 @@ cleanup() {
     fi
   done
   [ -n "${NGROK_PID:-}" ] && kill $NGROK_PID 2>/dev/null || true
-  kill $BRIDGE_PID $AO_PID 2>/dev/null || true
+  # Kill process trees (not just direct PIDs) to avoid orphaned AO children
+  for pid in ${BRIDGE_PID:-} ${AO_PID:-}; do
+    [ -n "$pid" ] && pkill -P "$pid" 2>/dev/null || true
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
   echo "All processes stopped."
 }
 trap cleanup EXIT INT TERM

@@ -1,4 +1,5 @@
 import type { WorkflowEvent } from "../state-machine/events.js";
+import { LABEL_TO_STATE } from "../state-machine/states.js";
 
 const DEFAULT_BOT_USERNAME = "zapbot[bot]";
 const LINKED_ISSUE_RE = /(?:closes|fixes|resolves|part of)\s+#(\d+)/i;
@@ -41,7 +42,27 @@ export function mapWebhookToEvent(
       return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
     }
 
+    // Any other state-mapped label triggers a state override.
+    // This lets humans move issues to any state by adding the label.
+    const targetState = LABEL_TO_STATE[label];
+    if (targetState) {
+      return {
+        event: { type: "label_state_override", label, targetState, triggeredBy: actor },
+        issueNumber,
+        repo,
+      };
+    }
+
     return null;
+  }
+
+  // Issue closed externally (via GitHub UI or by a user, not by zapbot's close_issue effect).
+  // This moves the workflow to a terminal state so it's not re-spawned on restart.
+  if (eventType === "issues" && payload.action === "closed") {
+    const actor: string = payload.sender?.login || "";
+    const issueNumber: number = payload.issue?.number;
+    if (actor === botUsername) return null; // zapbot closed it via close_issue effect, already handled
+    return { event: { type: "issue_closed_externally", triggeredBy: actor }, issueNumber, repo };
   }
 
   if (eventType === "issues" && payload.action === "opened") {
