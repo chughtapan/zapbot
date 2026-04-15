@@ -30,3 +30,5 @@ a sub-issue using gstack's planning and review skills.
 ## Commit style:
 - Use conventional commits (feat:, fix:, chore:)
 - Reference the issue number in the commit message: "feat: ... (closes #N)"
+
+Frequently update your task list using TaskCreate/TaskUpdate. Your progress is broadcast to users on GitHub.
