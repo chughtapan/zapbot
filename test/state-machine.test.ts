@@ -345,3 +345,115 @@ describe("DRAFT_REVIEW self-transition on changes_requested", () => {
     expect(result!.sideEffects.some((e) => e.type === "add_label")).toBe(false);
   });
 });
+
+// ── Label-based state override ─────────────────────────────────────
+
+describe("label_state_override transitions", () => {
+  const override = (targetState: string): WorkflowEvent => ({
+    type: "label_state_override",
+    label: "test",
+    targetState,
+    triggeredBy: "human",
+  });
+
+  it("moves sub-issue backwards: IMPLEMENTING → PLANNING", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.PLANNING));
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.PLANNING);
+    expect(result!.transition.from).toBe(SubState.IMPLEMENTING);
+    expect(result!.transition.to).toBe(SubState.PLANNING);
+  });
+
+  it("moves sub-issue backwards: REVIEW → PLANNING", () => {
+    const wf = makeSub(SubState.REVIEW);
+    const result = apply(wf, override(SubState.PLANNING));
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.PLANNING);
+  });
+
+  it("moves sub-issue backwards: VERIFYING → IMPLEMENTING", () => {
+    const wf = makeSub(SubState.VERIFYING);
+    const result = apply(wf, override(SubState.IMPLEMENTING));
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.IMPLEMENTING);
+  });
+
+  it("moves sub-issue forward: PLANNING → IMPLEMENTING", () => {
+    const wf = makeSub(SubState.PLANNING);
+    const result = apply(wf, override(SubState.IMPLEMENTING));
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.IMPLEMENTING);
+  });
+
+  it("moves parent backward: TRIAGED → TRIAGE", () => {
+    const wf = makeParent(ParentState.TRIAGED);
+    const result = apply(wf, override(ParentState.TRIAGE));
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(ParentState.TRIAGE);
+  });
+
+  it("rejects override to same state (no-op)", () => {
+    const wf = makeSub(SubState.PLANNING);
+    const result = apply(wf, override(SubState.PLANNING));
+    expect(result).toBeNull();
+  });
+
+  it("swaps labels on override", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.PLANNING))!;
+    const removes = result.sideEffects.filter((e) => e.type === "remove_label");
+    const adds = result.sideEffects.filter((e) => e.type === "add_label");
+    expect(removes.length).toBe(1);
+    expect(adds.length).toBe(1);
+    expect((removes[0] as any).label).toBe("implementing");
+    expect((adds[0] as any).label).toBe("planning");
+  });
+
+  it("posts a comment on override", () => {
+    const wf = makeSub(SubState.REVIEW);
+    const result = apply(wf, override(SubState.PLANNING))!;
+    const comments = result.sideEffects.filter((e) => e.type === "post_comment");
+    expect(comments.length).toBe(1);
+    expect((comments[0] as any).body).toContain("manually moved");
+    expect((comments[0] as any).body).toContain("@human");
+  });
+
+  it("spawns triage agent when overriding to TRIAGE", () => {
+    const wf = makeParent(ParentState.TRIAGED);
+    const result = apply(wf, override(ParentState.TRIAGE))!;
+    const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
+    expect(spawns.length).toBe(1);
+    expect((spawns[0] as any).role).toBe("triage");
+  });
+
+  it("spawns implementer agent when overriding to IMPLEMENTING", () => {
+    const wf = makeSub(SubState.DRAFT_REVIEW);
+    const result = apply(wf, override(SubState.IMPLEMENTING))!;
+    const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
+    expect(spawns.length).toBe(1);
+    expect((spawns[0] as any).role).toBe("implementer");
+  });
+
+  it("spawns QE agent when overriding to VERIFYING", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.VERIFYING))!;
+    const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
+    expect(spawns.length).toBe(1);
+    expect((spawns[0] as any).role).toBe("qe");
+  });
+
+  it("does NOT spawn agent when overriding to PLANNING", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.PLANNING))!;
+    const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
+    expect(spawns.length).toBe(0);
+  });
+
+  it("does NOT spawn agent when overriding to REVIEW", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.REVIEW))!;
+    const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
+    expect(spawns.length).toBe(0);
+  });
+});

@@ -1,4 +1,5 @@
 import type { WorkflowEvent } from "../state-machine/events.js";
+import { LABEL_TO_STATE } from "../state-machine/states.js";
 
 const DEFAULT_BOT_USERNAME = "zapbot[bot]";
 const LINKED_ISSUE_RE = /(?:closes|fixes|resolves|part of)\s+#(\d+)/i;
@@ -39,6 +40,17 @@ export function mapWebhookToEvent(
 
     if (label === "triage") {
       return { event: { type: "triage_label_added", triggeredBy: actor }, issueNumber, repo };
+    }
+
+    // Any other state-mapped label triggers a state override.
+    // This lets humans move issues to any state by adding the label.
+    const targetState = LABEL_TO_STATE[label];
+    if (targetState) {
+      return {
+        event: { type: "label_state_override", label, targetState, triggeredBy: actor },
+        issueNumber,
+        repo,
+      };
     }
 
     return null;

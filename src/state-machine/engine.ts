@@ -1,6 +1,6 @@
 import type { WorkflowEvent } from "./events.js";
 import type { SideEffect } from "./effects.js";
-import { findTransition, type Workflow, type TransitionResult } from "./transitions.js";
+import { findTransition, resolveTo, type Workflow, type TransitionResult } from "./transitions.js";
 
 /**
  * Pure function: given a workflow and an event, compute the new state and side effects.
@@ -10,14 +10,15 @@ export function apply(workflow: Workflow, event: WorkflowEvent): TransitionResul
   const transition = findTransition(workflow, event);
   if (!transition) return null;
 
+  const to = resolveTo(transition, workflow, event);
   const sideEffects: SideEffect[] = transition.effects(workflow, event);
 
   return {
-    newState: transition.to,
+    newState: to,
     sideEffects,
     transition: {
       from: workflow.state,
-      to: transition.to,
+      to,
       event: event.type,
       triggeredBy: event.triggeredBy,
     },
