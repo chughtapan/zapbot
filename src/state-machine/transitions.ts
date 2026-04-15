@@ -230,8 +230,9 @@ function buildAbandonTransitions(): TransitionDef[] {
 // ── Label-based state override (human can move to any state) ──────
 
 /** States that require spawning an agent when entered via override. */
-const AGENT_SPAWN_STATES: Record<string, "triage" | "implementer" | "qe"> = {
+const AGENT_SPAWN_STATES: Record<string, "triage" | "planner" | "implementer" | "qe"> = {
   [ParentState.TRIAGE]: "triage",
+  [SubState.PLANNING]: "planner",
   [SubState.IMPLEMENTING]: "implementer",
   [SubState.VERIFYING]: "qe",
 };

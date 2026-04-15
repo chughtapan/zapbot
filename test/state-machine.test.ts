@@ -443,11 +443,12 @@ describe("label_state_override transitions", () => {
     expect((spawns[0] as any).role).toBe("qe");
   });
 
-  it("does NOT spawn agent when overriding to PLANNING", () => {
+  it("spawns planner agent when overriding to PLANNING", () => {
     const wf = makeSub(SubState.IMPLEMENTING);
     const result = apply(wf, override(SubState.PLANNING))!;
     const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
-    expect(spawns.length).toBe(0);
+    expect(spawns.length).toBe(1);
+    expect((spawns[0] as any).role).toBe("planner");
   });
 
   it("does NOT spawn agent when overriding to REVIEW", () => {

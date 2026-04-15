@@ -453,7 +453,8 @@ async function handleWebhook(
 
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
       await executeSideEffects([
-        { type: "post_comment", issueNumber, body: "**Zapbot:** Sub-issue tracked. Currently in **planning** state. Publish a plan or add the `plan-approved` label to start implementation." },
+        { type: "spawn_agent", role: "planner", issueNumber },
+        { type: "post_comment", issueNumber, body: "**Zapbot:** Sub-issue tracked. Spawning planner agent to draft an implementation plan." },
       ], repo);
       return { status: 200, body: "sub workflow created" };
     }
@@ -533,9 +534,14 @@ async function handleWebhook(
   const result = apply(workflow, event);
 
   if (!result) {
+    // Same-state label overrides are not errors — the label just matches current state.
+    // Don't post a confusing rejection comment for these.
+    if (event.type === "label_state_override" && (event as any).targetState === workflow.state) {
+      log.debug(`Label matches current state, ignoring`, { issueNumber, state: workflow.state });
+      return { status: 200, body: "no-op" };
+    }
     const msg = `Cannot apply '${event.type}' — issue #${issueNumber} is in ${workflow.state} state.`;
     log.warn(`REJECTED: ${msg}`, { issueNumber, state: workflow.state, event: event.type });
-    // Post a comment explaining the rejection
     await executeSideEffects([
       { type: "post_comment", issueNumber, body: `Zapbot: ${msg}` },
     ], repo);
