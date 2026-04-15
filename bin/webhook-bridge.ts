@@ -30,6 +30,7 @@ import { createGitHubClient } from "../src/github/client.js";
 import { makeWorkflowId } from "../src/workflow-id.js";
 import { errorResponse } from "../src/http/error-response.js";
 import { verifySignature } from "../src/http/verify-signature.js";
+import { setupGateway } from "../src/gateway/client.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -1062,26 +1063,49 @@ async function main() {
   // Periodic token cleanup (every hour)
   const tokenCleanupInterval = setInterval(pruneExpiredTokens, 60 * 60 * 1000);
 
-  // Graceful shutdown
-  process.on("SIGINT", async () => {
-    log.info("Shutting down...");
-    stopHeartbeatChecker();
-    cancelPendingRetries();
-    clearInterval(tokenCleanupInterval);
-    server.stop();
-    await db.destroy();
-    process.exit(0);
-  });
+  // Gateway registration (if configured)
+  let gatewayCleanup: (() => Promise<void>) | null = null;
+  const gatewayUrl = process.env.ZAPBOT_GATEWAY_URL;
+  const gatewaySecret = process.env.ZAPBOT_GATEWAY_SECRET;
+  const bridgeUrl = process.env.ZAPBOT_BRIDGE_URL;
 
-  process.on("SIGTERM", async () => {
+  if (gatewayUrl && gatewaySecret && bridgeUrl) {
+    const repos = Array.from(repoMap.keys());
+    if (repos.length > 0) {
+      try {
+        gatewayCleanup = await setupGateway(
+          { gatewayUrl, secret: gatewaySecret },
+          repos,
+          bridgeUrl,
+        );
+        log.info(`Registered ${repos.length} repo(s) with gateway at ${gatewayUrl}`);
+      } catch (err) {
+        log.error(`Failed to register with gateway: ${err}`);
+      }
+    }
+  } else if (gatewayUrl) {
+    log.warn("ZAPBOT_GATEWAY_URL is set but ZAPBOT_GATEWAY_SECRET or ZAPBOT_BRIDGE_URL is missing — skipping gateway registration");
+  }
+
+  // Graceful shutdown
+  let shuttingDown = false;
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
     clearInterval(tokenCleanupInterval);
+    if (gatewayCleanup) {
+      await gatewayCleanup();
+    }
     server.stop();
     await db.destroy();
     process.exit(0);
-  });
+  }
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 main().catch((err) => {
