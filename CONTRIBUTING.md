@@ -76,6 +76,17 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   ├── agent-rules-implementer.md   # Implementer agent rules (skill-aware: /simplify, /review, /investigate, /ship)
 │   ├── agent-rules-qe.md            # QE agent rules (skill-aware: /review, /investigate)
 │   └── zapbot-bridge.service        # Systemd unit template (placeholders: __PROJECT_DIR__, __ZAPBOT_DIR__)
+├── gateway/                             # Railway-deployed webhook proxy
+│   ├── src/
+│   │   ├── handler.ts               # Route handler (createFetchHandler, exported for tests)
+│   │   ├── index.ts                 # Server entry point, liveness sweep, graceful shutdown
+│   │   └── registry.ts              # In-memory bridge registry (register, deregister, sweep)
+│   ├── test/
+│   │   ├── gateway-endpoints.test.ts # Gateway HTTP endpoint tests (18 tests)
+│   │   └── registry.test.ts         # Registry unit tests (13 tests)
+│   ├── package.json                 # Standalone Bun service (no shared deps with root)
+│   ├── railway.json                 # Railway deployment config
+│   └── .env.example                 # Environment variable documentation
 ├── test/
 │   ├── state-machine.test.ts        # State machine unit tests
 │   ├── store.test.ts                # Store/query unit tests
@@ -112,8 +123,11 @@ your-project/
 ## Running tests
 
 ```bash
-# Unit tests (248 tests across 16 files, runs in ~400ms)
+# Root unit tests (248 tests across 16 files, runs in ~400ms)
 bun test
+
+# Gateway unit tests (31 tests across 2 files)
+cd gateway && bun test
 
 # E2E smoke tests (needs gh CLI, a test repo, and running bridge)
 ./test/e2e-smoke.sh
@@ -156,6 +170,7 @@ real GitHub issues and need the bridge running.
 | `templates/zapbot-bridge.service` | Systemd unit template | Changing service configuration |
 | `src/config/reload.ts` | SIGHUP config reload (parseEnvFile, reloadConfigFromDisk) | Changing hot-reload behavior |
 | `test/*.test.ts` | Vitest unit tests (248 tests across 16 files) | Adding tests for new features |
+| `gateway/test/*.test.ts` | Gateway service tests (31 tests across 2 files) | Adding gateway tests |
 | `test/e2e-smoke.sh` | E2E test suite | Adding integration tests |
 
 ## Adding a new repo

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.3 (2026-04-15)
+
+Railway gateway service. Static HTTPS URL replaces ngrok for GitHub webhooks.
+
+### Added
+
+- **Railway gateway** (`gateway/`) — lightweight HTTP proxy that receives GitHub webhooks at a static Railway URL and forwards them to registered local bridge instances. Bridges register on startup, deregister on shutdown. No more ephemeral ngrok URLs.
+- **Bridge registration API** — `POST /api/bridges/register` and `DELETE /api/bridges/register` with shared-secret auth (`GATEWAY_SECRET`).
+- **Bridge liveness sweep** — gateway pings registered bridges periodically, marks unresponsive ones inactive, and reaps long-dead entries to prevent unbounded memory growth.
+- **31 gateway tests** — registry unit tests (13) and endpoint integration tests (18) covering all endpoints, auth, forwarding, and error paths.
+
+### Changed
+
+- **Agent prompt templates** — triage, planner, and implementer agent rules now reference gstack skills (`/simplify`, `/review`, `/investigate`, `/ship`, `/document-release`).
+
 ## 0.4.2 (2026-04-14)
 
 Three fixes that make the multi-repo agent pipeline work end-to-end.

@@ -45,5 +45,6 @@ DRAFT_REVIEW → VERIFYING → DONE. See ARCHITECTURE.md for details.
 - `src/webhook/` — Webhook event mapping (extracted for testability)
 - `src/logger.ts` — Structured logging
 - `bin/` — CLI entry points (webhook-bridge, team-init, publish)
+- `gateway/` — Railway-deployed webhook proxy (routes GitHub webhooks to registered bridges)
 - `skills/` — Claude Code skill definitions (zapbot-publish, zapbot-status)
 - `templates/` — Config templates for agent-orchestrator and agent rules

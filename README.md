@@ -78,6 +78,17 @@ Starts ngrok, configures GitHub webhooks, and launches the agent-orchestrator.
 Webhook bridge on `http://localhost:3000` (configurable via `ZAPBOT_BRIDGE_PORT` in `.env`),
 AO dashboard on `http://localhost:3001` (configurable via `port:` in `agent-orchestrator.yaml`).
 
+### Gateway (replaces ngrok)
+
+The `gateway/` service runs on Railway with a static HTTPS URL, replacing ngrok as the
+public webhook endpoint. Local bridges register with the gateway on startup.
+
+```bash
+cd gateway && bun run src/index.ts   # start gateway locally
+```
+
+See `gateway/.env.example` for configuration. Deploy to Railway with `railway up`.
+
 ### Multi-Repo Support
 
 Define multiple projects in `agent-orchestrator.yaml`:

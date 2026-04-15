@@ -128,6 +128,40 @@ The bridge supports multiple repos from a single instance via `src/config/loader
 4. **Project-scoped spawning:** `executeSideEffects()` resolves the project name from the repo map and passes it to `ao spawn` via `AO_PROJECT_ID` and `AO_CONFIG_PATH` environment variables. AO uses `AO_PROJECT_ID` to select the correct project and `AO_CONFIG_PATH` to find the agent-orchestrator.yaml.
 5. **Callback tokens:** Plannotator tokens are stored locally with repo context (`callbackTokens` Map with 24h TTL). Tokens are scoped to the specific issue number, so a token for issue #5 cannot be replayed against issue #10. Callbacks resolve repo via: token store → request body → `ZAPBOT_REPO` env var.
 
+## Gateway Service
+
+The gateway (`gateway/`) is a lightweight HTTP proxy deployed to Railway with a static HTTPS URL.
+It replaces ngrok as the public endpoint for GitHub webhooks.
+
+```
+GitHub ──POST──> Gateway (Railway) ──forward──> Bridge (local)
+                    │
+              Routes by repo
+              (in-memory registry)
+```
+
+### Gateway Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/webhooks/github` | Forward webhook to registered bridge |
+| POST | `/api/bridges/register` | Register a bridge (requires `GATEWAY_SECRET`) |
+| DELETE | `/api/bridges/register` | Deregister a bridge |
+| GET | `/healthz` | Health check with bridge status |
+
+### Design Decisions
+
+- Gateway does NOT verify GitHub HMAC signatures. It passes `x-hub-signature-256` through to the bridge, which already has per-repo secret verification.
+- Gateway is a dumb proxy that routes based on `repository.full_name` in the webhook payload.
+- Multiple bridges can register for different repos on the same gateway.
+- Liveness sweep pings registered bridges periodically and marks unresponsive ones inactive. Bridges inactive for 5x the timeout are reaped from memory.
+
+### Deployment
+
+- Runs on Railway via `railway.json` (Nixpacks builder, Bun runtime)
+- Config via env vars: `GATEWAY_SECRET` (required), `PORT`, `LIVENESS_INTERVAL_MS`, `STALE_TIMEOUT_MS`, `FORWARD_TIMEOUT_MS`
+- Static domain: `zapbot-gateway.up.railway.app` (or custom)
+
 ## Operations
 
 ### Systemd Service
