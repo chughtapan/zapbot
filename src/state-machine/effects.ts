@@ -1,5 +1,5 @@
 export type SideEffect =
-  | { type: "spawn_agent"; role: "triage" | "planner" | "implementer" | "qe"; issueNumber: number }
+  | { type: "spawn_agent"; role: "triage" | "planner" | "implementer" | "qe" | "investigator"; issueNumber: number }
   | { type: "add_label"; issueNumber: number; label: string }
   | { type: "remove_label"; issueNumber: number; label: string }
   | { type: "post_comment"; issueNumber: number; body: string }
