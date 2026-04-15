@@ -25,7 +25,7 @@ Key routing rules:
 ```bash
 bun test              # run unit + store + state-machine tests
 bun run bridge        # start webhook bridge (port 3000)
-./start.sh            # one-click: ngrok + webhook + bridge
+./start.sh            # one-click: gateway/ngrok + webhook + bridge
 ./test/e2e-smoke.sh   # end-to-end smoke test
 ./setup --server      # install server dependencies
 ```
@@ -42,6 +42,7 @@ DRAFT_REVIEW → VERIFYING → DONE. See ARCHITECTURE.md for details.
 - `src/state-machine/` — Pure-function state machine engine
 - `src/agents/` — Agent spawning, heartbeat, role-specific logic
 - `src/config/` — Config loader for agent-orchestrator.yaml, repo map, per-repo webhook secrets
+- `src/gateway/` — Gateway client (register/deregister/heartbeat with Railway gateway)
 - `src/webhook/` — Webhook event mapping (extracted for testability)
 - `src/logger.ts` — Structured logging
 - `bin/` — CLI entry points (webhook-bridge, team-init, publish)
