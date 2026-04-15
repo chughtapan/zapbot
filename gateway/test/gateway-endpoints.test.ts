@@ -293,6 +293,37 @@ describe("gateway endpoints", () => {
     expect(body.removed).toBe(false);
   });
 
+  it("POST /api/bridges/register with JWT owner for unauthorized repo returns 403", async () => {
+    const jwt = await createOwnerJWT(); // authorized for acme/app, acme/lib
+    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+      method: "POST",
+      body: JSON.stringify({ repo: "other/repo", bridgeUrl: mockBridgeUrl }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${jwt}`,
+      },
+    });
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error.type).toBe("repo_not_authorized");
+  });
+
+  it("DELETE /api/bridges/register with JWT member returns 403", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const jwt = await createMemberJWT();
+    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+      method: "DELETE",
+      body: JSON.stringify({ repo: "acme/app" }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${jwt}`,
+      },
+    });
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error.type).toBe("insufficient_role");
+  });
+
   // ── /api/auth/me ─────────────────────────────────────────────────
 
   it("GET /api/auth/me with valid JWT returns user info", async () => {

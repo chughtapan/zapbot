@@ -29,7 +29,7 @@ function defaultConfig(overrides?: Partial<AuthConfig>): AuthConfig {
 
 async function createTestJWT(
   claims: Record<string, unknown> = {},
-  options?: { expiresIn?: string; iat?: number; secret?: string; issuer?: string; audience?: string },
+  options?: { expiresIn?: string; iat?: number; skipIat?: boolean; secret?: string; issuer?: string; audience?: string },
 ): Promise<string> {
   const secret = options?.secret || TEST_JWT_SECRET;
   const builder = new SignJWT({
@@ -46,7 +46,9 @@ async function createTestJWT(
     .setAudience(options?.audience ?? "authenticated")
     .setExpirationTime(options?.expiresIn || "1h");
 
-  if (options?.iat !== undefined) {
+  if (options?.skipIat) {
+    // Don't set iat at all
+  } else if (options?.iat !== undefined) {
     builder.setIssuedAt(options.iat);
   } else {
     builder.setIssuedAt();
@@ -177,6 +179,18 @@ describe("verifyRequest", () => {
     }
   });
 
+  // ── Missing iat ─────────────────────────────────────────────────
+
+  it("rejects a JWT without iat claim", async () => {
+    const jwt = await createTestJWT({}, { skipIat: true });
+    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("missing_claims");
+      expect(result.error.message).toContain("iat");
+    }
+  });
+
   // ── Missing claims ───────────────────────────────────────────────
 
   it("rejects JWT without sub claim", async () => {
@@ -237,6 +251,14 @@ describe("verifyRequest", () => {
       expect(result.user.role).toBe("owner");
       expect(result.user.authorizedRepos).toEqual(["*"]);
     }
+  });
+
+  it("rejects wrong legacy secret", async () => {
+    const result = await verifyRequest(
+      makeRequest("Bearer wrong-secret"),
+      defaultConfig(),
+    );
+    expect(result.ok).toBe(false);
   });
 
   it("rejects legacy secret when disabled", async () => {

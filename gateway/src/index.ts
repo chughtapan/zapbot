@@ -20,7 +20,7 @@ const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET || "";
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const GATEWAY_SECRET = process.env.GATEWAY_SECRET || "";
 const LEGACY_AUTH_ENABLED = process.env.LEGACY_AUTH_ENABLED !== "false";
-const JWT_MAX_AGE_SECONDS = parseInt(process.env.JWT_MAX_AGE_SECONDS || "3600", 10);
+const JWT_MAX_AGE_SECONDS = parseInt(process.env.JWT_MAX_AGE_SECONDS || "3600", 10) || 3600;
 const LIVENESS_INTERVAL_MS = parseInt(process.env.LIVENESS_INTERVAL_MS || "30000", 10);
 const STALE_TIMEOUT_MS = parseInt(process.env.STALE_TIMEOUT_MS || "60000", 10);
 const FORWARD_TIMEOUT_MS = parseInt(process.env.FORWARD_TIMEOUT_MS || "30000", 10);

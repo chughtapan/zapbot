@@ -14,6 +14,7 @@ import {
 import {
   verifyRequest,
   requireRole,
+  requireRepoAccess,
   type AuthConfig,
   type GatewayUser,
   type AuthError,
@@ -175,6 +176,14 @@ async function handleBridgeRegister(req: Request, authConfig: AuthConfig): Promi
     return errorResponse(400, "invalid_request", "Missing or invalid 'bridgeUrl' field.");
   }
 
+  if (!requireRepoAccess(userOrResp, repo)) {
+    return authErrorResponse({
+      type: "repo_not_authorized",
+      message: `Not authorized for repo ${repo}.`,
+      fix: "Add repo to your authorized_repos in Supabase.",
+    });
+  }
+
   const entry = registerBridge(repo, bridgeUrl);
   return Response.json({ ok: true, repo: entry.repo, registeredAt: entry.registeredAt });
 }
@@ -193,6 +202,14 @@ async function handleBridgeDeregister(req: Request, authConfig: AuthConfig): Pro
   const { repo } = body;
   if (!repo || typeof repo !== "string") {
     return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
+  }
+
+  if (!requireRepoAccess(userOrResp, repo)) {
+    return authErrorResponse({
+      type: "repo_not_authorized",
+      message: `Not authorized for repo ${repo}.`,
+      fix: "Add repo to your authorized_repos in Supabase.",
+    });
   }
 
   const removed = deregisterBridge(repo);

@@ -6,6 +6,7 @@
  */
 
 import { jwtVerify, errors as joseErrors } from "jose";
+import { timingSafeEqual } from "crypto";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -48,10 +49,6 @@ export function resetLegacyDeprecationFlag(): void {
 
 function authError(type: string, message: string, fix: string): AuthResult {
   return { ok: false, error: { type, message, fix } };
-}
-
-function tokenHash(token: string): string {
-  return token.slice(0, 8);
 }
 
 // ── JWT verification ───────────────────────────────────────────────
@@ -128,16 +125,21 @@ async function verifyJwt(
   }
 
   // Check max age (iat must be within maxAgeSeconds)
-  if (payload.iat) {
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const age = nowSeconds - payload.iat;
-    if (age > config.maxAgeSeconds) {
-      return authError(
-        "token_too_old",
-        `Token issued more than ${config.maxAgeSeconds} seconds ago.`,
-        "Obtain a fresh JWT.",
-      );
-    }
+  if (payload.iat === undefined || payload.iat === null) {
+    return authError(
+      "missing_claims",
+      "Token missing required claim: iat",
+      "Ensure your Supabase JWT includes an issued-at (iat) claim.",
+    );
+  }
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const age = nowSeconds - payload.iat;
+  if (age > config.maxAgeSeconds) {
+    return authError(
+      "token_too_old",
+      `Token issued more than ${config.maxAgeSeconds} seconds ago.`,
+      "Obtain a fresh JWT.",
+    );
   }
 
   // Extract and validate claims
@@ -182,7 +184,14 @@ async function verifyJwt(
 // ── Legacy shared-secret verification ──────────────────────────────
 
 function verifyLegacy(token: string, config: AuthConfig): AuthResult {
-  if (!config.legacyEnabled || !config.legacySecret) {
+  if (!config.legacyEnabled) {
+    return authError(
+      "invalid_token",
+      "Legacy shared-secret auth is disabled.",
+      "Use a Supabase JWT for authentication.",
+    );
+  }
+  if (!config.legacySecret) {
     return authError(
       "invalid_token",
       "Token verification failed.",
@@ -190,11 +199,16 @@ function verifyLegacy(token: string, config: AuthConfig): AuthResult {
     );
   }
 
-  if (token !== config.legacySecret) {
+  const tokenBuf = encoder.encode(token);
+  const secretBuf = encoder.encode(config.legacySecret);
+  const secretsMatch =
+    tokenBuf.length === secretBuf.length &&
+    timingSafeEqual(tokenBuf, secretBuf);
+  if (!secretsMatch) {
     return authError(
-      "invalid_signature",
-      "Token signature verification failed.",
-      "Verify SUPABASE_JWT_SECRET matches your Supabase project.",
+      "invalid_token",
+      "Token verification failed.",
+      "Check your GATEWAY_SECRET or use a valid Supabase JWT.",
     );
   }
 
