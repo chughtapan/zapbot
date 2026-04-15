@@ -17,7 +17,6 @@ export interface BridgeEntry {
 
 const bridges = new Map<string, BridgeEntry>();
 
-/** Register or update a bridge for a given repo. */
 export function registerBridge(repo: string, bridgeUrl: string): BridgeEntry {
   const now = Date.now();
   const entry: BridgeEntry = {
@@ -31,24 +30,21 @@ export function registerBridge(repo: string, bridgeUrl: string): BridgeEntry {
   return entry;
 }
 
-/** Remove a bridge registration for a repo. */
 export function deregisterBridge(repo: string): boolean {
   return bridges.delete(repo);
 }
 
-/** Look up the active bridge for a repo. Returns undefined if none or inactive. */
+/** Returns undefined if no bridge is registered or if the bridge is inactive. */
 export function getBridge(repo: string): BridgeEntry | undefined {
   const entry = bridges.get(repo);
   if (!entry || !entry.active) return undefined;
   return entry;
 }
 
-/** Get all registered bridges (including inactive). */
 export function getAllBridges(): BridgeEntry[] {
   return Array.from(bridges.values());
 }
 
-/** Mark a bridge as seen (updates lastSeen timestamp). */
 export function touchBridge(repo: string): void {
   const entry = bridges.get(repo);
   if (entry) {
@@ -59,13 +55,18 @@ export function touchBridge(repo: string): void {
 
 /**
  * Mark bridges as inactive if they haven't been seen within the timeout.
- * Returns the list of repos that were marked inactive.
+ * Reap (delete) bridges that have been inactive for 5x the timeout to
+ * prevent unbounded memory growth from crashed bridges.
+ * Returns the list of repos that were newly marked inactive.
  */
 export function sweepStaleBridges(timeoutMs: number): string[] {
   const now = Date.now();
   const swept: string[] = [];
+  const reapThreshold = timeoutMs * 5;
   for (const [repo, entry] of bridges) {
-    if (entry.active && now - entry.lastSeen > timeoutMs) {
+    if (!entry.active && now - entry.lastSeen > reapThreshold) {
+      bridges.delete(repo);
+    } else if (entry.active && now - entry.lastSeen > timeoutMs) {
       entry.active = false;
       swept.push(repo);
     }
@@ -73,7 +74,6 @@ export function sweepStaleBridges(timeoutMs: number): string[] {
   return swept;
 }
 
-/** Clear all registrations (useful for tests). */
 export function clearRegistry(): void {
   bridges.clear();
 }

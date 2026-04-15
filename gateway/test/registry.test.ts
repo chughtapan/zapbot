@@ -86,4 +86,23 @@ describe("registry", () => {
     entry.active = false;
     expect(getBridge("acme/app")).toBeUndefined();
   });
+
+  it("reaps bridges inactive for 5x the timeout", () => {
+    const entry = registerBridge("acme/app", "https://b.example.com");
+    // Mark inactive and backdate past reap threshold (5x timeout)
+    entry.active = false;
+    entry.lastSeen = Date.now() - 400_000;
+    sweepStaleBridges(60_000);
+    // Entry should be fully removed, not just inactive
+    expect(getAllBridges()).toHaveLength(0);
+  });
+
+  it("does not reap recently-inactive bridges", () => {
+    const entry = registerBridge("acme/app", "https://b.example.com");
+    entry.active = false;
+    entry.lastSeen = Date.now() - 100_000;
+    sweepStaleBridges(60_000);
+    // Still in the map (inactive but not yet reapable)
+    expect(getAllBridges()).toHaveLength(1);
+  });
 });

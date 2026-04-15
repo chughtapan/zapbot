@@ -1,33 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { clearRegistry, getAllBridges } from "../src/registry.js";
+import { clearRegistry, registerBridge, getBridge } from "../src/registry.js";
+import { createFetchHandler } from "../src/handler.js";
 
 /**
  * Integration tests for the gateway HTTP endpoints.
  *
- * Spins up a minimal gateway server that mirrors the real routing logic
- * but runs on a random port with a known GATEWAY_SECRET.
+ * Uses the exported createFetchHandler to test the real routing logic
+ * without starting the production server (which has liveness timers
+ * and startup validation that would interfere with tests).
  */
 
 const TEST_SECRET = "test-gateway-secret";
-
-// We replicate the gateway's routing inline to avoid starting the real
-// server (which has process-level side effects like liveness timers).
-// This mirrors the pattern from test/bridge-endpoints.test.ts.
-
-import {
-  registerBridge,
-  deregisterBridge,
-  getBridge,
-} from "../src/registry.js";
-
-function errorResponse(status: number, type: string, message: string): Response {
-  return Response.json({ error: { type, message, status } }, { status });
-}
-
-function verifyAuth(req: Request): boolean {
-  const auth = req.headers.get("authorization");
-  return auth === `Bearer ${TEST_SECRET}`;
-}
 
 let server: ReturnType<typeof Bun.serve>;
 let baseUrl: string;
@@ -52,114 +35,13 @@ beforeAll(() => {
   });
   mockBridgeUrl = `http://localhost:${mockBridge.port}`;
 
-  // Start the gateway test server
-  server = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      const url = new URL(req.url);
-      const { pathname } = url;
-
-      // Health check
-      if (pathname === "/healthz" && req.method === "GET") {
-        const bridges = getAllBridges();
-        const active = bridges.filter((b) => b.active).length;
-        return Response.json({ status: "ok", bridges: { total: bridges.length, active } });
-      }
-
-      // Webhook forwarding
-      if (pathname === "/api/webhooks/github" && req.method === "POST") {
-        const body = await req.text();
-        let payload: any;
-        try {
-          payload = JSON.parse(body);
-        } catch {
-          return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
-        }
-
-        const repo: string = payload.repository?.full_name || "";
-        if (!repo) {
-          return errorResponse(400, "invalid_request", "Webhook payload missing repository.full_name.");
-        }
-
-        const bridge = getBridge(repo);
-        if (!bridge) {
-          return errorResponse(502, "no_bridge", `No active bridge registered for '${repo}'.`);
-        }
-
-        const forwardUrl = `${bridge.bridgeUrl}/api/webhooks/github`;
-        const forwardHeaders = new Headers();
-        for (const header of [
-          "content-type",
-          "x-github-event",
-          "x-github-delivery",
-          "x-hub-signature-256",
-        ]) {
-          const value = req.headers.get(header);
-          if (value) forwardHeaders.set(header, value);
-        }
-
-        try {
-          const upstream = await fetch(forwardUrl, {
-            method: "POST",
-            headers: forwardHeaders,
-            body,
-            signal: AbortSignal.timeout(5000),
-          });
-          const upstreamBody = await upstream.text();
-          return new Response(upstreamBody, {
-            status: upstream.status,
-            headers: { "content-type": upstream.headers.get("content-type") || "text/plain" },
-          });
-        } catch (err: any) {
-          return errorResponse(502, "bridge_error", `Bridge unreachable: ${err.message}`);
-        }
-      }
-
-      // Bridge registration
-      if (pathname === "/api/bridges/register" && req.method === "POST") {
-        if (!verifyAuth(req)) {
-          return errorResponse(401, "authentication_error", "Invalid or missing gateway secret.");
-        }
-        let body: any;
-        try {
-          body = await req.json();
-        } catch {
-          return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
-        }
-        const { repo, bridgeUrl } = body;
-        if (!repo || typeof repo !== "string") {
-          return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
-        }
-        if (!bridgeUrl || typeof bridgeUrl !== "string") {
-          return errorResponse(400, "invalid_request", "Missing or invalid 'bridgeUrl' field.");
-        }
-        const entry = registerBridge(repo, bridgeUrl);
-        return Response.json({ ok: true, entry });
-      }
-
-      // Bridge deregistration
-      if (pathname === "/api/bridges/register" && req.method === "DELETE") {
-        if (!verifyAuth(req)) {
-          return errorResponse(401, "authentication_error", "Invalid or missing gateway secret.");
-        }
-        let body: any;
-        try {
-          body = await req.json();
-        } catch {
-          return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
-        }
-        const { repo } = body;
-        if (!repo || typeof repo !== "string") {
-          return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
-        }
-        const removed = deregisterBridge(repo);
-        return Response.json({ ok: true, removed });
-      }
-
-      return errorResponse(404, "not_found", "Resource not found.");
-    },
+  // Start the gateway test server using the real handler
+  const handler = createFetchHandler({
+    gatewaySecret: TEST_SECRET,
+    forwardTimeoutMs: 5000,
   });
 
+  server = Bun.serve({ port: 0, fetch: handler });
   baseUrl = `http://localhost:${server.port}`;
 });
 
