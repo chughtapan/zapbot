@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { generateAppJWT, loadPrivateKey, createGitHubClient } from "../src/github/client.js";
 import { generateKeyPairSync, createVerify } from "crypto";
 import { writeFileSync, mkdtempSync, rmSync } from "fs";
