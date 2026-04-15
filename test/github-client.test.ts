@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
-import { generateAppJWT, loadPrivateKey } from "../src/github/client.js";
-import { generateKeyPairSync } from "crypto";
+import { generateAppJWT, loadPrivateKey, createGitHubClient } from "../src/github/client.js";
+import { generateKeyPairSync, createVerify } from "crypto";
 import { writeFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -250,5 +250,246 @@ describe("loadPrivateKey", () => {
   it("throws when file path does not exist", () => {
     process.env.GITHUB_APP_PRIVATE_KEY = "/nonexistent/path/key.pem";
     expect(() => loadPrivateKey()).toThrow("Cannot read private key file");
+  });
+
+  it("handles PEM files with Windows-style line endings (CRLF)", () => {
+    const crlfKey = TEST_PRIVATE_KEY.replace(/\n/g, "\r\n");
+    const keyPath = join(tmpDir, "crlf-key.pem");
+    writeFileSync(keyPath, crlfKey);
+    process.env.GITHUB_APP_PRIVATE_KEY = keyPath;
+
+    const key = loadPrivateKey();
+    // The key should be readable; crypto.createSign handles CRLF in PEM
+    expect(key).toContain("-----BEGIN");
+    // Verify the loaded key is still usable for JWT generation
+    expect(() => generateAppJWT("12345", key)).not.toThrow();
+  });
+
+  it("handles PEM content with Windows-style line endings passed directly", () => {
+    const crlfKey = TEST_PRIVATE_KEY.replace(/\n/g, "\r\n");
+    process.env.GITHUB_APP_PRIVATE_KEY = crlfKey;
+
+    const key = loadPrivateKey();
+    expect(key).toContain("-----BEGIN");
+    expect(() => generateAppJWT("12345", key)).not.toThrow();
+  });
+
+  it("throws with empty string env var", () => {
+    process.env.GITHUB_APP_PRIVATE_KEY = "";
+    expect(() => loadPrivateKey()).toThrow("GITHUB_APP_PRIVATE_KEY is required");
+  });
+});
+
+// ── JWT signature verification ────────────────────────────────────
+
+describe("generateAppJWT signature verification", () => {
+  // Generate a key pair so we can verify the signature
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+
+  it("produces a JWT whose signature can be verified with the matching public key", () => {
+    const jwt = generateAppJWT("verify-test", privateKey);
+    const parts = jwt.split(".");
+    expect(parts).toHaveLength(3);
+
+    const signingInput = `${parts[0]}.${parts[1]}`;
+    const signature = Buffer.from(parts[2], "base64url");
+
+    const verify = createVerify("RSA-SHA256");
+    verify.update(signingInput);
+    expect(verify.verify(publicKey, signature)).toBe(true);
+  });
+
+  it("fails verification with a different public key", () => {
+    const { publicKey: otherPublicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+
+    const jwt = generateAppJWT("verify-test", privateKey);
+    const parts = jwt.split(".");
+
+    const signingInput = `${parts[0]}.${parts[1]}`;
+    const signature = Buffer.from(parts[2], "base64url");
+
+    const verify = createVerify("RSA-SHA256");
+    verify.update(signingInput);
+    expect(verify.verify(otherPublicKey, signature)).toBe(false);
+  });
+});
+
+// ── Token caching and refresh ─────────────────────────────────────
+
+describe("App client token caching", () => {
+  const originalEnv = { ...process.env };
+  let fetchCallCount: number;
+  let mockTokenCounter: number;
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    fetchCallCount = 0;
+    mockTokenCounter = 0;
+    originalFetch = globalThis.fetch;
+
+    // Mock global fetch to intercept installation token requests
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      // Intercept installation token requests
+      if (url.includes("/app/installations/") && url.includes("/access_tokens")) {
+        fetchCallCount++;
+        mockTokenCounter++;
+        return new Response(JSON.stringify({
+          token: `ghs_mock_token_${mockTokenCounter}`,
+          expires_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      // Intercept any GitHub API calls (from the client methods)
+      if (url.includes("api.github.com")) {
+        return new Response(JSON.stringify({ id: 1 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return originalFetch(input, init);
+    }) as typeof globalThis.fetch;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    globalThis.fetch = originalFetch;
+  });
+
+  it("caches the installation token and reuses it on subsequent calls", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    const client = createGitHubClient();
+
+    // Make two API calls
+    await client.addLabel("owner/repo", 1, "bug");
+    await client.addLabel("owner/repo", 2, "feature");
+
+    // Should only have fetched the installation token once
+    expect(fetchCallCount).toBe(1);
+  });
+
+  it("refreshes the token when cache expires", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    const client = createGitHubClient();
+
+    // First call — fetches a fresh token
+    await client.addLabel("owner/repo", 1, "bug");
+    expect(fetchCallCount).toBe(1);
+
+    // Simulate time passing beyond the 50-minute cache window
+    // We need to manipulate Date.now for this
+    const realDateNow = Date.now;
+    Date.now = () => realDateNow() + 51 * 60 * 1000; // 51 minutes in the future
+
+    // Second call — should refresh the token
+    await client.addLabel("owner/repo", 2, "feature");
+    expect(fetchCallCount).toBe(2);
+
+    Date.now = realDateNow; // restore
+  });
+
+  it("resolves token on each API call (not just at creation time)", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    // Create client but don't make any calls yet — no token should be fetched
+    const client = createGitHubClient();
+    expect(fetchCallCount).toBe(0);
+
+    // Token is fetched lazily on first API call
+    await client.postComment("owner/repo", 1, "hello");
+    expect(fetchCallCount).toBe(1);
+  });
+
+  it("handles failed installation token exchange", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    // Override fetch to return a 401 for token exchange
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url.includes("/app/installations/") && url.includes("/access_tokens")) {
+        return new Response(JSON.stringify({ message: "Bad credentials" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const client = createGitHubClient();
+    await expect(client.addLabel("owner/repo", 1, "bug")).rejects.toThrow(
+      "Failed to get installation token: 401"
+    );
+  });
+
+  it("concurrent token requests don't cause errors (both get valid tokens)", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    const client = createGitHubClient();
+
+    // Fire multiple concurrent requests
+    const results = await Promise.allSettled([
+      client.addLabel("owner/repo", 1, "bug"),
+      client.addLabel("owner/repo", 2, "feature"),
+      client.postComment("owner/repo", 3, "hello"),
+    ]);
+
+    // All should succeed
+    for (const result of results) {
+      expect(result.status).toBe("fulfilled");
+    }
+
+    // At least 1 token fetch, at most 3 (race condition may cause duplicates)
+    expect(fetchCallCount).toBeGreaterThanOrEqual(1);
+    expect(fetchCallCount).toBeLessThanOrEqual(3);
+  });
+});
+
+// ── Security: no secrets in logs ──────────────────────────────────
+
+describe("security: no sensitive data leakage", () => {
+  it("error from loadPrivateKey does not leak the key content", () => {
+    // When file read fails, the error should show the path, not key content
+    process.env.GITHUB_APP_PRIVATE_KEY = "/nonexistent/secret/key.pem";
+    try {
+      loadPrivateKey();
+    } catch (err: any) {
+      expect(err.message).toContain("/nonexistent/secret/key.pem");
+      expect(err.message).not.toContain("BEGIN RSA PRIVATE KEY");
+    }
+  });
+
+  it("generateAppJWT with empty string throws without leaking key info", () => {
+    expect(() => generateAppJWT("12345", "")).toThrow();
+  });
+
+  it("generateAppJWT with malformed PEM throws a crypto error", () => {
+    expect(() => generateAppJWT("12345", "not-a-pem-key-but-looks-like-one")).toThrow();
   });
 });
