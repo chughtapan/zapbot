@@ -125,11 +125,9 @@ async function handleWebhookForward(req: Request, timeoutMs: number): Promise<Re
       status: upstream.status,
       headers: { "content-type": upstream.headers.get("content-type") || "text/plain" },
     });
-  } catch (err: any) {
-    const message = err.name === "TimeoutError"
-      ? `Bridge at ${bridge.bridgeUrl} timed out after ${timeoutMs}ms`
-      : `Bridge at ${bridge.bridgeUrl} unreachable: ${err.message}`;
-    return errorResponse(502, "bridge_error", message);
+  } catch {
+    // Don't leak internal bridge URLs in error responses
+    return errorResponse(502, "bridge_error", `Bridge for '${repo}' is unavailable.`);
   }
 }
 

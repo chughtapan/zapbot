@@ -170,6 +170,18 @@ describe("gateway endpoints", () => {
     expect(getBridge("acme/app")).toBeUndefined();
   });
 
+  it("DELETE /api/bridges/register with missing repo returns 400", async () => {
+    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+      method: "DELETE",
+      body: JSON.stringify({}),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_SECRET}`,
+      },
+    });
+    expect(resp.status).toBe(400);
+  });
+
   it("DELETE /api/bridges/register for unknown repo returns removed=false", async () => {
     const resp = await fetch(`${baseUrl}/api/bridges/register`, {
       method: "DELETE",
@@ -250,6 +262,13 @@ describe("gateway endpoints", () => {
     expect(resp.status).toBe(502);
     const body = await resp.json();
     expect(body.error.type).toBe("bridge_error");
+  });
+
+  // ── Method mismatch ────────────────────────────────────────────────
+
+  it("GET /api/webhooks/github returns 404", async () => {
+    const resp = await fetch(`${baseUrl}/api/webhooks/github`);
+    expect(resp.status).toBe(404);
   });
 
   // ── 404 ───────────────────────────────────────────────────────────
