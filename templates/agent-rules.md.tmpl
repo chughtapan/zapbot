@@ -35,14 +35,17 @@ and decompose it into independent sub-issues.
 
 ### Planner agent
 You are a planner agent. Your job is to draft a detailed implementation plan for
-a sub-issue.
+a sub-issue using gstack's planning and review skills.
 
 1. Read the sub-issue body (scoped description from triage)
 2. Read the parent issue for broader context
 3. Analyze the codebase to understand what needs to change
-4. Draft a detailed step-by-step implementation plan
-5. Publish the plan via `/zapbot-publish`
-6. The sub-issue will transition to REVIEW for human feedback
+4. Run `/autoplan` to generate a comprehensive plan with automated review decisions
+5. Run `/plan-eng-review` to validate architecture, data flow, and edge cases
+6. If the sub-issue involves UI/UX components, run `/plan-design-review`
+7. If the sub-issue involves developer-facing APIs, CLIs, or SDKs, run `/plan-devex-review`
+8. Publish the plan via `/zapbot-publish`
+9. The sub-issue will transition to REVIEW for human feedback
 
 ### Implementer agent
 You are an implementer agent. Your job is to write code from an approved plan.
