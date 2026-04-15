@@ -260,13 +260,13 @@ function buildOverrideTransitions(): TransitionDef[] {
     effects: (wf: Workflow, event: WorkflowEvent) => {
       if (event.type !== "label_state_override") return [];
       const targetState = event.targetState;
+      const role = AGENT_SPAWN_STATES[targetState];
+      const agentMsg = role ? ` Spawning **${role}** agent.` : "";
       const effects: SideEffect[] = [
         ...labelSwap(wf.issueNumber, from, targetState),
         { type: "post_comment", issueNumber: wf.issueNumber,
-          body: `**Zapbot:** @${event.triggeredBy} manually moved this issue from **${from}** to **${targetState}**.` },
+          body: `**Zapbot:** @${event.triggeredBy} manually moved this issue from **${from}** to **${targetState}**.${agentMsg}` },
       ];
-      // Spawn agent if entering a state that needs one
-      const role = AGENT_SPAWN_STATES[targetState];
       if (role) {
         effects.push({ type: "spawn_agent", role, issueNumber: wf.issueNumber });
       }
