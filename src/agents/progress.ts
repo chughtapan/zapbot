@@ -157,6 +157,49 @@ function hashTasks(tasks: AgentTask[]): string {
   return tasks.map((t) => `${t.id}:${t.status}`).join(",");
 }
 
+/**
+ * One-time backfill: resolve worktree_path for running agents that have null values
+ * (spawned before the worktree tracking fix).
+ */
+async function backfillWorktreePaths(db: Kysely<Database>): Promise<void> {
+  const agents = await db
+    .selectFrom("agent_sessions")
+    .innerJoin("workflows", "workflows.id", "agent_sessions.workflow_id")
+    .select(["agent_sessions.id", "agent_sessions.workflow_id", "workflows.issue_number"])
+    .where("agent_sessions.status", "in", ["running", "spawning"])
+    .where("agent_sessions.worktree_path", "is", null)
+    .execute();
+
+  if (agents.length === 0) return;
+
+  log.info(`Backfilling worktree_path for ${agents.length} agent(s)`);
+
+  for (const agent of agents) {
+    const branch = `feat/issue-${agent.issue_number}`;
+    try {
+      const proc = Bun.spawn(["git", "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "pipe" });
+      const stdout = await new Response(proc.stdout).text();
+      await proc.exited;
+      for (const block of stdout.split("\n\n")) {
+        if (!block.includes(`refs/heads/${branch}`)) continue;
+        const wtLine = block.split("\n").find((l) => l.startsWith("worktree "));
+        if (wtLine) {
+          const wtPath = wtLine.slice("worktree ".length);
+          await db
+            .updateTable("agent_sessions")
+            .set({ worktree_path: wtPath })
+            .where("id", "=", agent.id)
+            .execute();
+          log.info(`Backfilled worktree_path for ${agent.id}: ${wtPath}`, { agentId: agent.id });
+          break;
+        }
+      }
+    } catch (err) {
+      log.warn(`Failed to backfill worktree_path for ${agent.id}: ${err}`);
+    }
+  }
+}
+
 export function startProgressPoller(
   db: Kysely<Database>,
   gh: GitHubClient,
@@ -218,9 +261,11 @@ export function startProgressPoller(
     if (running) poll();
   }, intervalMs);
 
-  // Run first poll after a short delay to let agents start
-  const initialDelay = setTimeout(() => {
-    if (running) poll();
+  // Backfill worktree paths for old agents, then run first poll
+  const initialDelay = setTimeout(async () => {
+    if (!running) return;
+    await backfillWorktreePaths(db);
+    if (running) await poll();
   }, 10_000);
 
   return {
