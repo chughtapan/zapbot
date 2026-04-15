@@ -19,6 +19,7 @@ export interface WorkflowTable {
   intent: string;
   draft_review_cycles: number;
   dependencies: string | null; // JSON-encoded number[] — use serializeDeps/deserializeDeps
+  progress_comment_id: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -40,6 +41,7 @@ export interface AgentSessionTable {
   workflow_id: string;
   role: string; // "triage" | "planner" | "implementer" | "qe" | "investigator"
   worktree_path: string | null;
+  claude_session_id: string | null;
   pr_number: number | null;
   status: string; // "spawning" | "running" | "completed" | "failed" | "timeout"
   retry_count: number;

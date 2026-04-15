@@ -135,4 +135,11 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE agent_sessions ADD COLUMN cleaned_up_at INTEGER DEFAULT NULL`.execute(db);
     },
   },
+  {
+    name: "005_add_progress_columns",
+    up: async (db: Kysely<Database>) => {
+      await sql`ALTER TABLE workflows ADD COLUMN progress_comment_id INTEGER DEFAULT NULL`.execute(db);
+      await sql`ALTER TABLE agent_sessions ADD COLUMN claude_session_id TEXT DEFAULT NULL`.execute(db);
+    },
+  },
 ];

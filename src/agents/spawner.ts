@@ -1,8 +1,9 @@
 import { Kysely } from "kysely";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 import type { Database } from "../store/database.js";
-import { createAgentSession, updateAgentStatus, getAgentSession, incrementRetryCount } from "../store/queries.js";
+import { createAgentSession, updateAgentStatus, getAgentSession, incrementRetryCount, updateAgentSessionFields } from "../store/queries.js";
 import { createLogger } from "../logger.js";
 
 const ZAPBOT_DIR = path.resolve(import.meta.dir, "../..");
@@ -60,6 +61,65 @@ async function findSessionForIssue(issueNumber: number): Promise<string | null> 
 
   log.warn(`Could not find AO session for ${branch}`, { issueNumber });
   return null;
+}
+
+/**
+ * Resolve the worktree path for a given issue by parsing `ao session ls` porcelain output
+ * or `git worktree list` for the branch pattern.
+ */
+async function resolveWorktreePath(issueNumber: number): Promise<string | null> {
+  const branch = `feat/issue-${issueNumber}`;
+  try {
+    const proc = Bun.spawn(["git", "worktree", "list", "--porcelain"], { stdout: "pipe", stderr: "pipe" });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    for (const block of stdout.split("\n\n")) {
+      if (!block.includes(`refs/heads/${branch}`)) continue;
+      const wtLine = block.split("\n").find((l) => l.startsWith("worktree "));
+      if (wtLine) return wtLine.slice("worktree ".length);
+    }
+  } catch (err) {
+    log.warn(`Failed to resolve worktree path for issue #${issueNumber}: ${err}`);
+  }
+  return null;
+}
+
+/**
+ * Encode a worktree path the same way Claude Code does for its project directory.
+ * Strips leading /, replaces / and . with -.
+ */
+export function toClaudeProjectPath(worktreePath: string): string {
+  return worktreePath
+    .replace(/\\/g, "/")
+    .replace(/:/g, "")
+    .replace(/^\//, "")
+    .replace(/[/.]/g, "-");
+}
+
+/**
+ * Given a worktree path, find the Claude Code session UUID by locating the
+ * latest .jsonl file in the Claude project directory.
+ */
+async function resolveClaudeSessionId(worktreePath: string): Promise<string | null> {
+  const encoded = toClaudeProjectPath(worktreePath);
+  const projectDir = path.join(os.homedir(), ".claude", "projects", encoded);
+
+  try {
+    const entries = await fs.promises.readdir(projectDir, { withFileTypes: true });
+    const jsonlFiles = await Promise.all(
+      entries
+        .filter((e) => e.isFile() && e.name.endsWith(".jsonl") && !e.name.startsWith("agent-"))
+        .map(async (e) => {
+          const stat = await fs.promises.stat(path.join(projectDir, e.name));
+          return { name: e.name, mtimeMs: stat.mtimeMs };
+        })
+    );
+    jsonlFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    if (jsonlFiles.length === 0) return null;
+    return jsonlFiles[0].name.replace(".jsonl", "");
+  } catch {
+    return null;
+  }
 }
 
 function buildPrompt(ctx: SpawnContext): string {
@@ -177,6 +237,18 @@ export async function spawnAgent(
       if (code === 0) {
         await updateAgentStatus(db, agentId, "running");
         log.info(`Agent ${agentId} spawn process exited successfully`, { agentId });
+
+        // Resolve and store worktree path + Claude session UUID for progress tracking
+        const worktreePath = await resolveWorktreePath(ctx.issueNumber);
+        if (worktreePath) {
+          const fields: { worktree_path: string; claude_session_id?: string } = { worktree_path: worktreePath };
+          const sessionUUID = await resolveClaudeSessionId(worktreePath);
+          if (sessionUUID) {
+            fields.claude_session_id = sessionUUID;
+            log.info(`Resolved Claude session ${sessionUUID} for agent ${agentId}`, { agentId, worktreePath });
+          }
+          await updateAgentSessionFields(db, agentId, fields);
+        }
 
         // Re-deliver prompt after a delay to work around AO prompt delivery race.
         // AO pastes the prompt before Claude Code finishes loading, so it gets swallowed.

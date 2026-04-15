@@ -8,7 +8,8 @@ const API_BASE = "https://api.github.com";
 export interface GitHubClient {
   addLabel(repo: string, issueNumber: number, label: string): Promise<void>;
   removeLabel(repo: string, issueNumber: number, label: string): Promise<void>;
-  postComment(repo: string, issueNumber: number, body: string): Promise<void>;
+  postComment(repo: string, issueNumber: number, body: string): Promise<{ id: number }>;
+  updateComment(repo: string, commentId: number, body: string): Promise<void>;
   closeIssue(repo: string, issueNumber: number): Promise<void>;
   createIssue(repo: string, title: string, body: string, labels: string[]): Promise<string>;
   editIssue(repo: string, issueNumber: number, updates: Record<string, unknown>): Promise<void>;
@@ -94,8 +95,18 @@ function createRestClient(getToken: TokenProvider): GitHubClient {
 
     async postComment(repo, issueNumber, body) {
       log.debug(`Posting comment on #${issueNumber} via API`, { repo, issueNumber });
-      await authedFetch(`/repos/${repo}/issues/${issueNumber}/comments`, {
+      const resp = await authedFetch(`/repos/${repo}/issues/${issueNumber}/comments`, {
         method: "POST",
+        body: JSON.stringify({ body }),
+      });
+      const data = await resp.json() as { id: number };
+      return { id: data.id };
+    },
+
+    async updateComment(repo, commentId, body) {
+      log.debug(`Updating comment ${commentId} via API`, { repo, commentId });
+      await authedFetch(`/repos/${repo}/issues/comments/${commentId}`, {
+        method: "PATCH",
         body: JSON.stringify({ body }),
       });
     },
@@ -330,7 +341,17 @@ function createLegacyClient(): GitHubClient {
       await runGh(["issue", "edit", String(issueNumber), "--repo", repo, "--remove-label", label]);
     },
     async postComment(repo, issueNumber, body) {
-      await runGh(["issue", "comment", String(issueNumber), "--repo", repo, "--body", body]);
+      const output = await runGh([
+        "api", `repos/${repo}/issues/${issueNumber}/comments`,
+        "--method", "POST", "-f", `body=${body}`, "--jq", ".id",
+      ]);
+      return { id: parseInt(output, 10) };
+    },
+    async updateComment(repo, commentId, body) {
+      await runGh([
+        "api", `repos/${repo}/issues/comments/${commentId}`,
+        "--method", "PATCH", "-f", `body=${body}`,
+      ]);
     },
     async closeIssue(repo, issueNumber) {
       await runGh(["issue", "close", String(issueNumber), "--repo", repo]);
