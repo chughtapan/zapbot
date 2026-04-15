@@ -47,6 +47,7 @@ export interface AgentSessionTable {
   last_heartbeat: number;
   spawned_at: number;
   completed_at: number | null;
+  cleaned_up_at: number | null;
 }
 
 export interface TransitionTable {
