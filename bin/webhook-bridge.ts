@@ -1,5 +1,5 @@
 import { Kysely } from "kysely";
-import { initDatabase, type Database } from "../src/store/database.js";
+import { initDatabase, type Database, serializeDeps, deserializeDeps } from "../src/store/database.js";
 import {
   getWorkflow,
   getWorkflowByIssue,
@@ -131,7 +131,7 @@ function pruneExpiredTokens(): void {
 
 let db: Kysely<Database>;
 
-import { mapWebhookToEvent } from "../src/webhook/mapper.js";
+import { mapWebhookToEvent, parseDependencies } from "../src/webhook/mapper.js";
 
 // ── Side effect execution ───────────────────────────────────────────
 
@@ -258,19 +258,7 @@ async function executeSideEffects(
   }
 }
 
-// ── Dependency parsing and unblocking ──────────────────────────────
-
-const DEPENDS_ON_RE = /depends on #(\d+)/gi;
-
-function parseDependencies(body: string): number[] {
-  const deps: number[] = [];
-  let match;
-  while ((match = DEPENDS_ON_RE.exec(body)) !== null) {
-    deps.push(parseInt(match[1], 10));
-  }
-  DEPENDS_ON_RE.lastIndex = 0; // reset regex state
-  return deps;
-}
+// ── Dependency checking and unblocking ─────────────────────────────
 
 /** Returns issue numbers that are not yet in a terminal state. Uses an in-memory subs list when available to avoid redundant DB queries. */
 function findBlockingDeps(deps: number[], repo: string, siblingWorkflows?: { issue_number: number; state: string }[]): number[] {
@@ -299,24 +287,17 @@ async function findBlockingDepsAsync(deps: number[], repo: string): Promise<numb
 /** When a sub-issue completes, check if any siblings were waiting on it. */
 async function unblockDependents(completedIssueNumber: number, parentWorkflowId: string, repo: string): Promise<void> {
   const subs = await getSubWorkflows(db, parentWorkflowId);
-  const planningSubsWithDeps = subs.filter((s) => s.state === SubState.PLANNING);
+  // Only check PLANNING siblings that have dependencies referencing the completed issue
+  const planningSubsWithDeps = subs.filter((s) => {
+    if (s.state !== SubState.PLANNING) return false;
+    const deps = deserializeDeps(s.dependencies);
+    return deps.includes(completedIssueNumber);
+  });
   if (planningSubsWithDeps.length === 0) return;
 
-  // Fetch issue bodies concurrently for all PLANNING siblings
-  const results = await Promise.allSettled(
-    planningSubsWithDeps.map(async (sub) => {
-      const issueBody = await gh.getIssueBody(repo, sub.issue_number);
-      const deps = parseDependencies(issueBody);
-      if (!deps.includes(completedIssueNumber)) return null;
-
-      const blocking = findBlockingDeps(deps, repo, subs);
-      return { sub, blocking };
-    })
-  );
-
-  for (const result of results) {
-    if (result.status !== "fulfilled" || !result.value) continue;
-    const { sub, blocking } = result.value;
+  for (const sub of planningSubsWithDeps) {
+    const deps = deserializeDeps(sub.dependencies);
+    const blocking = findBlockingDeps(deps, repo, subs);
 
     if (blocking.length === 0) {
       log.info(`Unblocking #${sub.issue_number} — all dependencies satisfied`, {
@@ -506,6 +487,7 @@ async function handleWebhook(
       const parentMatch = body.match(/Part of #(\d+)/i);
       const parentWorkflowId = parentMatch ? makeWorkflowId(repo, parseInt(parentMatch[1], 10)) : null;
 
+      const deps = parseDependencies(body);
       await upsertWorkflow(db, {
         id: wfId,
         issue_number: issueNumber,
@@ -515,6 +497,7 @@ async function handleWebhook(
         parent_workflow_id: parentWorkflowId,
         author,
         intent,
+        dependencies: serializeDeps(deps),
       });
 
       await addTransition(db, {

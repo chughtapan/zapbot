@@ -123,4 +123,10 @@ const migrations: Migration[] = [
         .execute();
     },
   },
+  {
+    name: "003_add_dependencies_column",
+    up: async (db: Kysely<Database>) => {
+      await sql`ALTER TABLE workflows ADD COLUMN dependencies TEXT DEFAULT NULL`.execute(db);
+    },
+  },
 ];

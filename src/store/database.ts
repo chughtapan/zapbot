@@ -18,8 +18,21 @@ export interface WorkflowTable {
   author: string;
   intent: string;
   draft_review_cycles: number;
+  dependencies: string | null; // JSON-encoded number[] — use serializeDeps/deserializeDeps
   created_at: number;
   updated_at: number;
+}
+
+/** Serialize dependency issue numbers for DB storage. */
+export function serializeDeps(deps: number[]): string | null {
+  return deps.length > 0 ? JSON.stringify(deps) : null;
+}
+
+/** Deserialize dependency issue numbers from DB. */
+export function deserializeDeps(raw: string | null): number[] {
+  if (!raw) return [];
+  try { return JSON.parse(raw) as number[]; }
+  catch { return []; }
 }
 
 export interface AgentSessionTable {

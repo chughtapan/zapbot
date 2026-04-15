@@ -1,8 +1,9 @@
 import { Kysely, sql } from "kysely";
 import type { Database, WorkflowTable, AgentSessionTable, TransitionTable } from "./database.js";
 
-type WorkflowInsert = Omit<WorkflowTable, "created_at" | "updated_at" | "draft_review_cycles"> & {
+type WorkflowInsert = Omit<WorkflowTable, "created_at" | "updated_at" | "draft_review_cycles" | "dependencies"> & {
   draft_review_cycles?: number;
+  dependencies?: string | null;
 };
 type AgentInsert = Omit<AgentSessionTable, "status" | "retry_count" | "max_retries" | "last_heartbeat" | "spawned_at" | "completed_at"> & {
   status?: string;

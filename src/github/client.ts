@@ -13,6 +13,7 @@ export interface GitHubClient {
   createIssue(repo: string, title: string, body: string, labels: string[]): Promise<string>;
   editIssue(repo: string, issueNumber: number, updates: Record<string, unknown>): Promise<void>;
   convertPrToDraft(repo: string, prNumber: number): Promise<void>;
+  getIssue(repo: string, issueNumber: number): Promise<{ state: "open" | "closed"; body: string }>;
   getIssueState(repo: string, issueNumber: number): Promise<"open" | "closed">;
   getIssueBody(repo: string, issueNumber: number): Promise<string>;
   listWebhooks(repo: string): Promise<Array<{ id: number; config: { url?: string } }>>;
@@ -107,16 +108,18 @@ function createRestClient(getToken: TokenProvider): GitHubClient {
       });
     },
 
-    async getIssueState(repo, issueNumber) {
+    async getIssue(repo, issueNumber) {
       const resp = await authedFetch(`/repos/${repo}/issues/${issueNumber}`);
-      const data = await resp.json() as { state: string };
-      return data.state === "closed" ? "closed" : "open";
+      const data = await resp.json() as { state: string; body: string | null };
+      return { state: data.state === "closed" ? "closed" as const : "open" as const, body: data.body || "" };
+    },
+
+    async getIssueState(repo, issueNumber) {
+      return (await this.getIssue(repo, issueNumber)).state;
     },
 
     async getIssueBody(repo, issueNumber) {
-      const resp = await authedFetch(`/repos/${repo}/issues/${issueNumber}`);
-      const data = await resp.json() as { body: string | null };
-      return data.body || "";
+      return (await this.getIssue(repo, issueNumber)).body;
     },
 
     async createIssue(repo, title, body, labels) {
@@ -332,12 +335,16 @@ function createLegacyClient(): GitHubClient {
     async closeIssue(repo, issueNumber) {
       await runGh(["issue", "close", String(issueNumber), "--repo", repo]);
     },
+    async getIssue(repo, issueNumber) {
+      const result = await runGh(["issue", "view", String(issueNumber), "--repo", repo, "--json", "state,body"]);
+      const data = JSON.parse(result) as { state: string; body: string };
+      return { state: data.state?.toLowerCase() === "closed" ? "closed" as const : "open" as const, body: data.body || "" };
+    },
     async getIssueState(repo, issueNumber) {
-      const result = await runGh(["issue", "view", String(issueNumber), "--repo", repo, "--json", "state", "--jq", ".state"]);
-      return result.trim().toLowerCase() === "closed" ? "closed" : "open";
+      return (await this.getIssue(repo, issueNumber)).state;
     },
     async getIssueBody(repo, issueNumber) {
-      return runGh(["issue", "view", String(issueNumber), "--repo", repo, "--json", "body", "--jq", ".body"]);
+      return (await this.getIssue(repo, issueNumber)).body;
     },
     async createIssue(repo, title, body, labels) {
       const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];

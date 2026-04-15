@@ -3,10 +3,22 @@ import { LABEL_TO_STATE } from "../state-machine/states.js";
 
 const DEFAULT_BOT_USERNAME = "zapbot[bot]";
 const LINKED_ISSUE_RE = /(?:closes|fixes|resolves|part of)\s+#(\d+)/i;
+const DEPENDS_ON_RE = /depends on #(\d+)/gi;
 
 function extractLinkedIssue(body: string): number | null {
   const match = body.match(LINKED_ISSUE_RE);
   return match ? parseInt(match[1], 10) : null;
+}
+
+/** Parse "Depends on #N" markers from an issue body. */
+export function parseDependencies(body: string): number[] {
+  const deps: number[] = [];
+  let match;
+  while ((match = DEPENDS_ON_RE.exec(body)) !== null) {
+    deps.push(parseInt(match[1], 10));
+  }
+  DEPENDS_ON_RE.lastIndex = 0;
+  return deps;
 }
 
 /**
