@@ -513,8 +513,7 @@ async function handleWebhook(
 
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
 
-      // Check for dependencies before spawning planner
-      const deps = parseDependencies(body);
+      // Check for dependencies before spawning planner (deps already parsed above)
       if (deps.length > 0) {
         const blocking = await findBlockingDepsAsync(deps, repo);
         if (blocking.length > 0) {
