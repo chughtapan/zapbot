@@ -144,7 +144,7 @@ async function handleBridgeRegister(req: Request, secret: string): Promise<Respo
   }
 
   const entry = registerBridge(repo, bridgeUrl);
-  return Response.json({ ok: true, entry });
+  return Response.json({ ok: true, repo: entry.repo, registeredAt: entry.registeredAt });
 }
 
 async function handleBridgeDeregister(req: Request, secret: string): Promise<Response> {

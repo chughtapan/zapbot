@@ -101,7 +101,8 @@ describe("gateway endpoints", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.ok).toBe(true);
-    expect(body.entry.repo).toBe("acme/app");
+    expect(body.repo).toBe("acme/app");
+    expect(body.bridgeUrl).toBeUndefined(); // bridge URLs must not leak
   });
 
   it("POST /api/bridges/register with missing repo returns 400", async () => {

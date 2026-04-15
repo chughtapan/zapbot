@@ -69,7 +69,7 @@ function startLivenessSweep(): void {
             touchBridge(bridge.repo);
           }
         } catch {
-          log("debug", `Liveness ping failed for ${bridge.repo}`, { bridgeUrl: bridge.bridgeUrl });
+          log("debug", `Liveness ping failed for ${bridge.repo}`);
         }
       }),
     );
