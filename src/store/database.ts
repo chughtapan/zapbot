@@ -25,7 +25,7 @@ export interface WorkflowTable {
 export interface AgentSessionTable {
   id: string; // "agent-{uuid}"
   workflow_id: string;
-  role: string; // "triage" | "planner" | "implementer" | "qe"
+  role: string; // "triage" | "planner" | "implementer" | "qe" | "investigator"
   worktree_path: string | null;
   pr_number: number | null;
   status: string; // "spawning" | "running" | "completed" | "failed" | "timeout"

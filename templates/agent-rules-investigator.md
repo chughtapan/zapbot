@@ -21,8 +21,9 @@ You are an investigator agent. Your job is to diagnose bugs and write minimal re
 - Every finding must be backed by a reproduction test that fails
 
 ## Before committing:
+- Mark your reproduction test with `.skip` or `.todo` so it does not break CI for other agents
 - Run all existing tests to confirm they still pass
-- Only commit if existing tests pass (your new reproduction test is expected to fail)
+- Only commit if the test suite passes (your skipped reproduction test documents the bug without blocking CI)
 - Do not modify files outside the investigation scope
 
 ## Commit style:
