@@ -159,10 +159,14 @@ Then check the result:
 
 ### 9. Create or update GitHub issue
 
-Create a GitHub issue with the plan content:
+**IMPORTANT:** Steps 8 and 9 MUST run in a single Bash call so `$PLANNOTATOR_URL` stays in scope. The URL can be 8KB+ — never round-trip it through tool output.
 
 ```bash
-gh issue create --title "$TITLE" --body "$BODY" --repo "$REPO"
+# Continuing from step 8 in the same Bash call:
+gh issue create --title "$TITLE" --body "$(cat <<EOF
+...body using ${PLANNOTATOR_URL} via shell substitution...
+EOF
+)" --label "planning" --repo "$REPO"
 ```
 
 The body should include:
