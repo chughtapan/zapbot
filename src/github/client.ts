@@ -1,3 +1,5 @@
+import { createSign } from "crypto";
+import { readFileSync } from "fs";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("github");
@@ -26,7 +28,10 @@ export interface WebhookConfig {
   active: boolean;
 }
 
-// ── Token-based client ──────────────────────────────────────────────
+/** A function that returns a valid GitHub API token. */
+type TokenProvider = () => Promise<string>;
+
+// ── Low-level fetch ────────────────────────────────────────────────
 
 async function ghFetch(
   token: string,
@@ -55,11 +60,18 @@ async function ghFetch(
   return resp;
 }
 
-function createTokenClient(token: string): GitHubClient {
+// ── REST client (shared by token + app modes) ──────────────────────
+
+function createRestClient(getToken: TokenProvider): GitHubClient {
+  /** Resolve token then delegate to ghFetch. */
+  async function authedFetch(path: string, options: RequestInit = {}): Promise<Response> {
+    return ghFetch(await getToken(), path, options);
+  }
+
   return {
     async addLabel(repo, issueNumber, label) {
       log.debug(`Adding label '${label}' to #${issueNumber} via API`, { repo, issueNumber, label });
-      await ghFetch(token, `/repos/${repo}/issues/${issueNumber}/labels`, {
+      await authedFetch(`/repos/${repo}/issues/${issueNumber}/labels`, {
         method: "POST",
         body: JSON.stringify({ labels: [label] }),
       });
@@ -68,7 +80,7 @@ function createTokenClient(token: string): GitHubClient {
     async removeLabel(repo, issueNumber, label) {
       log.debug(`Removing label '${label}' from #${issueNumber} via API`, { repo, issueNumber, label });
       try {
-        await ghFetch(token, `/repos/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, {
+        await authedFetch(`/repos/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, {
           method: "DELETE",
         });
       } catch (err: any) {
@@ -80,7 +92,7 @@ function createTokenClient(token: string): GitHubClient {
 
     async postComment(repo, issueNumber, body) {
       log.debug(`Posting comment on #${issueNumber} via API`, { repo, issueNumber });
-      await ghFetch(token, `/repos/${repo}/issues/${issueNumber}/comments`, {
+      await authedFetch(`/repos/${repo}/issues/${issueNumber}/comments`, {
         method: "POST",
         body: JSON.stringify({ body }),
       });
@@ -88,7 +100,7 @@ function createTokenClient(token: string): GitHubClient {
 
     async closeIssue(repo, issueNumber) {
       log.debug(`Closing issue #${issueNumber} via API`, { repo, issueNumber });
-      await ghFetch(token, `/repos/${repo}/issues/${issueNumber}`, {
+      await authedFetch(`/repos/${repo}/issues/${issueNumber}`, {
         method: "PATCH",
         body: JSON.stringify({ state: "closed" }),
       });
@@ -102,7 +114,7 @@ function createTokenClient(token: string): GitHubClient {
 
     async createIssue(repo, title, body, labels) {
       log.debug(`Creating issue via API`, { repo, title });
-      const resp = await ghFetch(token, `/repos/${repo}/issues`, {
+      const resp = await authedFetch(`/repos/${repo}/issues`, {
         method: "POST",
         body: JSON.stringify({ title, body, labels }),
       });
@@ -112,7 +124,7 @@ function createTokenClient(token: string): GitHubClient {
 
     async editIssue(repo, issueNumber, updates) {
       log.debug(`Editing issue #${issueNumber} via API`, { repo, issueNumber });
-      await ghFetch(token, `/repos/${repo}/issues/${issueNumber}`, {
+      await authedFetch(`/repos/${repo}/issues/${issueNumber}`, {
         method: "PATCH",
         body: JSON.stringify(updates),
       });
@@ -121,6 +133,8 @@ function createTokenClient(token: string): GitHubClient {
     async convertPrToDraft(repo, prNumber) {
       // GraphQL is required for converting to draft — REST can't do this
       log.debug(`Converting PR #${prNumber} to draft via GraphQL`, { repo, prNumber });
+      const token = await getToken();
+
       // First get the node ID of the PR
       const resp = await ghFetch(token, `/repos/${repo}/pulls/${prNumber}`);
       const pr = await resp.json() as { node_id: string };
@@ -143,12 +157,12 @@ function createTokenClient(token: string): GitHubClient {
     },
 
     async listWebhooks(repo) {
-      const resp = await ghFetch(token, `/repos/${repo}/hooks`);
+      const resp = await authedFetch(`/repos/${repo}/hooks`);
       return resp.json() as Promise<Array<{ id: number; config: { url?: string } }>>;
     },
 
     async createWebhook(repo, config) {
-      const resp = await ghFetch(token, `/repos/${repo}/hooks`, {
+      const resp = await authedFetch(`/repos/${repo}/hooks`, {
         method: "POST",
         body: JSON.stringify({
           config: {
@@ -174,19 +188,112 @@ function createTokenClient(token: string): GitHubClient {
         };
       }
       if (config.active !== undefined) payload.active = config.active;
-      await ghFetch(token, `/repos/${repo}/hooks/${hookId}`, {
+      await authedFetch(`/repos/${repo}/hooks/${hookId}`, {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
     },
 
     async deactivateWebhook(repo, hookId) {
-      await ghFetch(token, `/repos/${repo}/hooks/${hookId}`, {
+      await authedFetch(`/repos/${repo}/hooks/${hookId}`, {
         method: "PATCH",
         body: JSON.stringify({ active: false }),
       });
     },
   };
+}
+
+// ── Token-based client ─────────────────────────────────────────────
+
+function createTokenClient(token: string): GitHubClient {
+  return createRestClient(() => Promise.resolve(token));
+}
+
+// ── GitHub App auth ────────────────────────────────────────────────
+
+/**
+ * Load a PEM private key from env var. The value can be either:
+ * - The PEM content directly (starts with "-----BEGIN")
+ * - A file path to a .pem file
+ */
+export function loadPrivateKey(): string {
+  const keyOrPath = process.env.GITHUB_APP_PRIVATE_KEY;
+  if (!keyOrPath) throw new Error("GITHUB_APP_PRIVATE_KEY is required for GitHub App auth");
+
+  if (keyOrPath.startsWith("-----BEGIN")) return keyOrPath;
+
+  // Treat as file path
+  try {
+    return readFileSync(keyOrPath, "utf-8");
+  } catch (err) {
+    throw new Error(`Cannot read private key file: ${keyOrPath}: ${err}`);
+  }
+}
+
+/**
+ * Generate a short-lived JWT for GitHub App authentication.
+ * Used to exchange for installation access tokens.
+ */
+export function generateAppJWT(appId: string, privateKeyPem: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    iss: appId,
+    iat: now - 60,   // 60s in the past for clock drift
+    exp: now + 600,  // 10 minutes max
+  })).toString("base64url");
+
+  const signingInput = `${header}.${payload}`;
+  const sign = createSign("RSA-SHA256");
+  sign.update(signingInput);
+  const signature = sign.sign(privateKeyPem, "base64url");
+
+  return `${signingInput}.${signature}`;
+}
+
+/**
+ * Create a client that authenticates as a GitHub App installation.
+ * Caches installation tokens and refreshes them at 50 minutes (tokens last 1hr).
+ */
+function createAppClient(appId: string, privateKey: string, installationId: string): GitHubClient {
+  let cached: { token: string; expiresAt: number } | null = null;
+
+  async function getToken(): Promise<string> {
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return cached.token;
+    }
+
+    log.debug("Refreshing GitHub App installation token", { appId, installationId });
+    const jwt = generateAppJWT(appId, privateKey);
+
+    const resp = await fetch(`${API_BASE}/app/installations/${installationId}/access_tokens`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`Failed to get installation token: ${resp.status}: ${body}`);
+    }
+
+    const data = await resp.json() as { token: string; expires_at: string };
+
+    // Refresh at 50 minutes (tokens last 1hr)
+    cached = {
+      token: data.token,
+      expiresAt: now + 50 * 60 * 1000,
+    };
+
+    log.info("GitHub App installation token refreshed");
+    return data.token;
+  }
+
+  return createRestClient(getToken);
 }
 
 // ── Legacy gh CLI client ────────────────────────────────────────────
@@ -269,6 +376,19 @@ function createLegacyClient(): GitHubClient {
 // ── Factory ─────────────────────────────────────────────────────────
 
 export function createGitHubClient(): GitHubClient {
+  // Priority 1: GitHub App auth
+  const appId = process.env.GITHUB_APP_ID;
+  if (appId) {
+    const privateKey = loadPrivateKey();
+    const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
+    if (!installationId) {
+      throw new Error("GITHUB_APP_INSTALLATION_ID is required when using GitHub App auth");
+    }
+    log.info("Using GitHub App for API calls", { appId, installationId });
+    return createAppClient(appId, privateKey, installationId);
+  }
+
+  // Priority 2: PAT / legacy
   const mode = process.env.ZAPBOT_AUTH_MODE || "bot";
   const token = process.env.ZAPBOT_GITHUB_TOKEN;
 

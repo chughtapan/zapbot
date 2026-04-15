@@ -4,5 +4,6 @@ dist/
 *.db-journal
 .zapbot/
 .env
+*.pem
 agent-orchestrator.yaml
 .agent-rules.md
