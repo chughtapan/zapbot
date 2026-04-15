@@ -9,7 +9,7 @@ const ZAPBOT_DIR = path.resolve(import.meta.dir, "../..");
 
 const log = createLogger("agents");
 
-export type AgentRole = "triage" | "planner" | "implementer" | "qe";
+export type AgentRole = "triage" | "planner" | "implementer" | "qe" | "investigator";
 
 export type AgentFailureHandler = (db: Kysely<Database>, agentId: string) => Promise<void>;
 
