@@ -143,15 +143,17 @@ Read the plan file and extract the title from the first `# heading` line.
 
 Skip this step if plannotator is not installed (degraded mode from step 4).
 
-Run via Bash:
+**Important:** `plannotator annotate` can hang indefinitely. Always wrap it with a timeout.
+
+Run two commands via Bash. First, extract the URL:
 ```bash
-plannotator annotate "$PLAN_FILE" 2>&1
+PLANNOTATOR_URL=$(timeout 15 plannotator annotate "$PLAN_FILE" 2>&1 | grep -o 'https://share.plannotator.ai/[^ ]*' | head -1)
+echo "URL: $PLANNOTATOR_URL"
 ```
 
-Check the exit code AND the output:
-- If exit code is non-zero: **tell the user explicitly** what failed. Show the error output. Do NOT silently continue.
-- If exit code is 0: extract the URL from the output (it contains `https://share.plannotator.ai/...`).
-- If no URL found in successful output: warn the user that plannotator produced no link.
+Then check the result:
+- If `PLANNOTATOR_URL` is empty (timeout or no output): warn the user that plannotator failed to produce a link. Continue in degraded mode (no review link in the issue).
+- If `PLANNOTATOR_URL` is set: use it in the issue body (step 9).
 
 **Never swallow errors silently.** The user must know if plannotator failed and why.
 
@@ -187,10 +189,12 @@ Generate `TOKEN` as a random string (e.g., `uuidgen` or `openssl rand -hex 16`).
 
 ### 11. Notify bridge of plan_published
 
+The callback token (generated in step 10) must be included in the request body as `"token"`. Without it the bridge returns 401.
+
 ```bash
 curl -X POST "$BRIDGE_URL/api/callbacks/plannotator/$ISSUE_NUMBER" \
   -H "Content-Type: application/json" \
-  -d '{"event":"plan_published","author":"'"$(git config user.name 2>/dev/null || echo unknown)"'"}'
+  -d '{"event":"plan_published","author":"'"$(git config user.name 2>/dev/null || echo unknown)"'","token":"'"$TOKEN"'"}'
 ```
 
 ### 12. Confirm success
