@@ -1066,15 +1066,17 @@ async function main() {
   // Gateway registration (if configured)
   let gatewayCleanup: (() => Promise<void>) | null = null;
   const gatewayUrl = process.env.ZAPBOT_GATEWAY_URL;
+  const gatewayToken = process.env.ZAPBOT_GATEWAY_TOKEN;
   const gatewaySecret = process.env.ZAPBOT_GATEWAY_SECRET;
   const bridgeUrl = process.env.ZAPBOT_BRIDGE_URL;
+  const hasGatewayAuth = !!(gatewayToken || gatewaySecret);
 
-  if (gatewayUrl && gatewaySecret && bridgeUrl) {
+  if (gatewayUrl && hasGatewayAuth && bridgeUrl) {
     const repos = Array.from(repoMap.keys());
     if (repos.length > 0) {
       try {
         gatewayCleanup = await setupGateway(
-          { gatewayUrl, secret: gatewaySecret },
+          { gatewayUrl, token: gatewayToken, secret: gatewaySecret },
           repos,
           bridgeUrl,
         );
@@ -1084,7 +1086,7 @@ async function main() {
       }
     }
   } else if (gatewayUrl) {
-    log.warn("ZAPBOT_GATEWAY_URL is set but ZAPBOT_GATEWAY_SECRET or ZAPBOT_BRIDGE_URL is missing — skipping gateway registration");
+    log.warn("ZAPBOT_GATEWAY_URL is set but ZAPBOT_GATEWAY_TOKEN/ZAPBOT_GATEWAY_SECRET or ZAPBOT_BRIDGE_URL is missing — skipping gateway registration");
   }
 
   // Graceful shutdown
