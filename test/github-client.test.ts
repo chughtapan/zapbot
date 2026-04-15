@@ -1,6 +1,26 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
+import { generateAppJWT, loadPrivateKey } from "../src/github/client.js";
+import { generateKeyPairSync } from "crypto";
+import { writeFileSync, mkdtempSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
-// Test the GitHub client factory behavior
+// Generate a test RSA key pair for JWT tests
+const { privateKey: TEST_PRIVATE_KEY } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+});
+
+// Also generate a PKCS#1 formatted key (what GitHub actually generates)
+const { privateKey: TEST_PKCS1_KEY } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+});
+
+// ── Factory tests ──────────────────────────────────────────────────
+
 describe("GitHub client factory", () => {
   const originalEnv = { ...process.env };
 
@@ -11,53 +31,95 @@ describe("GitHub client factory", () => {
   it("falls back to legacy mode when ZAPBOT_GITHUB_TOKEN is not set", async () => {
     delete process.env.ZAPBOT_GITHUB_TOKEN;
     delete process.env.ZAPBOT_AUTH_MODE;
+    delete process.env.GITHUB_APP_ID;
 
-    // Dynamic import to get fresh module state
     const { createGitHubClient } = await import("../src/github/client.js");
     const client = createGitHubClient();
 
-    // The client should exist (legacy mode doesn't error on creation)
     expect(client).toBeDefined();
-    expect(client.addLabel).toBeFunction();
-    expect(client.removeLabel).toBeFunction();
-    expect(client.postComment).toBeFunction();
-    expect(client.closeIssue).toBeFunction();
-    expect(client.createIssue).toBeFunction();
-    expect(client.editIssue).toBeFunction();
-    expect(client.convertPrToDraft).toBeFunction();
-    expect(client.listWebhooks).toBeFunction();
-    expect(client.createWebhook).toBeFunction();
-    expect(client.updateWebhook).toBeFunction();
-    expect(client.deactivateWebhook).toBeFunction();
+    expect(typeof client.addLabel).toBe("function");
+    expect(typeof client.removeLabel).toBe("function");
+    expect(typeof client.postComment).toBe("function");
+    expect(typeof client.closeIssue).toBe("function");
+    expect(typeof client.createIssue).toBe("function");
+    expect(typeof client.editIssue).toBe("function");
+    expect(typeof client.convertPrToDraft).toBe("function");
+    expect(typeof client.listWebhooks).toBe("function");
+    expect(typeof client.createWebhook).toBe("function");
+    expect(typeof client.updateWebhook).toBe("function");
+    expect(typeof client.deactivateWebhook).toBe("function");
   });
 
   it("uses bot mode when ZAPBOT_GITHUB_TOKEN is set", async () => {
     process.env.ZAPBOT_GITHUB_TOKEN = "test-token-123";
     delete process.env.ZAPBOT_AUTH_MODE;
+    delete process.env.GITHUB_APP_ID;
 
     const { createGitHubClient } = await import("../src/github/client.js");
     const client = createGitHubClient();
 
     expect(client).toBeDefined();
-    expect(client.addLabel).toBeFunction();
+    expect(typeof client.addLabel).toBe("function");
   });
 
   it("forces legacy mode when ZAPBOT_AUTH_MODE=legacy", async () => {
     process.env.ZAPBOT_GITHUB_TOKEN = "test-token-123";
     process.env.ZAPBOT_AUTH_MODE = "legacy";
+    delete process.env.GITHUB_APP_ID;
 
     const { createGitHubClient } = await import("../src/github/client.js");
     const client = createGitHubClient();
 
-    // Legacy client exists and has all methods
     expect(client).toBeDefined();
-    expect(client.addLabel).toBeFunction();
+    expect(typeof client.addLabel).toBe("function");
+  });
+
+  it("uses app mode when GITHUB_APP_ID is set", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+    // App mode takes priority even if PAT is set
+    process.env.ZAPBOT_GITHUB_TOKEN = "test-token-123";
+
+    const { createGitHubClient } = await import("../src/github/client.js");
+    const client = createGitHubClient();
+
+    expect(client).toBeDefined();
+    expect(typeof client.addLabel).toBe("function");
+  });
+
+  it("throws when GITHUB_APP_ID is set but GITHUB_APP_INSTALLATION_ID is missing", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    delete process.env.GITHUB_APP_INSTALLATION_ID;
+
+    const { createGitHubClient } = await import("../src/github/client.js");
+    expect(() => createGitHubClient()).toThrow("GITHUB_APP_INSTALLATION_ID is required");
+  });
+
+  it("throws when GITHUB_APP_ID is set but GITHUB_APP_PRIVATE_KEY is missing", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    delete process.env.GITHUB_APP_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    const { createGitHubClient } = await import("../src/github/client.js");
+    expect(() => createGitHubClient()).toThrow("GITHUB_APP_PRIVATE_KEY is required");
   });
 });
 
+// ── Interface completeness ─────────────────────────────────────────
+
 describe("GitHub client interface completeness", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
   it("has all required methods", async () => {
     process.env.ZAPBOT_GITHUB_TOKEN = "test-token";
+    delete process.env.GITHUB_APP_ID;
+
     const { createGitHubClient } = await import("../src/github/client.js");
     const client = createGitHubClient();
 
@@ -70,5 +132,123 @@ describe("GitHub client interface completeness", () => {
     for (const method of methods) {
       expect(typeof (client as any)[method]).toBe("function");
     }
+  });
+
+  it("app client has all required methods", async () => {
+    process.env.GITHUB_APP_ID = "12345";
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    process.env.GITHUB_APP_INSTALLATION_ID = "67890";
+
+    const { createGitHubClient } = await import("../src/github/client.js");
+    const client = createGitHubClient();
+
+    const methods = [
+      "addLabel", "removeLabel", "postComment", "closeIssue",
+      "createIssue", "editIssue", "convertPrToDraft",
+      "listWebhooks", "createWebhook", "updateWebhook", "deactivateWebhook",
+    ];
+
+    for (const method of methods) {
+      expect(typeof (client as any)[method]).toBe("function");
+    }
+  });
+});
+
+// ── JWT generation ─────────────────────────────────────────────────
+
+describe("generateAppJWT", () => {
+  it("generates a valid JWT with RS256", () => {
+    const jwt = generateAppJWT("12345", TEST_PRIVATE_KEY);
+
+    // JWT has 3 parts separated by dots
+    const parts = jwt.split(".");
+    expect(parts).toHaveLength(3);
+
+    // Decode and verify header
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString());
+    expect(header).toEqual({ alg: "RS256", typ: "JWT" });
+
+    // Decode and verify payload
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+    expect(payload.iss).toBe("12345");
+    expect(payload.exp).toBeGreaterThan(payload.iat);
+    expect(payload.exp - payload.iat).toBeLessThanOrEqual(660); // iat is 60s back, exp is 10min forward
+
+    // Signature is non-empty
+    expect(parts[2].length).toBeGreaterThan(0);
+  });
+
+  it("works with PKCS#1 formatted keys (GitHub default)", () => {
+    const jwt = generateAppJWT("99999", TEST_PKCS1_KEY);
+    const parts = jwt.split(".");
+    expect(parts).toHaveLength(3);
+
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+    expect(payload.iss).toBe("99999");
+  });
+
+  it("sets iat 60 seconds in the past for clock drift", () => {
+    const before = Math.floor(Date.now() / 1000) - 61;
+    const jwt = generateAppJWT("12345", TEST_PRIVATE_KEY);
+    const after = Math.floor(Date.now() / 1000) - 59;
+
+    const payload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
+    expect(payload.iat).toBeGreaterThanOrEqual(before);
+    expect(payload.iat).toBeLessThanOrEqual(after);
+  });
+
+  it("sets exp to 10 minutes after now", () => {
+    const before = Math.floor(Date.now() / 1000) + 599;
+    const jwt = generateAppJWT("12345", TEST_PRIVATE_KEY);
+    const after = Math.floor(Date.now() / 1000) + 601;
+
+    const payload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
+    expect(payload.exp).toBeGreaterThanOrEqual(before);
+    expect(payload.exp).toBeLessThanOrEqual(after);
+  });
+
+  it("throws with an invalid private key", () => {
+    expect(() => generateAppJWT("12345", "not-a-valid-key")).toThrow();
+  });
+});
+
+// ── Private key loading ────────────────────────────────────────────
+
+describe("loadPrivateKey", () => {
+  const originalEnv = { ...process.env };
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "zapbot-test-"));
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns PEM content when env var contains a PEM string", () => {
+    process.env.GITHUB_APP_PRIVATE_KEY = TEST_PRIVATE_KEY;
+    const key = loadPrivateKey();
+    expect(key).toBe(TEST_PRIVATE_KEY);
+  });
+
+  it("reads PEM from file when env var is a file path", () => {
+    const keyPath = join(tmpDir, "test-key.pem");
+    writeFileSync(keyPath, TEST_PRIVATE_KEY);
+    process.env.GITHUB_APP_PRIVATE_KEY = keyPath;
+
+    const key = loadPrivateKey();
+    expect(key).toBe(TEST_PRIVATE_KEY);
+  });
+
+  it("throws when env var is not set", () => {
+    delete process.env.GITHUB_APP_PRIVATE_KEY;
+    expect(() => loadPrivateKey()).toThrow("GITHUB_APP_PRIVATE_KEY is required");
+  });
+
+  it("throws when file path does not exist", () => {
+    process.env.GITHUB_APP_PRIVATE_KEY = "/nonexistent/path/key.pem";
+    expect(() => loadPrivateKey()).toThrow("Cannot read private key file");
   });
 });
