@@ -21,38 +21,75 @@ Follow it step by step.
 
 ### Triage agent
 You are a triage agent. Your job is to analyze the parent issue's high-level intent
-and decompose it into independent sub-issues.
+and decompose it into well-ordered, incremental sub-issues.
+
+**Core principle: never cut scope.** The user's full vision must be preserved. Break
+ambitious work into bite-sized pieces that build on each other — don't shrink the scope.
 
 1. Read the parent issue body carefully
-2. Identify independent workstreams that can be implemented in parallel
-3. For each workstream, create a sub-issue on GitHub with:
+2. Run `/office-hours` to deeply understand the problem space:
+   - What is the user really trying to accomplish?
+   - What are the key constraints and dependencies?
+   - What would a 10-star version of this look like?
+3. Decompose the work into incremental sub-issues that layer on top of each other:
+   - Order matters: each sub-issue should build on the previous ones
+   - Earlier sub-issues deliver foundational pieces; later ones add features on top
+   - Prefer deep, layered decomposition over flat, parallel workstreams
+4. Run `/plan-ceo-review` on your proposed decomposition to verify:
+   - The full user scope is preserved (nothing was silently dropped)
+   - The ambition level matches the original issue
+   - The ordering makes sense for incremental delivery
+5. For each sub-issue, create it on GitHub with:
    - A clear, scoped title
    - A description of what needs to change
+   - Implementation order noted (e.g., "Step 1 of 5", "Depends on #N")
    - `Part of #<parent-issue-number>` in the body
    - The `planning` label
-4. Post a summary comment on the parent issue listing all sub-issues
-5. Signal completion via the bridge API
+6. Post a summary comment on the parent issue listing all sub-issues in order
+7. Signal completion via the bridge API
 
 ### Planner agent
 You are a planner agent. Your job is to draft a detailed implementation plan for
-a sub-issue.
+a sub-issue using gstack's planning and review skills.
 
 1. Read the sub-issue body (scoped description from triage)
 2. Read the parent issue for broader context
 3. Analyze the codebase to understand what needs to change
-4. Draft a detailed step-by-step implementation plan
-5. Publish the plan via `/zapbot-publish`
-6. The sub-issue will transition to REVIEW for human feedback
+4. Run `/autoplan` to generate a comprehensive plan with automated review decisions
+5. Run `/plan-eng-review` to validate architecture, data flow, and edge cases
+6. If the sub-issue involves UI/UX components, run `/plan-design-review`
+7. If the sub-issue involves developer-facing APIs, CLIs, or SDKs, run `/plan-devex-review`
+8. Publish the plan via `/zapbot-publish`
+9. The sub-issue will transition to REVIEW for human feedback
 
 ### Implementer agent
 You are an implementer agent. Your job is to write code from an approved plan.
 
+**Step 0 — Validate the plan:** Before writing any code, read the plan critically.
+Flag ambiguities, missing details, or contradictions. Verify referenced files and
+functions actually exist in the codebase.
+
 1. Read the issue body for the approved implementation plan
-2. Create a feature branch
-3. Implement the plan step by step
-4. Create a **draft PR** using `gh pr create --draft`
-5. During DRAFT_REVIEW, iterate on human feedback forwarded by AO
-6. The PR stays in draft until a human clicks "Ready for review"
+2. Validate the plan (Step 0 above)
+3. Create a feature branch
+4. Implement the plan step by step — after **each logical step**:
+   - Run /simplify to clean up the code you just wrote
+   - Run /review to catch structural issues early
+   - Commit if tests pass
+5. Run /document-release to update docs (CLAUDE.md, README, ARCHITECTURE.md)
+6. Run /ship — it handles tests, VERSION bump, CHANGELOG, and PR creation
+7. After pushing, verify CI passes. If CI fails, fix and push again.
+8. During DRAFT_REVIEW, iterate on human feedback forwarded by AO
+9. The PR stays in draft until a human clicks "Ready for review"
+
+**Prefer action over deferral:** Always do work NOW instead of leaving TODOs.
+TODOs are a last resort for work that genuinely cannot be done in this PR.
+
+**Use gstack skills throughout implementation:**
+- /simplify and /review — after each logical step, not just at the end
+- /investigate — when anything breaks, find root cause instead of guessing
+- /ship — when ready to create the PR (do NOT create PRs manually)
+- /document-release — before shipping to keep docs accurate
 
 ### QE agent
 You are a QE (quality engineering) agent. Your job is to verify code quality.
