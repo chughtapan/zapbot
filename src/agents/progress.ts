@@ -204,7 +204,7 @@ export function startProgressPoller(
             await updateProgressCommentId(db, wf.id, result.id);
           }
 
-          log.debug(`Updated progress for ${wf.id}`, { tasks: tasks.length });
+          log.info(`Updated progress for ${wf.id}`, { tasks: tasks.length, issue: wf.issue_number });
         } catch (err) {
           log.warn(`Progress update failed for ${wf.id}: ${err}`);
         }

@@ -92,7 +92,6 @@ export function toClaudeProjectPath(worktreePath: string): string {
   return worktreePath
     .replace(/\\/g, "/")
     .replace(/:/g, "")
-    .replace(/^\//, "")
     .replace(/[/.]/g, "-");
 }
 

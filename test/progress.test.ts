@@ -217,20 +217,19 @@ describe("formatFinalComment", () => {
 describe("toClaudeProjectPath", () => {
   it("encodes a Unix path correctly", () => {
     expect(toClaudeProjectPath("/home/user/.worktrees/zapbot/zap-1")).toBe(
-      "home-user--worktrees-zapbot-zap-1"
+      "-home-user--worktrees-zapbot-zap-1"
     );
   });
 
   it("handles paths with dots", () => {
     expect(toClaudeProjectPath("/home/user/my.project")).toBe(
-      "home-user-my-project"
+      "-home-user-my-project"
     );
   });
 
-  it("strips leading slash", () => {
+  it("replaces leading slash with dash (matching Claude Code encoding)", () => {
     const result = toClaudeProjectPath("/foo/bar");
-    expect(result).not.toMatch(/^\//);
-    expect(result).toBe("foo-bar");
+    expect(result).toBe("-foo-bar");
   });
 });
 
