@@ -16,7 +16,7 @@ import {
   withTransaction,
 } from "../src/store/queries.js";
 import { apply } from "../src/state-machine/engine.js";
-import { LABEL_TO_STATE, TERMINAL_STATES, STATE_TO_LABEL } from "../src/state-machine/states.js";
+import { LABEL_TO_STATE, TERMINAL_STATES, STATE_TO_LABEL, SubState } from "../src/state-machine/states.js";
 import type { WorkflowEvent } from "../src/state-machine/events.js";
 import type { SideEffect } from "../src/state-machine/effects.js";
 import type { Workflow } from "../src/state-machine/transitions.js";
@@ -272,49 +272,65 @@ function parseDependencies(body: string): number[] {
   return deps;
 }
 
-async function areDependenciesSatisfied(deps: number[], repo: string): Promise<{ satisfied: boolean; blocking: number[] }> {
+/** Returns issue numbers that are not yet in a terminal state. Uses an in-memory subs list when available to avoid redundant DB queries. */
+function findBlockingDeps(deps: number[], repo: string, siblingWorkflows?: { issue_number: number; state: string }[]): number[] {
   const blocking: number[] = [];
   for (const depIssue of deps) {
-    const depWfId = makeWorkflowId(repo, depIssue);
-    const depWf = await getWorkflow(db, depWfId);
-    if (!depWf || !TERMINAL_STATES.has(depWf.state)) {
+    // Check in-memory siblings first (avoids DB round-trip)
+    const sibling = siblingWorkflows?.find((s) => s.issue_number === depIssue);
+    if (sibling) {
+      if (!TERMINAL_STATES.has(sibling.state)) blocking.push(depIssue);
+    } else {
+      // Dependency is outside the parent (rare) — can't check without DB query, assume blocking
       blocking.push(depIssue);
     }
   }
-  return { satisfied: blocking.length === 0, blocking };
+  return blocking;
+}
+
+async function findBlockingDepsAsync(deps: number[], repo: string): Promise<number[]> {
+  const results = await Promise.all(deps.map(async (depIssue) => {
+    const depWf = await getWorkflow(db, makeWorkflowId(repo, depIssue));
+    return (!depWf || !TERMINAL_STATES.has(depWf.state)) ? depIssue : null;
+  }));
+  return results.filter((n): n is number => n !== null);
 }
 
 /** When a sub-issue completes, check if any siblings were waiting on it. */
 async function unblockDependents(completedIssueNumber: number, parentWorkflowId: string, repo: string): Promise<void> {
   const subs = await getSubWorkflows(db, parentWorkflowId);
-  for (const sub of subs) {
-    // Only check sub-issues stuck in PLANNING with no agents
-    if (sub.state !== "PLANNING") continue;
+  const planningSubsWithDeps = subs.filter((s) => s.state === SubState.PLANNING);
+  if (planningSubsWithDeps.length === 0) return;
 
-    // Read the issue body to find dependencies
-    try {
+  // Fetch issue bodies concurrently for all PLANNING siblings
+  const results = await Promise.allSettled(
+    planningSubsWithDeps.map(async (sub) => {
       const issueBody = await gh.getIssueBody(repo, sub.issue_number);
       const deps = parseDependencies(issueBody);
-      if (!deps.includes(completedIssueNumber)) continue;
+      if (!deps.includes(completedIssueNumber)) return null;
 
-      // This sub depends on the one that just completed. Check if ALL its deps are now satisfied.
-      const { satisfied, blocking } = await areDependenciesSatisfied(deps, repo);
-      if (satisfied) {
-        log.info(`Unblocking #${sub.issue_number} — all dependencies satisfied`, {
-          issueNumber: sub.issue_number, completedDep: completedIssueNumber,
-        });
-        await executeSideEffects([
-          { type: "spawn_agent", role: "planner", issueNumber: sub.issue_number },
-          { type: "post_comment", issueNumber: sub.issue_number,
-            body: `**Zapbot:** Dependency #${completedIssueNumber} completed. All dependencies satisfied. Spawning planner agent.` },
-        ], repo);
-      } else {
-        log.debug(`#${sub.issue_number} still blocked on ${blocking.join(", ")}`, {
-          issueNumber: sub.issue_number,
-        });
-      }
-    } catch (err) {
-      log.warn(`Could not check dependencies for #${sub.issue_number}: ${err}`);
+      const blocking = findBlockingDeps(deps, repo, subs);
+      return { sub, blocking };
+    })
+  );
+
+  for (const result of results) {
+    if (result.status !== "fulfilled" || !result.value) continue;
+    const { sub, blocking } = result.value;
+
+    if (blocking.length === 0) {
+      log.info(`Unblocking #${sub.issue_number} — all dependencies satisfied`, {
+        issueNumber: sub.issue_number, completedDep: completedIssueNumber,
+      });
+      await executeSideEffects([
+        { type: "spawn_agent", role: "planner", issueNumber: sub.issue_number },
+        { type: "post_comment", issueNumber: sub.issue_number,
+          body: `**Zapbot:** Dependency #${completedIssueNumber} completed. All dependencies satisfied. Spawning planner agent.` },
+      ], repo);
+    } else {
+      log.debug(`#${sub.issue_number} still blocked on ${blocking.map((n) => `#${n}`).join(", ")}`, {
+        issueNumber: sub.issue_number,
+      });
     }
   }
 }
@@ -517,8 +533,8 @@ async function handleWebhook(
       // Check for dependencies before spawning planner
       const deps = parseDependencies(body);
       if (deps.length > 0) {
-        const { satisfied, blocking } = await areDependenciesSatisfied(deps, repo);
-        if (!satisfied) {
+        const blocking = await findBlockingDepsAsync(deps, repo);
+        if (blocking.length > 0) {
           const blockList = blocking.map((n) => `#${n}`).join(", ");
           log.info(`Sub-issue #${issueNumber} blocked on ${blockList}`, { issueNumber, blocking });
           await executeSideEffects([
@@ -572,7 +588,7 @@ async function handleWebhook(
   let wfRow = await getWorkflowByIssue(db, issueNumber, repo);
   if (!wfRow) {
     // Backward compat: plan-approved label on an issue with no workflow
-    if (event.type === "label_added" && (event as any).label === "plan-approved") {
+    if (event.type === "label_added" && event.label === "plan-approved") {
       const author = payload.sender?.login || "";
       const intent = payload.issue?.title || "";
       const wfId = makeWorkflowId(repo, issueNumber);
@@ -613,7 +629,7 @@ async function handleWebhook(
   if (!result) {
     // Same-state label overrides are not errors — the label just matches current state.
     // Don't post a confusing rejection comment for these.
-    if (event.type === "label_state_override" && (event as any).targetState === workflow.state) {
+    if (event.type === "label_state_override" && event.targetState === workflow.state) {
       log.debug(`Label matches current state, ignoring`, { issueNumber, state: workflow.state });
       return { status: 200, body: "no-op" };
     }
