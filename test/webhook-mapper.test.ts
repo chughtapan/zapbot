@@ -249,3 +249,112 @@ describe("issue link parsing", () => {
     expect(result!.issueNumber).toBe(100);
   });
 });
+
+// ── Label state override ───────────────────────────────────────────
+
+describe("label_state_override", () => {
+  it("emits override for 'planning' label", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("planning", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_state_override");
+    if (result!.event.type === "label_state_override") {
+      expect(result!.event.targetState).toBe("PLANNING");
+      expect(result!.event.label).toBe("planning");
+    }
+  });
+
+  it("emits override for 'implementing' label", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("implementing", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_state_override");
+    if (result!.event.type === "label_state_override") {
+      expect(result!.event.targetState).toBe("IMPLEMENTING");
+    }
+  });
+
+  it("emits override for 'review' label", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("review", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_state_override");
+    if (result!.event.type === "label_state_override") {
+      expect(result!.event.targetState).toBe("REVIEW");
+    }
+  });
+
+  it("emits override for 'verifying' label", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("verifying", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_state_override");
+    if (result!.event.type === "label_state_override") {
+      expect(result!.event.targetState).toBe("VERIFYING");
+    }
+  });
+
+  it("emits override for 'triaged' label", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("triaged", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_state_override");
+    if (result!.event.type === "label_state_override") {
+      expect(result!.event.targetState).toBe("TRIAGED");
+    }
+  });
+
+  it("does NOT emit override for bot's own labels", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("planning", "zapbot[bot]"));
+    expect(result).toBeNull();
+  });
+
+  it("still handles plan-approved as label_added (not override)", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("plan-approved", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_added");
+  });
+
+  it("still handles triage as triage_label_added (not override)", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("triage", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("triage_label_added");
+  });
+
+  it("still handles abandoned as label_abandoned (not override)", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("abandoned", "human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("label_abandoned");
+  });
+
+  it("ignores unknown labels", () => {
+    const result = mapWebhookToEvent("issues", issuePayload("wontfix", "human"));
+    expect(result).toBeNull();
+  });
+});
+
+// ── External close ─────────────────────────────────────────────────
+
+describe("issue_closed_externally", () => {
+  function closedPayload(actor: string, issueNumber = 42) {
+    return {
+      action: "closed",
+      sender: { login: actor },
+      issue: { number: issueNumber },
+      repository: { full_name: "acme/app" },
+    };
+  }
+
+  it("emits issue_closed_externally when human closes issue", () => {
+    const result = mapWebhookToEvent("issues", closedPayload("human"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("issue_closed_externally");
+    expect(result!.event.triggeredBy).toBe("human");
+    expect(result!.issueNumber).toBe(42);
+  });
+
+  it("ignores close events from the bot itself", () => {
+    const result = mapWebhookToEvent("issues", closedPayload("zapbot[bot]"));
+    expect(result).toBeNull();
+  });
+
+  it("includes correct repo", () => {
+    const result = mapWebhookToEvent("issues", closedPayload("human"));
+    expect(result!.repo).toBe("acme/app");
+  });
+});
