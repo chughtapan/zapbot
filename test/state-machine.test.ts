@@ -457,3 +457,60 @@ describe("label_state_override transitions", () => {
     expect(spawns.length).toBe(0);
   });
 });
+
+// ── External close (issue closed via GitHub UI) ────────────────────
+
+describe("issue_closed_externally transitions", () => {
+  const closeEvent: WorkflowEvent = { type: "issue_closed_externally", triggeredBy: "human" };
+
+  it("closes sub-issue from PLANNING → DONE", () => {
+    const wf = makeSub(SubState.PLANNING);
+    const result = apply(wf, closeEvent);
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DONE);
+  });
+
+  it("closes sub-issue from IMPLEMENTING → DONE", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, closeEvent);
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DONE);
+  });
+
+  it("closes sub-issue from VERIFYING → DONE", () => {
+    const wf = makeSub(SubState.VERIFYING);
+    const result = apply(wf, closeEvent);
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DONE);
+  });
+
+  it("closes parent from TRIAGE → COMPLETED", () => {
+    const wf = makeParent(ParentState.TRIAGE);
+    const result = apply(wf, closeEvent);
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(ParentState.COMPLETED);
+  });
+
+  it("closes parent from TRIAGED → COMPLETED", () => {
+    const wf = makeParent(ParentState.TRIAGED);
+    const result = apply(wf, closeEvent);
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(ParentState.COMPLETED);
+  });
+
+  it("checks parent completion when sub-issue is closed externally", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, closeEvent)!;
+    const checks = result.sideEffects.filter((e) => e.type === "check_parent_completion");
+    expect(checks.length).toBe(1);
+  });
+
+  it("posts comment with @mention on external close", () => {
+    const wf = makeSub(SubState.REVIEW);
+    const result = apply(wf, closeEvent)!;
+    const comments = result.sideEffects.filter((e) => e.type === "post_comment");
+    expect(comments.length).toBe(1);
+    expect((comments[0] as any).body).toContain("@human");
+    expect((comments[0] as any).body).toContain("closed by");
+  });
+});

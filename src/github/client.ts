@@ -11,6 +11,7 @@ export interface GitHubClient {
   createIssue(repo: string, title: string, body: string, labels: string[]): Promise<string>;
   editIssue(repo: string, issueNumber: number, updates: Record<string, unknown>): Promise<void>;
   convertPrToDraft(repo: string, prNumber: number): Promise<void>;
+  getIssueState(repo: string, issueNumber: number): Promise<"open" | "closed">;
   listWebhooks(repo: string): Promise<Array<{ id: number; config: { url?: string } }>>;
   createWebhook(repo: string, config: WebhookConfig): Promise<number>;
   updateWebhook(repo: string, hookId: number, config: Partial<WebhookConfig>): Promise<void>;
@@ -91,6 +92,12 @@ function createTokenClient(token: string): GitHubClient {
         method: "PATCH",
         body: JSON.stringify({ state: "closed" }),
       });
+    },
+
+    async getIssueState(repo, issueNumber) {
+      const resp = await ghFetch(token, `/repos/${repo}/issues/${issueNumber}`);
+      const data = await resp.json() as { state: string };
+      return data.state === "closed" ? "closed" : "open";
     },
 
     async createIssue(repo, title, body, labels) {
@@ -210,6 +217,10 @@ function createLegacyClient(): GitHubClient {
     },
     async closeIssue(repo, issueNumber) {
       await runGh(["issue", "close", String(issueNumber), "--repo", repo]);
+    },
+    async getIssueState(repo, issueNumber) {
+      const result = await runGh(["issue", "view", String(issueNumber), "--repo", repo, "--json", "state", "--jq", ".state"]);
+      return result.trim().toLowerCase() === "closed" ? "closed" : "open";
     },
     async createIssue(repo, title, body, labels) {
       const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];

@@ -275,11 +275,49 @@ function buildOverrideTransitions(): TransitionDef[] {
   }));
 }
 
+// ── External close (issue closed via GitHub UI) ──────────────────
+
+function buildExternalCloseTransitions(): TransitionDef[] {
+  const allParentStates = [ParentState.TRIAGE, ParentState.TRIAGED];
+  const allSubStates = [
+    SubState.PLANNING, SubState.REVIEW, SubState.IMPLEMENTING,
+    SubState.DRAFT_REVIEW, SubState.VERIFYING,
+  ];
+
+  const parentCloses: TransitionDef[] = allParentStates.map((from) => ({
+    from,
+    eventType: "issue_closed_externally",
+    to: ParentState.COMPLETED,
+    effects: (wf: Workflow, event: WorkflowEvent) => [
+      ...labelSwap(wf.issueNumber, from, ParentState.COMPLETED),
+      { type: "post_comment", issueNumber: wf.issueNumber,
+        body: `**Zapbot:** Issue closed by @${event.triggeredBy}. Marking workflow as completed.` },
+    ],
+  }));
+
+  const subCloses: TransitionDef[] = allSubStates.map((from) => ({
+    from,
+    eventType: "issue_closed_externally",
+    to: SubState.DONE,
+    effects: (wf: Workflow, event: WorkflowEvent) => [
+      ...labelSwap(wf.issueNumber, from, SubState.DONE),
+      { type: "post_comment", issueNumber: wf.issueNumber,
+        body: `**Zapbot:** Issue closed by @${event.triggeredBy}. Marking workflow as done.` },
+      ...(wf.parentWorkflowId
+        ? [{ type: "check_parent_completion" as const, parentWorkflowId: wf.parentWorkflowId }]
+        : []),
+    ],
+  }));
+
+  return [...parentCloses, ...subCloses];
+}
+
 export const ALL_TRANSITIONS: TransitionDef[] = [
   ...parentTransitions,
   ...subTransitions,
   ...buildAbandonTransitions(),
   ...buildOverrideTransitions(),
+  ...buildExternalCloseTransitions(),
 ];
 
 export function findTransition(

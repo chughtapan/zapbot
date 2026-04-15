@@ -56,6 +56,15 @@ export function mapWebhookToEvent(
     return null;
   }
 
+  // Issue closed externally (via GitHub UI or by a user, not by zapbot's close_issue effect).
+  // This moves the workflow to a terminal state so it's not re-spawned on restart.
+  if (eventType === "issues" && payload.action === "closed") {
+    const actor: string = payload.sender?.login || "";
+    const issueNumber: number = payload.issue?.number;
+    if (actor === botUsername) return null; // zapbot closed it via close_issue effect, already handled
+    return { event: { type: "issue_closed_externally", triggeredBy: actor }, issueNumber, repo };
+  }
+
   if (eventType === "issues" && payload.action === "opened") {
     return null;
   }

@@ -13,4 +13,5 @@ export type WorkflowEvent =
   | { type: "verification_failed"; triggeredBy: string }
   | { type: "label_abandoned"; triggeredBy: string }
   | { type: "triage_label_added"; triggeredBy: string }
-  | { type: "label_state_override"; label: string; targetState: string; triggeredBy: string };
+  | { type: "label_state_override"; label: string; targetState: string; triggeredBy: string }
+  | { type: "issue_closed_externally"; triggeredBy: string };

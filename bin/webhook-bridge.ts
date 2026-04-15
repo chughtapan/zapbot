@@ -608,6 +608,24 @@ async function recoverStuckWorkflows(): Promise<void> {
   const agentStates = new Set(["TRIAGE", "IMPLEMENTING", "VERIFYING"]);
 
   for (const wf of active) {
+    // Check if the GitHub issue is still open before attempting recovery.
+    // Issues closed externally (via GitHub UI or by agents) should not be re-spawned.
+    try {
+      const issueState = await gh.getIssueState(wf.repo, wf.issue_number);
+      if (issueState === "closed") {
+        log.info(`Recovery: ${wf.id} — GitHub issue #${wf.issue_number} is closed, marking workflow as DONE`, {
+          workflow: wf.id, state: wf.state,
+        });
+        await updateWorkflowState(db, wf.id, "DONE");
+        continue;
+      }
+    } catch (err) {
+      log.warn(`Recovery: ${wf.id} — could not check issue state, skipping (${err})`, {
+        workflow: wf.id,
+      });
+      continue;
+    }
+
     const agents = await getAgentSessions(db, wf.id);
 
     if (agentStates.has(wf.state) && allAgentsDead(agents)) {
@@ -620,7 +638,7 @@ async function recoverStuckWorkflows(): Promise<void> {
       await executeSideEffects([
         { type: "spawn_agent", role, issueNumber: wf.issue_number },
         { type: "post_comment", issueNumber: wf.issue_number,
-          body: `Zapbot: Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
+          body: `**Zapbot:** Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
       ], wf.repo);
     } else {
       const zombies = agents.filter((a) => a.status === "running" || a.status === "spawning");
