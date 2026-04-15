@@ -258,6 +258,67 @@ async function executeSideEffects(
   }
 }
 
+// ── Dependency parsing and unblocking ──────────────────────────────
+
+const DEPENDS_ON_RE = /depends on #(\d+)/gi;
+
+function parseDependencies(body: string): number[] {
+  const deps: number[] = [];
+  let match;
+  while ((match = DEPENDS_ON_RE.exec(body)) !== null) {
+    deps.push(parseInt(match[1], 10));
+  }
+  DEPENDS_ON_RE.lastIndex = 0; // reset regex state
+  return deps;
+}
+
+async function areDependenciesSatisfied(deps: number[], repo: string): Promise<{ satisfied: boolean; blocking: number[] }> {
+  const blocking: number[] = [];
+  for (const depIssue of deps) {
+    const depWfId = makeWorkflowId(repo, depIssue);
+    const depWf = await getWorkflow(db, depWfId);
+    if (!depWf || !TERMINAL_STATES.has(depWf.state)) {
+      blocking.push(depIssue);
+    }
+  }
+  return { satisfied: blocking.length === 0, blocking };
+}
+
+/** When a sub-issue completes, check if any siblings were waiting on it. */
+async function unblockDependents(completedIssueNumber: number, parentWorkflowId: string, repo: string): Promise<void> {
+  const subs = await getSubWorkflows(db, parentWorkflowId);
+  for (const sub of subs) {
+    // Only check sub-issues stuck in PLANNING with no agents
+    if (sub.state !== "PLANNING") continue;
+
+    // Read the issue body to find dependencies
+    try {
+      const issueBody = await gh.getIssueBody(repo, sub.issue_number);
+      const deps = parseDependencies(issueBody);
+      if (!deps.includes(completedIssueNumber)) continue;
+
+      // This sub depends on the one that just completed. Check if ALL its deps are now satisfied.
+      const { satisfied, blocking } = await areDependenciesSatisfied(deps, repo);
+      if (satisfied) {
+        log.info(`Unblocking #${sub.issue_number} — all dependencies satisfied`, {
+          issueNumber: sub.issue_number, completedDep: completedIssueNumber,
+        });
+        await executeSideEffects([
+          { type: "spawn_agent", role: "planner", issueNumber: sub.issue_number },
+          { type: "post_comment", issueNumber: sub.issue_number,
+            body: `**Zapbot:** Dependency #${completedIssueNumber} completed. All dependencies satisfied. Spawning planner agent.` },
+        ], repo);
+      } else {
+        log.debug(`#${sub.issue_number} still blocked on ${blocking.join(", ")}`, {
+          issueNumber: sub.issue_number,
+        });
+      }
+    } catch (err) {
+      log.warn(`Could not check dependencies for #${sub.issue_number}: ${err}`);
+    }
+  }
+}
+
 // ── Parent completion check ─────────────────────────────────────────
 
 async function checkParentCompletion(parentWorkflowId: string, repo: string): Promise<void> {
@@ -452,6 +513,22 @@ async function handleWebhook(
       });
 
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
+
+      // Check for dependencies before spawning planner
+      const deps = parseDependencies(body);
+      if (deps.length > 0) {
+        const { satisfied, blocking } = await areDependenciesSatisfied(deps, repo);
+        if (!satisfied) {
+          const blockList = blocking.map((n) => `#${n}`).join(", ");
+          log.info(`Sub-issue #${issueNumber} blocked on ${blockList}`, { issueNumber, blocking });
+          await executeSideEffects([
+            { type: "post_comment", issueNumber,
+              body: `**Zapbot:** Sub-issue tracked. Waiting on ${blockList} to complete before starting planning.` },
+          ], repo);
+          return { status: 200, body: "sub workflow created (blocked)" };
+        }
+      }
+
       await executeSideEffects([
         { type: "spawn_agent", role: "planner", issueNumber },
         { type: "post_comment", issueNumber, body: "**Zapbot:** Sub-issue tracked. Spawning planner agent to draft an implementation plan." },
@@ -574,6 +651,15 @@ async function handleWebhook(
 
   // Execute side effects
   await executeSideEffects(result.sideEffects, repo);
+
+  // When a sub-issue reaches a terminal state, unblock any siblings that depend on it
+  if (TERMINAL_STATES.has(result.newState) && workflow.parentWorkflowId) {
+    try {
+      await unblockDependents(workflow.issueNumber, workflow.parentWorkflowId, repo);
+    } catch (err) {
+      log.warn(`Failed to unblock dependents after #${workflow.issueNumber} completed: ${err}`);
+    }
+  }
 
   return { status: 200, body: `${result.transition.from} → ${result.transition.to}` };
 }
