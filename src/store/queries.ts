@@ -185,6 +185,37 @@ export async function getStaleAgents(
     .execute();
 }
 
+// ── Cleanup ─────────────────────────────────────────────────────
+
+/**
+ * Find agent sessions eligible for cleanup: parent workflow is in a terminal
+ * state and the session has not been cleaned up yet.
+ */
+export async function getSessionsForCleanup(
+  db: Kysely<Database>,
+  terminalStates: string[]
+): Promise<AgentSessionTable[]> {
+  return db
+    .selectFrom("agent_sessions")
+    .innerJoin("workflows", "workflows.id", "agent_sessions.workflow_id")
+    .selectAll("agent_sessions")
+    .where("workflows.state", "in", terminalStates)
+    .where("agent_sessions.cleaned_up_at", "is", null)
+    .execute();
+}
+
+export async function markSessionCleaned(
+  db: Kysely<Database>,
+  agentId: string
+): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  await db
+    .updateTable("agent_sessions")
+    .set({ cleaned_up_at: now })
+    .where("id", "=", agentId)
+    .execute();
+}
+
 // ── Transitions ─────────────────────────────────────────────────────
 
 export async function addTransition(

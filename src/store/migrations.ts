@@ -129,4 +129,10 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE workflows ADD COLUMN dependencies TEXT DEFAULT NULL`.execute(db);
     },
   },
+  {
+    name: "004_add_cleanup_columns",
+    up: async (db: Kysely<Database>) => {
+      await sql`ALTER TABLE agent_sessions ADD COLUMN cleaned_up_at INTEGER DEFAULT NULL`.execute(db);
+    },
+  },
 ];
