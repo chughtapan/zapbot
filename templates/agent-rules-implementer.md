@@ -57,3 +57,5 @@ These skills should be used **during** implementation, not just at the end:
 - If tests fail: use /investigate, not trial-and-error
 - If CI fails after pushing: read the failure, fix it, push again
 - If the plan is ambiguous: implement the simpler interpretation
+
+Frequently update your task list using TaskCreate/TaskUpdate. Your progress is broadcast to users on GitHub.

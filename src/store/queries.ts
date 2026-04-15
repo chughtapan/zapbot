@@ -1,13 +1,15 @@
 import { Kysely, sql } from "kysely";
 import type { Database, WorkflowTable, AgentSessionTable, TransitionTable } from "./database.js";
 
-type WorkflowInsert = Omit<WorkflowTable, "created_at" | "updated_at" | "draft_review_cycles" | "dependencies"> & {
+type WorkflowInsert = Omit<WorkflowTable, "created_at" | "updated_at" | "draft_review_cycles" | "dependencies" | "progress_comment_id"> & {
   draft_review_cycles?: number;
   dependencies?: string | null;
+  progress_comment_id?: number | null;
 };
-type AgentInsert = Omit<AgentSessionTable, "status" | "retry_count" | "max_retries" | "last_heartbeat" | "spawned_at" | "completed_at"> & {
+type AgentInsert = Omit<AgentSessionTable, "status" | "retry_count" | "max_retries" | "last_heartbeat" | "spawned_at" | "completed_at" | "claude_session_id"> & {
   status?: string;
   max_retries?: number;
+  claude_session_id?: string | null;
 };
 type TransitionInsert = Omit<TransitionTable, "created_at">;
 
@@ -182,6 +184,50 @@ export async function getStaleAgents(
     .selectAll()
     .where("status", "in", ["spawning", "running"])
     .where("last_heartbeat", "<", cutoff)
+    .execute();
+}
+
+// ── Progress ────────────────────────────────────────────────────
+
+export async function updateProgressCommentId(
+  db: Kysely<Database>,
+  workflowId: string,
+  commentId: number
+): Promise<void> {
+  await db
+    .updateTable("workflows")
+    .set({ progress_comment_id: commentId })
+    .where("id", "=", workflowId)
+    .execute();
+}
+
+export async function updateAgentSessionFields(
+  db: Kysely<Database>,
+  agentId: string,
+  fields: { worktree_path?: string; claude_session_id?: string }
+): Promise<void> {
+  await db
+    .updateTable("agent_sessions")
+    .set(fields)
+    .where("id", "=", agentId)
+    .execute();
+}
+
+/**
+ * Get active (non-terminal) workflows that have at least one running agent session.
+ * Returns the workflow joined with the latest running agent's claude_session_id.
+ */
+export async function getActiveWorkflowsWithAgents(
+  db: Kysely<Database>,
+  terminalStates: string[]
+): Promise<Array<WorkflowTable & { agent_role: string; claude_session_id: string | null; agent_id: string }>> {
+  return db
+    .selectFrom("workflows")
+    .innerJoin("agent_sessions", "agent_sessions.workflow_id", "workflows.id")
+    .selectAll("workflows")
+    .select(["agent_sessions.role as agent_role", "agent_sessions.claude_session_id", "agent_sessions.id as agent_id"])
+    .where("workflows.state", "not in", terminalStates)
+    .where("agent_sessions.status", "in", ["running", "spawning"])
     .execute();
 }
 
