@@ -104,48 +104,31 @@ export async function resolveClaudeSessionFromWorktree(worktreePath: string): Pr
   }
 }
 
-// ── Comment formatting ───────���──────────────────────────────────
-
-const STATUS_ICON: Record<string, string> = {
-  pending: "⏸️",
-  in_progress: "⏳",
-  completed: "✅",
-};
+// ── Comment formatting ──────────────────────────────────────────
 
 export function formatProgressComment(role: string, tasks: AgentTask[]): string {
-  const lines: string[] = ["### 🤖 Agent Progress", ""];
+  const lines: string[] = [`**${role}** agent progress`];
 
   if (tasks.length === 0) {
-    lines.push(`**Role:** ${role} | Agent is working...`, "");
-    lines.push("_Updated automatically by Zapbot._");
+    lines.push("", "_Agent is working..._");
     return lines.join("\n");
   }
 
-  lines.push("| # | Task | Status |");
-  lines.push("|---|------|--------|");
-
+  lines.push("");
   for (const task of tasks) {
-    const icon = STATUS_ICON[task.status] || "❓";
-    const subject = task.subject.replace(/\|/g, "\\|");
-    lines.push(`| ${task.id} | ${subject} | ${icon} ${task.status} |`);
+    const checked = task.status === "completed" ? "x" : " ";
+    const suffix = task.status === "in_progress" ? " ← working" : "";
+    lines.push(`- [${checked}] ${task.subject}${suffix}`);
   }
 
   const completed = tasks.filter((t) => t.status === "completed").length;
-  const now = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
-  lines.push("");
-  lines.push(`**Role:** ${role} | **Progress:** ${completed}/${tasks.length} | **Updated:** ${now}`);
-  lines.push("");
-  lines.push("_Updated automatically by Zapbot._");
+  lines.push("", `${completed}/${tasks.length} done`);
 
   return lines.join("\n");
 }
 
 export function formatFinalComment(role: string, tasks: AgentTask[], outcome: string): string {
-  const base = formatProgressComment(role, tasks);
-  return base.replace(
-    "_Updated automatically by Zapbot._",
-    `**Outcome:** ${outcome}\n\n_Updated automatically by Zapbot._`
-  );
+  return formatProgressComment(role, tasks) + `\n\n**${outcome}**`;
 }
 
 // ── Polling loop ───────��────────────────────────────────────────

@@ -169,7 +169,7 @@ describe("readAgentTasks", () => {
 // ── Comment formatting ───────────────────────────────────────────
 
 describe("formatProgressComment", () => {
-  it("formats a comment with tasks", () => {
+  it("formats a task list with checkboxes", () => {
     const tasks: AgentTask[] = [
       { id: "1", subject: "Analyze codebase", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
       { id: "2", subject: "Create sub-issues", activeForm: "", status: "in_progress", blocks: [], blockedBy: [] },
@@ -177,27 +177,18 @@ describe("formatProgressComment", () => {
     ];
     const comment = formatProgressComment("implementer", tasks);
 
-    expect(comment).toContain("### 🤖 Agent Progress");
-    expect(comment).toContain("| 1 | Analyze codebase | ✅ completed |");
-    expect(comment).toContain("| 2 | Create sub-issues | ⏳ in_progress |");
-    expect(comment).toContain("| 3 | Post summary | ⏸️ pending |");
-    expect(comment).toContain("**Progress:** 1/3");
-    expect(comment).toContain("**Role:** implementer");
-    expect(comment).toContain("_Updated automatically by Zapbot._");
+    expect(comment).toContain("- [x] Analyze codebase");
+    expect(comment).toContain("- [ ] Create sub-issues ← working");
+    expect(comment).toContain("- [ ] Post summary");
+    expect(comment).not.toContain("Post summary ← working");
+    expect(comment).toContain("1/3 done");
+    expect(comment).toContain("**implementer** agent progress");
   });
 
   it("formats a comment with no tasks", () => {
     const comment = formatProgressComment("triage", []);
     expect(comment).toContain("Agent is working...");
-    expect(comment).toContain("**Role:** triage");
-  });
-
-  it("escapes pipe characters in subjects", () => {
-    const tasks: AgentTask[] = [
-      { id: "1", subject: "Fix A | B issue", activeForm: "", status: "pending", blocks: [], blockedBy: [] },
-    ];
-    const comment = formatProgressComment("implementer", tasks);
-    expect(comment).toContain("Fix A \\| B issue");
+    expect(comment).toContain("**triage** agent progress");
   });
 });
 
@@ -207,8 +198,8 @@ describe("formatFinalComment", () => {
       { id: "1", subject: "Task", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
     ];
     const comment = formatFinalComment("implementer", tasks, "Workflow complete");
-    expect(comment).toContain("**Outcome:** Workflow complete");
-    expect(comment).toContain("_Updated automatically by Zapbot._");
+    expect(comment).toContain("**Workflow complete**");
+    expect(comment).toContain("- [x] Task");
   });
 });
 
