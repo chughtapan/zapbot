@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Start zapbot: webhook-bridge + agent-orchestrator + optional ngrok
-# Usage: start.sh [project-dir] [--no-ngrok]
+# Start zapbot: webhook-bridge + agent-orchestrator + optional ngrok/gateway
+# Usage: start.sh [project-dir] [--no-ngrok] [--gateway]
 #
 # Run from a project directory that has agent-orchestrator.yaml (created by zapbot-team-init).
 # Or pass the project path as the first argument.
+#
+# Tunnel modes (in order of precedence):
+#   --gateway         Use ZAPBOT_GATEWAY_URL (auto-detected from env if set)
+#   --no-ngrok        No tunnel; bridge URL = ZAPBOT_BRIDGE_URL or localhost
+#   (default)         Start ngrok tunnel and register GitHub webhooks
 #
 # Supports multiple repos defined in agent-orchestrator.yaml. The bridge
 # routes webhooks by the `repository.full_name` in each payload, so a
@@ -16,10 +21,12 @@ ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Parse args
 PROJECT_DIR=""
 USE_NGROK=true
+USE_GATEWAY=false
 for arg in "$@"; do
   case "$arg" in
     --no-ngrok) USE_NGROK=false ;;
-    --help) echo "Usage: start.sh [project-dir] [--no-ngrok]"; exit 0 ;;
+    --gateway) USE_GATEWAY=true ;;
+    --help) echo "Usage: start.sh [project-dir] [--no-ngrok] [--gateway]"; exit 0 ;;
     *) [ -z "$PROJECT_DIR" ] && PROJECT_DIR="$arg" ;;
   esac
 done
@@ -45,6 +52,17 @@ if [ -z "${ZAPBOT_API_KEY:-}" ]; then
   echo "ERROR: ZAPBOT_API_KEY is not set."
   echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env, or set it manually."
   exit 1
+fi
+
+# Auto-detect gateway mode when ZAPBOT_GATEWAY_URL is set
+if [ -n "${ZAPBOT_GATEWAY_URL:-}" ] && [ "$USE_GATEWAY" = false ] && [ "$USE_NGROK" = true ]; then
+  USE_GATEWAY=true
+  echo "Detected ZAPBOT_GATEWAY_URL — using gateway mode (pass --no-ngrok to disable tunnel entirely)"
+fi
+
+# Gateway mode implies no ngrok
+if [ "$USE_GATEWAY" = true ]; then
+  USE_NGROK=false
 fi
 
 # Build repo list from agent-orchestrator.yaml projects section.
@@ -111,6 +129,9 @@ echo "AO ready on port ${AO_PORT}"
 # Start webhook bridge
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
 export ZAPBOT_API_KEY ZAPBOT_REPO ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml" ZAPBOT_PORT=$BRIDGE_PORT ZAPBOT_BRIDGE_PORT=$BRIDGE_PORT ZAPBOT_AO_PORT=$AO_PORT ZAPBOT_APPROVE_LABEL=$APPROVE_LABEL
+# Pass gateway env vars through to the bridge process
+[ -n "${ZAPBOT_GATEWAY_URL:-}" ] && export ZAPBOT_GATEWAY_URL
+[ -n "${ZAPBOT_GATEWAY_SECRET:-}" ] && export ZAPBOT_GATEWAY_SECRET
 bun "$ZAPBOT_DIR/bin/webhook-bridge.ts" > /tmp/zapbot-bridge.log 2>&1 &
 BRIDGE_PID=$!
 
@@ -121,11 +142,54 @@ for i in $(seq 1 10); do
 done
 echo "Bridge ready on port ${BRIDGE_PORT}"
 
-# Track webhook IDs for cleanup
+# Track webhook IDs for cleanup (ngrok mode only)
 WEBHOOK_IDS=()
+NGROK_PID=""
 
-# Ngrok (optional)
-if [ "$USE_NGROK" = true ]; then
+# Gateway mode: register bridge with the Railway gateway
+if [ "$USE_GATEWAY" = true ]; then
+  GATEWAY_URL="${ZAPBOT_GATEWAY_URL:-}"
+  GATEWAY_SECRET="${ZAPBOT_GATEWAY_SECRET:-}"
+  BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-}"
+
+  if [ -z "$GATEWAY_URL" ]; then
+    echo "ERROR: --gateway mode requires ZAPBOT_GATEWAY_URL."
+    echo "FIX: Set ZAPBOT_GATEWAY_URL in .env (e.g., https://zapbot-gateway.up.railway.app)"
+    kill $BRIDGE_PID $AO_PID 2>/dev/null || true
+    exit 1
+  fi
+  if [ -z "$GATEWAY_SECRET" ]; then
+    echo "ERROR: --gateway mode requires ZAPBOT_GATEWAY_SECRET."
+    echo "FIX: Set ZAPBOT_GATEWAY_SECRET in .env (must match GATEWAY_SECRET on the gateway)"
+    kill $BRIDGE_PID $AO_PID 2>/dev/null || true
+    exit 1
+  fi
+  if [ -z "$BRIDGE_URL" ]; then
+    echo "ERROR: --gateway mode requires ZAPBOT_BRIDGE_URL (public URL of this bridge)."
+    echo "FIX: Set ZAPBOT_BRIDGE_URL in .env (e.g., your tunnel URL or public IP)"
+    kill $BRIDGE_PID $AO_PID 2>/dev/null || true
+    exit 1
+  fi
+
+  export ZAPBOT_BRIDGE_URL="$BRIDGE_URL"
+
+  echo "Registering with gateway at ${GATEWAY_URL}..."
+  for repo in "${ZAPBOT_REPOS[@]}"; do
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+      -H "Authorization: Bearer ${GATEWAY_SECRET}" \
+      -H "Content-Type: application/json" \
+      "${GATEWAY_URL}/api/bridges/register" \
+      -d "$(jq -n --arg repo "$repo" --arg url "$BRIDGE_URL" \
+        '{repo:$repo,bridgeUrl:$url}')" 2>/dev/null || echo "000")
+    if [ "$HTTP_STATUS" = "200" ]; then
+      echo "  Registered ${repo} → ${BRIDGE_URL}"
+    else
+      echo "  WARNING: Gateway registration returned HTTP ${HTTP_STATUS} for ${repo}"
+    fi
+  done
+
+# Ngrok mode (legacy): start tunnel and register GitHub webhooks
+elif [ "$USE_NGROK" = true ]; then
   echo "Starting ngrok tunnel..."
   ngrok http "$BRIDGE_PORT" --log=stdout > /tmp/zapbot-ngrok.log 2>&1 &
   NGROK_PID=$!
@@ -213,19 +277,31 @@ if [ "$USE_NGROK" = true ]; then
     grep -v '^ZAPBOT_BRIDGE_URL=' "$PROJECT_DIR/.env" > "$TMPENV"
     echo "ZAPBOT_BRIDGE_URL=${NGROK_URL}" >> "$TMPENV"
     mv "$TMPENV" "$PROJECT_DIR/.env"
-    # No trap needed — mv succeeded, temp file is gone
   fi
   export ZAPBOT_BRIDGE_URL="${NGROK_URL}"
 else
   NGROK_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:${BRIDGE_PORT}}"
-  NGROK_PID=""
-  echo "ngrok disabled. Bridge URL: $NGROK_URL"
+  echo "No tunnel. Bridge URL: $NGROK_URL"
 fi
 
-# Cleanup on exit: deactivate webhooks and stop processes
+# Cleanup on exit: deregister from gateway, deactivate webhooks, stop processes
 cleanup() {
   echo ""
   echo "Shutting down..."
+
+  # Gateway deregistration
+  if [ "$USE_GATEWAY" = true ] && [ -n "${ZAPBOT_GATEWAY_URL:-}" ] && [ -n "${ZAPBOT_GATEWAY_SECRET:-}" ]; then
+    for repo in "${ZAPBOT_REPOS[@]}"; do
+      echo "  Deregistering ${repo} from gateway..."
+      curl -s -X DELETE \
+        -H "Authorization: Bearer ${ZAPBOT_GATEWAY_SECRET}" \
+        -H "Content-Type: application/json" \
+        "${ZAPBOT_GATEWAY_URL}/api/bridges/register" \
+        -d "$(jq -n --arg repo "$repo" '{repo:$repo}')" >/dev/null 2>&1 || true
+    done
+  fi
+
+  # Ngrok webhook deactivation
   for entry in "${WEBHOOK_IDS[@]}"; do
     repo="${entry%%:*}"
     hook_id="${entry##*:}"
@@ -240,6 +316,7 @@ cleanup() {
       gh api "repos/${repo}/hooks/${hook_id}" --method PATCH -F "active=false" >/dev/null 2>&1 || true
     fi
   done
+
   [ -n "${NGROK_PID:-}" ] && kill $NGROK_PID 2>/dev/null || true
   # Kill process trees (not just direct PIDs) to avoid orphaned AO children
   for pid in ${BRIDGE_PID:-} ${AO_PID:-}; do
@@ -260,12 +337,17 @@ echo "  Repo:      https://github.com/${repo}"
 done
 echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
 echo "  Dashboard: http://localhost:${AO_PORT}"
-[ "$USE_NGROK" = true ] && echo "  ngrok:     ${NGROK_URL}"
+if [ "$USE_GATEWAY" = true ]; then
+  echo "  Gateway:   ${ZAPBOT_GATEWAY_URL}"
+  echo "  Public:    ${ZAPBOT_BRIDGE_URL}"
+elif [ "$USE_NGROK" = true ]; then
+  echo "  ngrok:     ${NGROK_URL}"
+fi
 echo ""
 echo "  Publish:   bash $ZAPBOT_DIR/bin/zapbot-publish.sh <plan-file> --key <name>"
 echo "  Approve:   Add '${APPROVE_LABEL}' label on the GitHub issue"
 echo ""
-echo "  Logs: /tmp/zapbot-{ao,bridge,ngrok}.log"
+echo "  Logs: /tmp/zapbot-{ao,bridge}.log"
 echo "  Press Ctrl+C to stop everything."
 echo "================================================"
 

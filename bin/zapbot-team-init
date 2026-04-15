@@ -267,6 +267,12 @@ ZAPBOT_API_KEY=${GENERATED_SECRET}
 
 # Per-repo webhook secrets (optional, overrides shared secret):
 # ZAPBOT_API_KEY_FRONTEND_APP=<secret>
+
+# Gateway mode (replaces ngrok): set these to register with the Railway gateway.
+# The gateway receives GitHub webhooks and forwards them to your bridge.
+# ZAPBOT_GATEWAY_URL=https://zapbot-gateway.up.railway.app
+# ZAPBOT_GATEWAY_SECRET=<must match GATEWAY_SECRET on the gateway>
+# ZAPBOT_BRIDGE_URL=<public URL of this bridge, e.g. your tunnel URL>
 EOF
   echo "  Generated .env with webhook secret"
 else
@@ -277,12 +283,19 @@ fi
 
 echo ""
 echo "--- Webhook setup ---"
-echo "  To set up the webhook, run ./start.sh which handles ngrok + webhook automatically."
-echo "  Or manually create a webhook at:"
+echo "  Option A (recommended): Use the gateway."
+echo "    1. Set ZAPBOT_GATEWAY_URL and ZAPBOT_GATEWAY_SECRET in .env"
+echo "    2. Set ZAPBOT_BRIDGE_URL to your bridge's public URL"
+echo "    3. Run ./start.sh — it registers with the gateway automatically"
+echo ""
+echo "  Option B (legacy): Use ngrok."
+echo "    Run ./start.sh — it starts ngrok and registers GitHub webhooks automatically."
+echo ""
+echo "  Option C: Manual webhook."
 echo "    https://github.com/$ZAPBOT_REPO/settings/hooks/new"
-echo "  Payload URL: <your-ngrok-url>/api/webhooks/github"
-echo "  Content type: application/json"
-echo "  Events: Issues, Pull requests, Pull request reviews"
+echo "    Payload URL: <your-public-url>/api/webhooks/github"
+echo "    Content type: application/json"
+echo "    Events: Issues, Pull requests, Pull request reviews"
 
 # ── Done ─────────────────────────────────────────────────────────────
 
