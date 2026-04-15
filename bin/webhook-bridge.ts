@@ -30,7 +30,7 @@ import { createGitHubClient } from "../src/github/client.js";
 import { makeWorkflowId } from "../src/workflow-id.js";
 import { errorResponse } from "../src/http/error-response.js";
 import { verifySignature } from "../src/http/verify-signature.js";
-import { setupGateway, stopHeartbeats } from "../src/gateway/client.js";
+import { setupGateway } from "../src/gateway/client.js";
 
 // Prevent crashes from unhandled async errors
 process.on("unhandledRejection", (err) => {
@@ -1088,7 +1088,10 @@ async function main() {
   }
 
   // Graceful shutdown
+  let shuttingDown = false;
   async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
