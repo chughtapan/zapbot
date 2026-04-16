@@ -165,7 +165,7 @@ your local bridge. Deploy it once, use the URL forever. No ngrok, no dynamic URL
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/chughtapan/zapbot)
 
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/chughtapan/zapbot/tree/main/gateway)
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/chughtapan/zapbot)
 
 After deploying, your gateway URL will be something like:
 - Railway: `https://zapbot-gateway-production.up.railway.app`

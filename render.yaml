@@ -1,6 +1,7 @@
 services:
   - type: web
     name: zapbot-gateway
+    rootDir: gateway
     runtime: docker
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
