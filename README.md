@@ -124,15 +124,14 @@ issues to this account to trigger workflows.
 
 ## For Teammates
 
-### Install (10 seconds)
+### Install (one command)
 
 ```bash
-git clone --depth 1 --filter=blob:none --sparse \
-  https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot && git sparse-checkout set skills
+curl -fsSL https://raw.githubusercontent.com/chughtapan/zapbot/main/install.sh | bash
 ```
 
-This pulls only the Claude Code skill files (~36KB), not the full server codebase.
+Downloads 3 skill files into `~/.claude/skills/`. No git, no clone, no setup needed.
+Updates are checked automatically every hour. When available, Claude offers to upgrade.
 
 ### Configure
 
