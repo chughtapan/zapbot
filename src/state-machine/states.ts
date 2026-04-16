@@ -10,6 +10,7 @@ export enum SubState {
   REVIEW = "REVIEW",
   APPROVED = "APPROVED", // Transient: used for label mapping only, transitions skip to IMPLEMENTING
   IMPLEMENTING = "IMPLEMENTING",
+  INVESTIGATING = "INVESTIGATING",
   DRAFT_REVIEW = "DRAFT_REVIEW",
   VERIFYING = "VERIFYING",
   DONE = "DONE",
@@ -31,6 +32,7 @@ export const STATE_TO_LABEL: Record<string, string> = {
   [SubState.REVIEW]: "review",
   [SubState.APPROVED]: "plan-approved",
   [SubState.IMPLEMENTING]: "implementing",
+  [SubState.INVESTIGATING]: "investigating",
   [SubState.DRAFT_REVIEW]: "draft-review",
   [SubState.VERIFYING]: "verifying",
   [SubState.ABANDONED]: "abandoned",

@@ -102,8 +102,9 @@ function isAssignedToBot(payload: any): boolean {
 }
 
 /** Map an issue label to the agent role it implies. */
-function labelToRole(labels: string[]): "triage" | "planner" | "implementer" | "qe" | null {
+function labelToRole(labels: string[]): "triage" | "planner" | "implementer" | "investigator" | "qe" | null {
   if (labels.includes("implementing")) return "implementer";
+  if (labels.includes("investigating")) return "investigator";
   if (labels.includes("verifying")) return "qe";
   if (labels.includes("planning") || labels.includes("review")) return "planner";
   if (labels.includes("triage")) return "triage";
@@ -111,11 +112,12 @@ function labelToRole(labels: string[]): "triage" | "planner" | "implementer" | "
 }
 
 /** Map a workflow state to the agent role that should be working on it. */
-function stateToRole(state: string): "triage" | "planner" | "implementer" | "qe" | null {
+function stateToRole(state: string): "triage" | "planner" | "implementer" | "investigator" | "qe" | null {
   switch (state) {
     case "TRIAGE": return "triage";
     case "PLANNING": case "REVIEW": return "planner";
     case "IMPLEMENTING": case "DRAFT_REVIEW": return "implementer";
+    case "INVESTIGATING": return "investigator";
     case "VERIFYING": return "qe";
     default: return null;
   }
@@ -570,7 +572,7 @@ async function handleMentionCommand(
         id: wfId,
         issue_number: issueNumber,
         repo,
-        state: "IMPLEMENTING",
+        state: "INVESTIGATING",
         level: "sub",
         parent_workflow_id: null,
         author: triggeredBy,
@@ -580,7 +582,7 @@ async function handleMentionCommand(
         id: `t-${crypto.randomUUID()}`,
         workflow_id: wfId,
         from_state: "NEW",
-        to_state: "IMPLEMENTING",
+        to_state: "INVESTIGATING",
         event_type: "mention:investigate",
         triggered_by: triggeredBy,
         metadata: JSON.stringify({ command, commentId }),
@@ -588,8 +590,8 @@ async function handleMentionCommand(
       });
       await executeSideEffects([
         { type: "remove_label", issueNumber, label: "planning" },
-        { type: "add_label", issueNumber, label: "implementing" },
-        { type: "spawn_agent", role: "implementer", issueNumber },
+        { type: "add_label", issueNumber, label: "investigating" },
+        { type: "spawn_agent", role: "investigator", issueNumber },
         { type: "post_comment", issueNumber,
           body: `Spawning **investigator** agent per @${triggeredBy}'s request.` },
       ], repo);
@@ -598,7 +600,7 @@ async function handleMentionCommand(
 
     log.info(`Spawning investigator for #${issueNumber} via mention`, { issueNumber });
     await executeSideEffects([
-      { type: "spawn_agent", role: "implementer", issueNumber },
+      { type: "spawn_agent", role: "investigator", issueNumber },
       { type: "post_comment", issueNumber,
         body: `Spawning **investigator** agent per @${triggeredBy}'s request.` },
     ], repo);
@@ -1274,7 +1276,7 @@ async function recoverStuckWorkflows(): Promise<void> {
 
   log.info(`Recovery: scanning ${active.length} active workflow(s)`);
 
-  const agentStates = new Set(["TRIAGE", "IMPLEMENTING", "VERIFYING"]);
+  const agentStates = new Set(["TRIAGE", "IMPLEMENTING", "INVESTIGATING", "VERIFYING"]);
 
   for (const wf of active) {
     // Check if the GitHub issue is still open before attempting recovery.
@@ -1310,6 +1312,7 @@ async function recoverStuckWorkflows(): Promise<void> {
     if (agentStates.has(wf.state) && allAgentsDead(agents)) {
       const role: AgentRole = wf.state === "TRIAGE" ? "triage"
         : wf.state === "VERIFYING" ? "qe"
+        : wf.state === "INVESTIGATING" ? "investigator"
         : "implementer";
       log.warn(`Recovery: ${wf.id} stuck in ${wf.state} with all agents dead, re-spawning ${role}`, {
         workflow: wf.id, state: wf.state, role,

@@ -197,7 +197,7 @@ function buildAbandonTransitions(): TransitionDef[] {
   const allParentStates = [ParentState.TRIAGE, ParentState.TRIAGED];
   const allSubStates = [
     SubState.PLANNING, SubState.REVIEW, SubState.APPROVED,
-    SubState.IMPLEMENTING, SubState.DRAFT_REVIEW, SubState.VERIFYING,
+    SubState.IMPLEMENTING, SubState.INVESTIGATING, SubState.DRAFT_REVIEW, SubState.VERIFYING,
   ];
 
   const parentAbandons: TransitionDef[] = allParentStates.map((from) => ({
@@ -230,10 +230,11 @@ function buildAbandonTransitions(): TransitionDef[] {
 // ── Label-based state override (human can move to any state) ──────
 
 /** States that require spawning an agent when entered via override. */
-const AGENT_SPAWN_STATES: Record<string, "triage" | "planner" | "implementer" | "qe"> = {
+const AGENT_SPAWN_STATES: Record<string, "triage" | "planner" | "implementer" | "investigator" | "qe"> = {
   [ParentState.TRIAGE]: "triage",
   [SubState.PLANNING]: "planner",
   [SubState.IMPLEMENTING]: "implementer",
+  [SubState.INVESTIGATING]: "investigator",
   [SubState.VERIFYING]: "qe",
 };
 
@@ -242,7 +243,7 @@ function buildOverrideTransitions(): TransitionDef[] {
   const allParentStates = [ParentState.TRIAGE, ParentState.TRIAGED];
   const allSubStates = [
     SubState.PLANNING, SubState.REVIEW, SubState.IMPLEMENTING,
-    SubState.DRAFT_REVIEW, SubState.VERIFYING,
+    SubState.INVESTIGATING, SubState.DRAFT_REVIEW, SubState.VERIFYING,
   ];
   const allNonTerminal = [...allParentStates, ...allSubStates];
 
@@ -282,7 +283,7 @@ function buildExternalCloseTransitions(): TransitionDef[] {
   const allParentStates = [ParentState.TRIAGE, ParentState.TRIAGED];
   const allSubStates = [
     SubState.PLANNING, SubState.REVIEW, SubState.IMPLEMENTING,
-    SubState.DRAFT_REVIEW, SubState.VERIFYING,
+    SubState.INVESTIGATING, SubState.DRAFT_REVIEW, SubState.VERIFYING,
   ];
 
   const parentCloses: TransitionDef[] = allParentStates.map((from) => ({

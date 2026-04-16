@@ -186,6 +186,7 @@ describe("sub-issue abandon transitions", () => {
     SubState.REVIEW,
     SubState.APPROVED,
     SubState.IMPLEMENTING,
+    SubState.INVESTIGATING,
     SubState.DRAFT_REVIEW,
     SubState.VERIFYING,
   ];
@@ -457,6 +458,32 @@ describe("label_state_override transitions", () => {
     const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
     expect(spawns.length).toBe(0);
   });
+
+  it("spawns investigator agent when overriding to INVESTIGATING", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.INVESTIGATING))!;
+    const spawns = result.sideEffects.filter((e) => e.type === "spawn_agent");
+    expect(spawns.length).toBe(1);
+    expect((spawns[0] as any).role).toBe("investigator");
+  });
+
+  it("swaps labels when overriding to INVESTIGATING", () => {
+    const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, override(SubState.INVESTIGATING))!;
+    const removes = result.sideEffects.filter((e) => e.type === "remove_label");
+    const adds = result.sideEffects.filter((e) => e.type === "add_label");
+    expect(removes.length).toBe(1);
+    expect(adds.length).toBe(1);
+    expect((removes[0] as any).label).toBe("implementing");
+    expect((adds[0] as any).label).toBe("investigating");
+  });
+
+  it("moves from INVESTIGATING to other states via override", () => {
+    const wf = makeSub(SubState.INVESTIGATING);
+    const result = apply(wf, override(SubState.IMPLEMENTING));
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.IMPLEMENTING);
+  });
 });
 
 // ── External close (issue closed via GitHub UI) ────────────────────
@@ -473,6 +500,13 @@ describe("issue_closed_externally transitions", () => {
 
   it("closes sub-issue from IMPLEMENTING → DONE", () => {
     const wf = makeSub(SubState.IMPLEMENTING);
+    const result = apply(wf, closeEvent);
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DONE);
+  });
+
+  it("closes sub-issue from INVESTIGATING → DONE", () => {
+    const wf = makeSub(SubState.INVESTIGATING);
     const result = apply(wf, closeEvent);
     expect(result).not.toBeNull();
     expect(result!.newState).toBe(SubState.DONE);
@@ -513,5 +547,30 @@ describe("issue_closed_externally transitions", () => {
     expect(comments.length).toBe(1);
     expect((comments[0] as any).body).toContain("@human");
     expect((comments[0] as any).body).toContain("closed by");
+  });
+});
+
+// ── INVESTIGATING state ──────────────────────────────────────────────
+
+describe("INVESTIGATING state", () => {
+  it("INVESTIGATING -> ABANDONED on label_abandoned", () => {
+    const wf = makeSub(SubState.INVESTIGATING);
+    const result = apply(wf, { type: "label_abandoned", triggeredBy: "author" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.ABANDONED);
+    expect(result!.sideEffects.some((e) => e.type === "check_parent_completion")).toBe(true);
+  });
+
+  it("INVESTIGATING -> DONE on issue_closed_externally", () => {
+    const wf = makeSub(SubState.INVESTIGATING);
+    const result = apply(wf, { type: "issue_closed_externally", triggeredBy: "human" });
+    expect(result).not.toBeNull();
+    expect(result!.newState).toBe(SubState.DONE);
+  });
+
+  it("label mapping: INVESTIGATING maps to 'investigating'", () => {
+    const { STATE_TO_LABEL, LABEL_TO_STATE } = require("../src/state-machine/states.js");
+    expect(STATE_TO_LABEL[SubState.INVESTIGATING]).toBe("investigating");
+    expect(LABEL_TO_STATE["investigating"]).toBe(SubState.INVESTIGATING);
   });
 });
