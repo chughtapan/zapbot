@@ -15,6 +15,7 @@ import {
   readAgentTasks,
   formatProgressComment,
   formatFinalComment,
+  sortTasksByStatus,
   type AgentTask,
 } from "../src/agents/progress.js";
 import { toClaudeProjectPath } from "../src/agents/spawner.js";
@@ -189,6 +190,69 @@ describe("formatProgressComment", () => {
     const comment = formatProgressComment("triage", []);
     expect(comment).toContain("Agent is working...");
     expect(comment).toContain("**triage** agent progress");
+  });
+});
+
+describe("sortTasksByStatus", () => {
+  it("sorts completed first, then in_progress, then pending", () => {
+    const tasks: AgentTask[] = [
+      { id: "1", subject: "Run tests", activeForm: "", status: "pending", blocks: [], blockedBy: [] },
+      { id: "2", subject: "Update handler.ts", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+      { id: "3", subject: "Update endpoints.test.ts", activeForm: "", status: "in_progress", blocks: [], blockedBy: [] },
+      { id: "4", subject: "Rewrite auth.test.ts", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+      { id: "5", subject: "Update index.ts", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+      { id: "6", subject: "Remove jose", activeForm: "", status: "pending", blocks: [], blockedBy: [] },
+      { id: "7", subject: "Rewrite auth.ts", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+    ];
+    const sorted = sortTasksByStatus(tasks);
+    expect(sorted.map((t) => t.status)).toEqual([
+      "completed", "completed", "completed", "completed",
+      "in_progress",
+      "pending", "pending",
+    ]);
+    // Preserve creation order within each group
+    expect(sorted.filter((t) => t.status === "completed").map((t) => t.id)).toEqual(["2", "4", "5", "7"]);
+    expect(sorted.filter((t) => t.status === "pending").map((t) => t.id)).toEqual(["1", "6"]);
+  });
+
+  it("preserves order when already sorted", () => {
+    const tasks: AgentTask[] = [
+      { id: "1", subject: "A", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+      { id: "2", subject: "B", activeForm: "", status: "in_progress", blocks: [], blockedBy: [] },
+      { id: "3", subject: "C", activeForm: "", status: "pending", blocks: [], blockedBy: [] },
+    ];
+    const sorted = sortTasksByStatus(tasks);
+    expect(sorted.map((t) => t.id)).toEqual(["1", "2", "3"]);
+  });
+
+  it("does not mutate the original array", () => {
+    const tasks: AgentTask[] = [
+      { id: "1", subject: "A", activeForm: "", status: "pending", blocks: [], blockedBy: [] },
+      { id: "2", subject: "B", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+    ];
+    sortTasksByStatus(tasks);
+    expect(tasks[0].id).toBe("1");
+    expect(tasks[1].id).toBe("2");
+  });
+});
+
+describe("formatProgressComment with out-of-order tasks", () => {
+  it("renders completed tasks first in the progress comment", () => {
+    const tasks: AgentTask[] = [
+      { id: "1", subject: "Run tests", activeForm: "", status: "pending", blocks: [], blockedBy: [] },
+      { id: "2", subject: "Update handler.ts", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+      { id: "3", subject: "Update endpoints.test.ts", activeForm: "", status: "in_progress", blocks: [], blockedBy: [] },
+      { id: "4", subject: "Rewrite auth.ts", activeForm: "", status: "completed", blocks: [], blockedBy: [] },
+    ];
+    const comment = formatProgressComment("implementer", tasks);
+    const lines = comment.split("\n").filter((l) => l.startsWith("- ["));
+
+    // Completed first, then in_progress, then pending
+    expect(lines[0]).toBe("- [x] Update handler.ts");
+    expect(lines[1]).toBe("- [x] Rewrite auth.ts");
+    expect(lines[2]).toBe("- [ ] Update endpoints.test.ts ← working");
+    expect(lines[3]).toBe("- [ ] Run tests");
+    expect(comment).toContain("2/4 done");
   });
 });
 
