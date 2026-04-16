@@ -587,6 +587,8 @@ async function handleMentionCommand(
         github_delivery_id: deliveryId,
       });
       await executeSideEffects([
+        { type: "remove_label", issueNumber, label: "planning" },
+        { type: "add_label", issueNumber, label: "implementing" },
         { type: "spawn_agent", role: "implementer", issueNumber },
         { type: "post_comment", issueNumber,
           body: `Spawning **investigator** agent per @${triggeredBy}'s request.` },
@@ -648,6 +650,8 @@ async function handleMentionCommand(
         github_delivery_id: deliveryId,
       });
       await executeSideEffects([
+        { type: "remove_label", issueNumber, label: "planning" },
+        { type: "add_label", issueNumber, label: "implementing" },
         { type: "spawn_agent", role: "implementer", issueNumber },
         { type: "post_comment", issueNumber,
           body: `Spawning **implementer** agent per @${triggeredBy}'s request.` },
@@ -656,16 +660,19 @@ async function handleMentionCommand(
     }
 
     log.info(`Spawning implementer for #${issueNumber} via mention`, { issueNumber });
+
+    // Move to IMPLEMENTING if not already there
+    const labelEffects: Array<Record<string, any>> = [];
+    if (wfRow.state !== SubState.IMPLEMENTING && wfRow.state !== SubState.DRAFT_REVIEW) {
+      await updateWorkflowState(db, wfRow.id, SubState.IMPLEMENTING);
+      labelEffects.push({ type: "add_label", issueNumber, label: "implementing" });
+    }
     await executeSideEffects([
+      ...labelEffects,
       { type: "spawn_agent", role: "implementer", issueNumber },
       { type: "post_comment", issueNumber,
         body: `Spawning **implementer** agent per @${triggeredBy}'s request.` },
     ], repo);
-
-    // Move to IMPLEMENTING if not already there
-    if (wfRow.state !== SubState.IMPLEMENTING && wfRow.state !== SubState.DRAFT_REVIEW) {
-      await updateWorkflowState(db, wfRow.id, SubState.IMPLEMENTING);
-    }
 
     await addTransition(db, {
       id: `t-${crypto.randomUUID()}`,
@@ -714,6 +721,8 @@ async function handleMentionCommand(
         github_delivery_id: deliveryId,
       });
       await executeSideEffects([
+        { type: "remove_label", issueNumber, label: "planning" },
+        { type: "add_label", issueNumber, label: "verifying" },
         { type: "spawn_agent", role: "qe", issueNumber },
         { type: "post_comment", issueNumber,
           body: `Spawning **QE** agent per @${triggeredBy}'s request.` },
@@ -722,15 +731,18 @@ async function handleMentionCommand(
     }
 
     log.info(`Spawning QE for #${issueNumber} via mention`, { issueNumber });
+
+    const verifyLabelEffects: Array<Record<string, any>> = [];
+    if (wfRow.state !== SubState.VERIFYING) {
+      await updateWorkflowState(db, wfRow.id, SubState.VERIFYING);
+      verifyLabelEffects.push({ type: "add_label", issueNumber, label: "verifying" });
+    }
     await executeSideEffects([
+      ...verifyLabelEffects,
       { type: "spawn_agent", role: "qe", issueNumber },
       { type: "post_comment", issueNumber,
         body: `Spawning **QE** agent per @${triggeredBy}'s request.` },
     ], repo);
-
-    if (wfRow.state !== SubState.VERIFYING) {
-      await updateWorkflowState(db, wfRow.id, SubState.VERIFYING);
-    }
 
     await addTransition(db, {
       id: `t-${crypto.randomUUID()}`,
