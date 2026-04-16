@@ -106,6 +106,17 @@ export async function resolveClaudeSessionFromWorktree(worktreePath: string): Pr
 
 // ── Comment formatting ──────────────────────────────────────────
 
+const STATUS_ORDER: Record<AgentTask["status"], number> = {
+  completed: 0,
+  in_progress: 1,
+  pending: 2,
+};
+
+/** Sort tasks: completed first, then in_progress, then pending. Stable sort preserves creation order within each group. */
+export function sortTasksByStatus(tasks: AgentTask[]): AgentTask[] {
+  return [...tasks].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
+}
+
 export function formatProgressComment(role: string, tasks: AgentTask[]): string {
   const lines: string[] = [`**${role}** agent progress`];
 
@@ -114,8 +125,10 @@ export function formatProgressComment(role: string, tasks: AgentTask[]): string 
     return lines.join("\n");
   }
 
+  const sorted = sortTasksByStatus(tasks);
+
   lines.push("");
-  for (const task of tasks) {
+  for (const task of sorted) {
     const checked = task.status === "completed" ? "x" : " ";
     const suffix = task.status === "in_progress" ? " ← working" : "";
     lines.push(`- [${checked}] ${task.subject}${suffix}`);
