@@ -76,7 +76,7 @@ async function onAgentFailed(database: Kysely<Database>, agentId: string): Promi
   await executeSideEffects([{
     type: "post_comment",
     issueNumber: wf.issue_number,
-    body: `Zapbot: All agents for this workflow have failed (state: \`${wf.state}\`). Remove and re-add the triggering label to retry, or add \`abandoned\` to stop.`,
+    body: `All agents for this workflow have failed (state: \`${wf.state}\`). Remove and re-add the triggering label to retry, or add \`abandoned\` to stop.`,
   }], wf.repo);
 }
 
@@ -280,7 +280,7 @@ async function executeSideEffects(
     for (const issueNum of issueNumbers) {
       const failed = failedEffects.filter((e) => "issueNumber" in e && (e as any).issueNumber === issueNum);
       const msg = [
-        "Zapbot: Some side effects failed after retry. The workflow state in the database may differ from GitHub.",
+        "Some side effects failed after retry. The workflow state in the database may differ from GitHub.",
         "",
         "**Failed effects:**",
         ...failed.map((f) => `- \`${f.type}\``),
@@ -340,7 +340,7 @@ async function unblockDependents(completedIssueNumber: number, parentWorkflowId:
       await executeSideEffects([
         { type: "spawn_agent", role: "planner", issueNumber: sub.issue_number },
         { type: "post_comment", issueNumber: sub.issue_number,
-          body: `**Zapbot:** Dependency #${completedIssueNumber} completed. All dependencies satisfied. Spawning planner agent.` },
+          body: `Dependency #${completedIssueNumber} completed. All dependencies satisfied. Spawning planner agent.` },
       ], repo);
     } else {
       log.debug(`#${sub.issue_number} still blocked on ${blocking.map((n) => `#${n}`).join(", ")}`, {
@@ -474,8 +474,443 @@ async function createTriageWorkflow(
   log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
   await executeSideEffects([
     { type: "spawn_agent", role: "triage", issueNumber },
-    { type: "post_comment", issueNumber, body: "**Zapbot:** Workflow started. Spawning triage agent to analyze this issue and break it into sub-tasks." },
+    { type: "post_comment", issueNumber, body: "Workflow started. Spawning triage agent to analyze this issue and break it into sub-tasks." },
   ], repo);
+}
+
+// ── Mention command handler ─────────────────────────────────────────
+
+const WRITE_PERMISSIONS = new Set(["write", "maintain", "admin"]);
+
+async function handleMentionCommand(
+  event: Extract<import("../src/state-machine/events.js").WorkflowEvent, { type: "mention_command" }>,
+  repo: string,
+  deliveryId: string
+): Promise<{ status: number; body: string }> {
+  const { command, issueNumber, triggeredBy, commentId } = event;
+
+  // Eyes emoji reaction for immediate feedback
+  try {
+    await gh.addReaction(repo, commentId, "eyes");
+  } catch (err) {
+    log.warn(`Failed to add eyes reaction to comment ${commentId}: ${err}`);
+  }
+
+  // Permission check: only users with write access can trigger commands
+  try {
+    const permission = await gh.getUserPermission(repo, triggeredBy);
+    if (!WRITE_PERMISSIONS.has(permission)) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `Sorry @${triggeredBy}, you need write access to this repo to use commands.`,
+      }], repo);
+      return { status: 200, body: "insufficient permissions" };
+    }
+  } catch (err) {
+    log.warn(`Permission check failed for ${triggeredBy}, proceeding anyway: ${err}`);
+  }
+
+  const cmdLower = command.toLowerCase().trim();
+
+  // ── plan this / triage this ──────────────────────────────────────
+  if (cmdLower === "plan this" || cmdLower === "triage this") {
+    const existingWf = await getWorkflowByIssue(db, issueNumber, repo);
+    if (existingWf) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `A workflow already exists for this issue (state: \`${existingWf.state}\`). Use \`@${BOT_USERNAME} status\` to check progress.`,
+      }], repo);
+      return { status: 200, body: "workflow already exists" };
+    }
+
+    // Auto-assign bot to the issue so downstream events are processed
+    try {
+      await gh.assignIssue(repo, issueNumber, [BOT_USERNAME]);
+    } catch (err) {
+      log.warn(`Failed to auto-assign bot to #${issueNumber}: ${err}`);
+    }
+
+    const intent = `Triggered by @${triggeredBy} via mention`;
+    await createTriageWorkflow(repo, issueNumber, triggeredBy, intent, deliveryId);
+
+    // Log mention to transitions for audit trail
+    const wfId = makeWorkflowId(repo, issueNumber);
+    await addTransition(db, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: wfId,
+      from_state: "TRIAGE",
+      to_state: "TRIAGE",
+      event_type: `mention:${cmdLower.replace(/\s+/g, "-")}`,
+      triggered_by: triggeredBy,
+      metadata: JSON.stringify({ command, commentId }),
+      github_delivery_id: deliveryId,
+    });
+
+    return { status: 200, body: "workflow created via mention" };
+  }
+
+  // ── investigate this ──────────────────────────────────────────────
+  if (cmdLower === "investigate this" || cmdLower === "investigate") {
+    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    if (!wfRow) {
+      // No workflow needed for investigation — create one and spawn investigator
+      try {
+        await gh.assignIssue(repo, issueNumber, [BOT_USERNAME]);
+      } catch (err) {
+        log.warn(`Failed to auto-assign bot to #${issueNumber}: ${err}`);
+      }
+      const intent = `Investigation triggered by @${triggeredBy}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: issueNumber,
+        repo,
+        state: "IMPLEMENTING",
+        level: "sub",
+        parent_workflow_id: null,
+        author: triggeredBy,
+        intent,
+      });
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "IMPLEMENTING",
+        event_type: "mention:investigate",
+        triggered_by: triggeredBy,
+        metadata: JSON.stringify({ command, commentId }),
+        github_delivery_id: deliveryId,
+      });
+      await executeSideEffects([
+        { type: "spawn_agent", role: "implementer", issueNumber },
+        { type: "post_comment", issueNumber,
+          body: `Spawning **investigator** agent per @${triggeredBy}'s request.` },
+      ], repo);
+      return { status: 200, body: "investigator spawned (new workflow)" };
+    }
+
+    log.info(`Spawning investigator for #${issueNumber} via mention`, { issueNumber });
+    await executeSideEffects([
+      { type: "spawn_agent", role: "implementer", issueNumber },
+      { type: "post_comment", issueNumber,
+        body: `Spawning **investigator** agent per @${triggeredBy}'s request.` },
+    ], repo);
+
+    await addTransition(db, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: wfRow.id,
+      from_state: wfRow.state,
+      to_state: wfRow.state,
+      event_type: "mention:investigate",
+      triggered_by: triggeredBy,
+      metadata: JSON.stringify({ command, commentId }),
+      github_delivery_id: deliveryId,
+    });
+
+    return { status: 200, body: "investigator spawned via mention" };
+  }
+
+  // ── implement this ────────────────────────────────────────────────
+  if (cmdLower === "implement this" || cmdLower === "implement") {
+    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    if (!wfRow) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `No workflow found. Use \`@${BOT_USERNAME} plan this\` first.`,
+      }], repo);
+      return { status: 200, body: "no workflow" };
+    }
+
+    log.info(`Spawning implementer for #${issueNumber} via mention`, { issueNumber });
+    await executeSideEffects([
+      { type: "spawn_agent", role: "implementer", issueNumber },
+      { type: "post_comment", issueNumber,
+        body: `Spawning **implementer** agent per @${triggeredBy}'s request.` },
+    ], repo);
+
+    // Move to IMPLEMENTING if not already there
+    if (wfRow.state !== SubState.IMPLEMENTING && wfRow.state !== SubState.DRAFT_REVIEW) {
+      await updateWorkflowState(db, wfRow.id, SubState.IMPLEMENTING);
+    }
+
+    await addTransition(db, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: wfRow.id,
+      from_state: wfRow.state,
+      to_state: SubState.IMPLEMENTING,
+      event_type: "mention:implement",
+      triggered_by: triggeredBy,
+      metadata: JSON.stringify({ command, commentId }),
+      github_delivery_id: deliveryId,
+    });
+
+    return { status: 200, body: "implementer spawned via mention" };
+  }
+
+  // ── verify this ──────────────────────────────────────────────────
+  if (cmdLower === "verify this" || cmdLower === "verify") {
+    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    if (!wfRow) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `No workflow found. Use \`@${BOT_USERNAME} plan this\` first.`,
+      }], repo);
+      return { status: 200, body: "no workflow" };
+    }
+
+    log.info(`Spawning QE for #${issueNumber} via mention`, { issueNumber });
+    await executeSideEffects([
+      { type: "spawn_agent", role: "qe", issueNumber },
+      { type: "post_comment", issueNumber,
+        body: `Spawning **QE** agent per @${triggeredBy}'s request.` },
+    ], repo);
+
+    if (wfRow.state !== SubState.VERIFYING) {
+      await updateWorkflowState(db, wfRow.id, SubState.VERIFYING);
+    }
+
+    await addTransition(db, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: wfRow.id,
+      from_state: wfRow.state,
+      to_state: SubState.VERIFYING,
+      event_type: "mention:verify",
+      triggered_by: triggeredBy,
+      metadata: JSON.stringify({ command, commentId }),
+      github_delivery_id: deliveryId,
+    });
+
+    return { status: 200, body: "qe spawned via mention" };
+  }
+
+  // ── status ───────────────────────────────────────────────────────
+  if (cmdLower === "status") {
+    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    if (!wfRow) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: "No workflow found for this issue. Use `@" + BOT_USERNAME + " plan this` to start one.",
+      }], repo);
+      return { status: 200, body: "no workflow" };
+    }
+
+    const agents = await getAgentSessions(db, wfRow.id);
+    const activeAgents = agents.filter((a) => a.status === "running" || a.status === "spawning");
+    const history = await getTransitionHistory(db, wfRow.id);
+    const recentTransitions = history.slice(-3).map((t) =>
+      `\`${t.from_state}\` → \`${t.to_state}\` (${t.event_type}, by ${t.triggered_by})`
+    ).join("\n");
+
+    const statusMsg = [
+      `**Zapbot Status: #${issueNumber}**`,
+      "",
+      `**State:** \`${wfRow.state}\``,
+      `**Level:** ${wfRow.level}`,
+      `**Active agents:** ${activeAgents.length > 0 ? activeAgents.map((a) => `${a.role} (${a.status})`).join(", ") : "none"}`,
+      "",
+      "**Recent transitions:**",
+      recentTransitions || "_(none)_",
+    ].join("\n");
+
+    await executeSideEffects([{ type: "post_comment", issueNumber, body: statusMsg }], repo);
+    return { status: 200, body: "status posted" };
+  }
+
+  // ── retry ────────────────────────────────────────────────────────
+  if (cmdLower === "retry") {
+    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    if (!wfRow) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: "No workflow found for this issue. Nothing to retry.",
+      }], repo);
+      return { status: 200, body: "no workflow" };
+    }
+
+    if (TERMINAL_STATES.has(wfRow.state)) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `This workflow is in a terminal state (\`${wfRow.state}\`). Cannot retry.`,
+      }], repo);
+      return { status: 200, body: "terminal state" };
+    }
+
+    const agents = await getAgentSessions(db, wfRow.id);
+    const liveAgents = agents.filter((a) => a.status === "running" || a.status === "spawning");
+    if (liveAgents.length > 0) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `Agents are still running (${liveAgents.map((a) => a.role).join(", ")}). Wait for them to finish or use \`@${BOT_USERNAME} abandon\` to stop.`,
+      }], repo);
+      return { status: 200, body: "agents still running" };
+    }
+
+    const role = stateToRole(wfRow.state);
+    if (!role) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `No agent role mapped for state \`${wfRow.state}\`. Cannot retry automatically.`,
+      }], repo);
+      return { status: 200, body: "no role for state" };
+    }
+
+    log.info(`Retrying ${role} agent for #${issueNumber} via mention`, { issueNumber, role });
+    await executeSideEffects([
+      { type: "spawn_agent", role, issueNumber },
+      { type: "post_comment", issueNumber,
+        body: `Retrying. Spawning **${role}** agent per @${triggeredBy}'s request.` },
+    ], repo);
+
+    // Audit trail
+    await addTransition(db, {
+      id: `t-${crypto.randomUUID()}`,
+      workflow_id: wfRow.id,
+      from_state: wfRow.state,
+      to_state: wfRow.state,
+      event_type: "mention:retry",
+      triggered_by: triggeredBy,
+      metadata: JSON.stringify({ command, commentId, role }),
+      github_delivery_id: deliveryId,
+    });
+
+    return { status: 200, body: `${role} agent re-spawned via mention` };
+  }
+
+  // ── abandon ──────────────────────────────────────────────────────
+  if (cmdLower === "abandon") {
+    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    if (!wfRow) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: "No workflow found for this issue. Nothing to abandon.",
+      }], repo);
+      return { status: 200, body: "no workflow" };
+    }
+
+    if (TERMINAL_STATES.has(wfRow.state)) {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `This workflow is already in a terminal state (\`${wfRow.state}\`).`,
+      }], repo);
+      return { status: 200, body: "already terminal" };
+    }
+
+    // Feed abandon through the state machine so it gets the same treatment as label-based abandon
+    const workflow: Workflow = toWorkflow(wfRow);
+    const result = apply(workflow, { type: "label_abandoned", triggeredBy });
+    if (result) {
+      await withTransaction(db, async (trx) => {
+        await updateWorkflowState(trx, workflow.id, result.newState);
+        await addTransition(trx, {
+          id: `t-${crypto.randomUUID()}`,
+          workflow_id: workflow.id,
+          from_state: result.transition.from,
+          to_state: result.transition.to,
+          event_type: "mention:abandon",
+          triggered_by: triggeredBy,
+          metadata: JSON.stringify({ command, commentId }),
+          github_delivery_id: deliveryId,
+        });
+      });
+      await executeSideEffects(result.sideEffects, repo);
+    }
+
+    return { status: 200, body: "abandoned via mention" };
+  }
+
+  // ── help ─────────────────────────────────────────────────────────
+  if (cmdLower === "help") {
+    const helpMsg = [
+      `**Zapbot Commands**`,
+      "",
+      `| Command | Description |`,
+      `|---------|-------------|`,
+      `| \`@${BOT_USERNAME} plan this\` | Start a new workflow (triage → plan → implement → verify) |`,
+      `| \`@${BOT_USERNAME} investigate this\` | Spawn an investigator agent to debug |`,
+      `| \`@${BOT_USERNAME} implement this\` | Spawn an implementer agent |`,
+      `| \`@${BOT_USERNAME} verify this\` | Spawn a QE agent to test and verify |`,
+      `| \`@${BOT_USERNAME} status\` | Show current workflow state and active agents |`,
+      `| \`@${BOT_USERNAME} retry\` | Re-spawn the last failed agent |`,
+      `| \`@${BOT_USERNAME} abandon\` | Stop the workflow |`,
+      `| \`@${BOT_USERNAME} help\` | Show this message |`,
+      `| \`@${BOT_USERNAME} <message>\` | Send a message to the running agent |`,
+    ].join("\n");
+
+    await executeSideEffects([{ type: "post_comment", issueNumber, body: helpMsg }], repo);
+    return { status: 200, body: "help posted" };
+  }
+
+  // ── free text → forward to running agent ─────────────────────────
+  const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+  if (!wfRow) {
+    await executeSideEffects([{
+      type: "post_comment", issueNumber,
+      body: `No workflow found for this issue. Use \`@${BOT_USERNAME} plan this\` to start one, or \`@${BOT_USERNAME} help\` for all commands.`,
+    }], repo);
+    return { status: 200, body: "no workflow for free text" };
+  }
+
+  const agents = await getAgentSessions(db, wfRow.id);
+  const liveAgents = agents.filter((a) => a.status === "running" || a.status === "spawning");
+
+  if (liveAgents.length > 0) {
+    // Forward to running agent via ao send
+    const projectName = repoMap.get(repo)?.projectName;
+    if (projectName) {
+      try {
+        const agentSession = liveAgents[0];
+        const aoResp = await fetch(`${AO_URL}/api/sessions/${agentSession.id}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: `Feedback from @${triggeredBy}: ${command}` }),
+        });
+        if (aoResp.ok) {
+          await executeSideEffects([{
+            type: "post_comment", issueNumber,
+            body: `Message forwarded to the running **${agentSession.role}** agent.`,
+          }], repo);
+        } else {
+          throw new Error(`ao send returned ${aoResp.status}`);
+        }
+      } catch (err) {
+        log.warn(`Failed to forward message to agent: ${err}`);
+        await executeSideEffects([{
+          type: "post_comment", issueNumber,
+          body: `Could not forward message to the running agent. The agent may have just finished. Try \`@${BOT_USERNAME} status\` to check.`,
+        }], repo);
+      }
+    }
+  } else {
+    // No live agents — respawn with context
+    const role = stateToRole(wfRow.state);
+    if (role && !TERMINAL_STATES.has(wfRow.state)) {
+      log.info(`Re-spawning ${role} agent for #${issueNumber} with follow-up context`, { issueNumber, role });
+      await executeSideEffects([
+        { type: "spawn_agent", role, issueNumber },
+        { type: "post_comment", issueNumber,
+          body: `Previous agent session expired. Starting fresh **${role}** agent with your feedback.` },
+      ], repo);
+    } else {
+      await executeSideEffects([{
+        type: "post_comment", issueNumber,
+        body: `No active agents and workflow is in \`${wfRow.state}\` state. Use \`@${BOT_USERNAME} retry\` to re-spawn.`,
+      }], repo);
+    }
+  }
+
+  // Audit trail for free text
+  await addTransition(db, {
+    id: `t-${crypto.randomUUID()}`,
+    workflow_id: wfRow.id,
+    from_state: wfRow.state,
+    to_state: wfRow.state,
+    event_type: "mention:message",
+    triggered_by: triggeredBy,
+    metadata: JSON.stringify({ command: command.slice(0, 200), commentId }),
+    github_delivery_id: deliveryId,
+  });
+
+  return { status: 200, body: "free text handled" };
 }
 
 // ── Core webhook handler ────────────────────────────────────────────
@@ -522,6 +957,13 @@ async function handleWebhook(
       labels,
       author,
     });
+
+    // Eyes emoji reaction on the issue for immediate feedback
+    try {
+      await gh.addIssueReaction(repo, issueNumber, "eyes");
+    } catch (err) {
+      log.warn(`Failed to add eyes reaction to issue #${issueNumber}: ${err}`);
+    }
 
     // Check if a workflow already exists (re-assignment = recovery)
     const existingWf = await getWorkflowByIssue(db, issueNumber, repo);
@@ -578,7 +1020,7 @@ async function handleWebhook(
           log.info(`Sub-issue #${issueNumber} blocked on ${blockList}`, { issueNumber, blocking });
           await executeSideEffects([
             { type: "post_comment", issueNumber,
-              body: `**Zapbot:** Sub-issue tracked. Waiting on ${blockList} to complete before starting planning.` },
+              body: `Sub-issue tracked. Waiting on ${blockList} to complete before starting planning.` },
           ], repo);
           return { status: 200, body: "sub workflow created (blocked)" };
         }
@@ -586,7 +1028,7 @@ async function handleWebhook(
 
       await executeSideEffects([
         { type: "spawn_agent", role: "planner", issueNumber },
-        { type: "post_comment", issueNumber, body: "**Zapbot:** Assigned. Spawning planner agent." },
+        { type: "post_comment", issueNumber, body: "Assigned. Spawning planner agent." },
       ], repo);
       return { status: 200, body: "sub workflow created" };
     }
@@ -596,12 +1038,21 @@ async function handleWebhook(
     return { status: 200, body: "parent workflow created" };
   }
 
+  // ── Mention commands ──────────────────────────────────────────────
+  // Handle @mention triggers before the standard state machine pipeline.
+  // Mentions are a parallel dispatch layer: some trigger state transitions
+  // (plan this, abandon), others are imperative actions (status, retry, help).
+
+  const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
+
+  if (mapped && mapped.event.type === "mention_command") {
+    const mentionResult = await handleMentionCommand(mapped.event, repo, deliveryId);
+    return mentionResult;
+  }
+
   // ── Subsequent events (label changes, PRs, etc.) ─────────────────
   // These only act on issues that already have a workflow (bot was
   // previously assigned). No workflow = no action.
-
-  // Map webhook to state machine event
-  const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
 
   if (!mapped) {
     log.debug("No state machine event for this webhook", { eventType, action: payload.action });
@@ -662,7 +1113,7 @@ async function handleWebhook(
     const msg = `Cannot apply '${event.type}' — issue #${issueNumber} is in ${workflow.state} state.`;
     log.warn(`REJECTED: ${msg}`, { issueNumber, state: workflow.state, event: event.type });
     await executeSideEffects([
-      { type: "post_comment", issueNumber, body: `Zapbot: ${msg}` },
+      { type: "post_comment", issueNumber, body: msg },
     ], repo);
     return { status: 200, body: "rejected" };
   }
@@ -779,7 +1230,7 @@ async function recoverStuckWorkflows(): Promise<void> {
       await executeSideEffects([
         { type: "spawn_agent", role, issueNumber: wf.issue_number },
         { type: "post_comment", issueNumber: wf.issue_number,
-          body: `**Zapbot:** Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
+          body: `Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
       ], wf.repo);
     } else {
       const zombies = agents.filter((a) => a.status === "running" || a.status === "spawning");

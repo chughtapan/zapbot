@@ -5,9 +5,47 @@ const DEFAULT_BOT_USERNAME = "zapbot[bot]";
 const LINKED_ISSUE_RE = /(?:closes|fixes|resolves|part of)\s+#(\d+)/i;
 const DEPENDS_ON_RE = /depends on #(\d+)/gi;
 
+/** Build a regex that matches @botname or @botname[bot] from the configured bot username. */
+function buildMentionRegex(botUsername: string): RegExp {
+  // Strip [bot] suffix if present to get the base name
+  const baseName = botUsername.replace(/\[bot\]$/, "");
+  const escaped = baseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`@${escaped}(?:\\[bot\\])?`, "i");
+}
+
 function extractLinkedIssue(body: string): number | null {
   const match = body.match(LINKED_ISSUE_RE);
   return match ? parseInt(match[1], 10) : null;
+}
+
+/**
+ * Strip code fences and blockquotes from a comment body so mentions
+ * inside them are not treated as commands.
+ */
+export function stripQuotedContent(body: string): string {
+  // Remove fenced code blocks (``` ... ```)
+  let stripped = body.replace(/```[\s\S]*?```/g, "");
+  // Remove inline code (`...`)
+  stripped = stripped.replace(/`[^`]+`/g, "");
+  // Remove blockquote lines (lines starting with >)
+  stripped = stripped.split("\n").filter((line) => !line.trimStart().startsWith(">")).join("\n");
+  return stripped;
+}
+
+/**
+ * Parse a mention command from a comment body.
+ * Returns the command string (e.g. "plan this", "status") or null if no mention found.
+ */
+export function parseMentionCommand(body: string, botUsername: string): string | null {
+  const cleaned = stripQuotedContent(body);
+  const mentionRe = buildMentionRegex(botUsername);
+  const match = cleaned.match(mentionRe);
+  if (!match) return null;
+
+  // Extract text after the mention on the same line
+  const afterMention = cleaned.slice(match.index! + match[0].length);
+  const firstLine = afterMention.split("\n")[0].trim();
+  return firstLine || null;
 }
 
 /** Parse "Depends on #N" markers from an issue body. */
@@ -82,7 +120,29 @@ export function mapWebhookToEvent(
   }
 
   if (eventType === "issue_comment" && payload.action === "created") {
-    return null;
+    const actor: string = payload.sender?.login || "";
+    const commentBody: string = payload.comment?.body || "";
+    const issueNumber: number = payload.issue?.number;
+    const commentId: number = payload.comment?.id;
+
+    // Self-loop prevention: ignore bot's own comments
+    if (actor === botUsername) return null;
+
+    const command = parseMentionCommand(commentBody, botUsername);
+    if (!command) return null;
+
+    return {
+      event: {
+        type: "mention_command" as const,
+        command,
+        body: commentBody,
+        issueNumber,
+        triggeredBy: actor,
+        commentId,
+      },
+      issueNumber,
+      repo,
+    };
   }
 
   if (eventType === "pull_request" && payload.action === "opened") {
