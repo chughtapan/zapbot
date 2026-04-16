@@ -1304,7 +1304,14 @@ async function recoverStuckWorkflows(): Promise<void> {
       log.warn(`Recovery: ${wf.id} stuck in ${wf.state} with all agents dead, re-spawning ${role}`, {
         workflow: wf.id, state: wf.state, role,
       });
+      // Sync label to match DB state
+      const expectedLabel = STATE_TO_LABEL[wf.state];
+      const labelEffects: SideEffect[] = [];
+      if (expectedLabel) {
+        labelEffects.push({ type: "add_label", issueNumber: wf.issue_number, label: expectedLabel });
+      }
       await executeSideEffects([
+        ...labelEffects,
         { type: "spawn_agent", role, issueNumber: wf.issue_number },
         { type: "post_comment", issueNumber: wf.issue_number,
           body: `Bridge restarted. Re-spawning ${role} agent for stuck workflow.` },
