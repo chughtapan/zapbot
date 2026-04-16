@@ -599,7 +599,15 @@ async function handleMentionCommand(
     }
 
     log.info(`Spawning investigator for #${issueNumber} via mention`, { issueNumber });
+
+    // Move to INVESTIGATING if not already there
+    const labelEffects: Array<Record<string, any>> = [];
+    if (wfRow.state !== "INVESTIGATING") {
+      await updateWorkflowState(db, wfRow.id, "INVESTIGATING");
+      labelEffects.push({ type: "add_label", issueNumber, label: "investigating" });
+    }
     await executeSideEffects([
+      ...labelEffects,
       { type: "spawn_agent", role: "investigator", issueNumber },
       { type: "post_comment", issueNumber,
         body: `Spawning **investigator** agent per @${triggeredBy}'s request.` },
@@ -609,7 +617,7 @@ async function handleMentionCommand(
       id: `t-${crypto.randomUUID()}`,
       workflow_id: wfRow.id,
       from_state: wfRow.state,
-      to_state: wfRow.state,
+      to_state: "INVESTIGATING",
       event_type: "mention:investigate",
       triggered_by: triggeredBy,
       metadata: JSON.stringify({ command, commentId }),

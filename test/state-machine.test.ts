@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { apply } from "../src/state-machine/engine.js";
-import { ParentState, SubState } from "../src/state-machine/states.js";
+import { ParentState, SubState, STATE_TO_LABEL, LABEL_TO_STATE } from "../src/state-machine/states.js";
 import type { Workflow } from "../src/state-machine/transitions.js";
 import type { WorkflowEvent } from "../src/state-machine/events.js";
 
@@ -569,7 +569,6 @@ describe("INVESTIGATING state", () => {
   });
 
   it("label mapping: INVESTIGATING maps to 'investigating'", () => {
-    const { STATE_TO_LABEL, LABEL_TO_STATE } = require("../src/state-machine/states.js");
     expect(STATE_TO_LABEL[SubState.INVESTIGATING]).toBe("investigating");
     expect(LABEL_TO_STATE["investigating"]).toBe(SubState.INVESTIGATING);
   });
