@@ -13,10 +13,9 @@ import {
 } from "./registry.js";
 import {
   verifyRequest,
-  requireRole,
   requireRepoAccess,
   type AuthConfig,
-  type GatewayUser,
+  type AuthResult,
   type AuthError,
 } from "./auth.js";
 
@@ -27,7 +26,7 @@ function errorResponse(status: number, type: string, message: string, extra?: Re
 }
 
 function authErrorResponse(error: AuthError): Response {
-  const status = error.type === "insufficient_role" || error.type === "repo_not_authorized" ? 403 : 401;
+  const status = error.type === "repo_not_authorized" ? 403 : 401;
   return Response.json(
     { error: { type: error.type, message: error.message, fix: error.fix, status } },
     { status },
@@ -78,10 +77,6 @@ export function createFetchHandler(config: GatewayConfig) {
       return handleBridgeDeregister(req, authConfig);
     }
 
-    if (pathname === "/api/auth/me" && req.method === "GET") {
-      return handleAuthMe(req, authConfig);
-    }
-
     return errorResponse(404, "not_found", "Resource not found.");
   };
 }
@@ -91,22 +86,13 @@ export function createFetchHandler(config: GatewayConfig) {
 async function authenticateRequest(
   req: Request,
   authConfig: AuthConfig,
-  requiredRole?: "owner" | "member",
-): Promise<GatewayUser | Response> {
-  const result = await verifyRequest(req, authConfig);
-  if (!result.ok) {
-    return authErrorResponse(result.error);
+): Promise<AuthResult | Response> {
+  const outcome = await verifyRequest(req, authConfig);
+  if (!outcome.ok) {
+    return authErrorResponse(outcome.error);
   }
 
-  if (requiredRole && !requireRole(result.user, requiredRole)) {
-    return authErrorResponse({
-      type: "insufficient_role",
-      message: `Operation requires ${requiredRole} role, you have ${result.user.role}.`,
-      fix: "Contact bot owner for role upgrade.",
-    });
-  }
-
-  return result.user;
+  return outcome.result;
 }
 
 // ── Request handlers ────────────────────────────────────────────────
@@ -158,8 +144,8 @@ async function handleWebhookForward(req: Request, timeoutMs: number): Promise<Re
 }
 
 async function handleBridgeRegister(req: Request, authConfig: AuthConfig): Promise<Response> {
-  const userOrResp = await authenticateRequest(req, authConfig, "owner");
-  if (userOrResp instanceof Response) return userOrResp;
+  const authOrResp = await authenticateRequest(req, authConfig);
+  if (authOrResp instanceof Response) return authOrResp;
 
   let body: any;
   try {
@@ -176,11 +162,11 @@ async function handleBridgeRegister(req: Request, authConfig: AuthConfig): Promi
     return errorResponse(400, "invalid_request", "Missing or invalid 'bridgeUrl' field.");
   }
 
-  if (!requireRepoAccess(userOrResp, repo)) {
+  if (!requireRepoAccess(authOrResp, repo)) {
     return authErrorResponse({
       type: "repo_not_authorized",
       message: `Not authorized for repo ${repo}.`,
-      fix: "Add repo to your authorized_repos in Supabase.",
+      fix: "Ensure the GitHub App is installed on this repository.",
     });
   }
 
@@ -189,8 +175,8 @@ async function handleBridgeRegister(req: Request, authConfig: AuthConfig): Promi
 }
 
 async function handleBridgeDeregister(req: Request, authConfig: AuthConfig): Promise<Response> {
-  const userOrResp = await authenticateRequest(req, authConfig, "owner");
-  if (userOrResp instanceof Response) return userOrResp;
+  const authOrResp = await authenticateRequest(req, authConfig);
+  if (authOrResp instanceof Response) return authOrResp;
 
   let body: any;
   try {
@@ -204,26 +190,14 @@ async function handleBridgeDeregister(req: Request, authConfig: AuthConfig): Pro
     return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
   }
 
-  if (!requireRepoAccess(userOrResp, repo)) {
+  if (!requireRepoAccess(authOrResp, repo)) {
     return authErrorResponse({
       type: "repo_not_authorized",
       message: `Not authorized for repo ${repo}.`,
-      fix: "Add repo to your authorized_repos in Supabase.",
+      fix: "Ensure the GitHub App is installed on this repository.",
     });
   }
 
   const removed = deregisterBridge(repo);
   return Response.json({ ok: true, removed });
-}
-
-async function handleAuthMe(req: Request, authConfig: AuthConfig): Promise<Response> {
-  const userOrResp = await authenticateRequest(req, authConfig);
-  if (userOrResp instanceof Response) return userOrResp;
-
-  return Response.json({
-    sub: userOrResp.sub,
-    email: userOrResp.email,
-    role: userOrResp.role,
-    authorizedRepos: userOrResp.authorizedRepos,
-  });
 }

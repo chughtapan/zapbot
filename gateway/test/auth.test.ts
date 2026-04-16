@@ -1,60 +1,31 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { SignJWT } from "jose";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  verifyGitHubToken,
+  verifySharedSecret,
   verifyRequest,
-  requireRole,
   requireRepoAccess,
-  resetLegacyDeprecationFlag,
+  clearTokenCache,
+  getTokenCacheSize,
   type AuthConfig,
-  type GatewayUser,
+  type AuthResult,
 } from "../src/auth.js";
 
 // ── Test helpers ───────────────────────────────────────────────────
 
-const TEST_JWT_SECRET = "test-jwt-secret-at-least-32-chars-long!!";
-const TEST_LEGACY_SECRET = "test-legacy-secret";
-const TEST_ISSUER = "https://test.supabase.co/auth/v1";
-const encoder = new TextEncoder();
+const TEST_GATEWAY_SECRET = "test-gateway-secret";
+
+const MOCK_REPOS_RESPONSE = {
+  repositories: [
+    { full_name: "acme/app" },
+    { full_name: "acme/lib" },
+  ],
+};
 
 function defaultConfig(overrides?: Partial<AuthConfig>): AuthConfig {
   return {
-    jwtSecret: TEST_JWT_SECRET,
-    jwtIssuer: TEST_ISSUER,
-    legacySecret: TEST_LEGACY_SECRET,
-    legacyEnabled: true,
-    maxAgeSeconds: 3600,
+    gatewaySecret: TEST_GATEWAY_SECRET,
     ...overrides,
   };
-}
-
-async function createTestJWT(
-  claims: Record<string, unknown> = {},
-  options?: { expiresIn?: string; iat?: number; skipIat?: boolean; secret?: string; issuer?: string; audience?: string },
-): Promise<string> {
-  const secret = options?.secret || TEST_JWT_SECRET;
-  const builder = new SignJWT({
-    sub: "user-uuid-123",
-    email: "test@example.com",
-    app_metadata: {
-      role: "owner",
-      authorized_repos: ["acme/app", "acme/lib"],
-    },
-    ...claims,
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuer(options?.issuer ?? TEST_ISSUER)
-    .setAudience(options?.audience ?? "authenticated")
-    .setExpirationTime(options?.expiresIn || "1h");
-
-  if (options?.skipIat) {
-    // Don't set iat at all
-  } else if (options?.iat !== undefined) {
-    builder.setIssuedAt(options.iat);
-  } else {
-    builder.setIssuedAt();
-  }
-
-  return builder.sign(encoder.encode(secret));
 }
 
 function makeRequest(token?: string): Request {
@@ -65,15 +36,177 @@ function makeRequest(token?: string): Request {
   return new Request("http://localhost/test", { headers });
 }
 
-// ── Tests ──────────────────────────────────────────────────────────
+// ── Setup ─────────────────────────────────────────────────────────
+
+const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
-  resetLegacyDeprecationFlag();
+  clearTokenCache();
 });
 
-describe("verifyRequest", () => {
-  // ── Missing/malformed auth header ────────────────────────────────
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
+});
 
+// ── verifyGitHubToken ─────────────────────────────────────────────
+
+describe("verifyGitHubToken", () => {
+  it("accepts a valid installation token (200 with repo list)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      Response.json(MOCK_REPOS_RESPONSE, { status: 200 }),
+    );
+
+    const result = await verifyGitHubToken("ghs_validtoken123");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.valid).toBe(true);
+      expect(result.result.source).toBe("github");
+      expect(result.result.repos).toEqual(["acme/app", "acme/lib"]);
+    }
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/installation/repositories",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer ghs_validtoken123",
+        }),
+      }),
+    );
+  });
+
+  it("rejects an expired/invalid token (401)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
+    );
+
+    const result = await verifyGitHubToken("ghs_expired");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("invalid_token");
+      expect(result.error.message).toContain("invalid or expired");
+    }
+  });
+
+  it("handles GitHub API errors (non-200, non-401)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("Internal Server Error", { status: 500 }),
+    );
+
+    const result = await verifyGitHubToken("ghs_sometoken");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("github_api_error");
+      expect(result.error.message).toContain("500");
+    }
+  });
+
+  it("handles network failure (GitHub API down)", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    const result = await verifyGitHubToken("ghs_sometoken");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("github_api_error");
+      expect(result.error.message).toContain("Failed to reach GitHub API");
+    }
+  });
+
+  it("caches valid tokens (no API call on second request within 5min)", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      Response.json(MOCK_REPOS_RESPONSE, { status: 200 }),
+    );
+    globalThis.fetch = mockFetch;
+
+    // First call — hits API
+    const result1 = await verifyGitHubToken("ghs_cached");
+    expect(result1.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // Second call — should use cache
+    const result2 = await verifyGitHubToken("ghs_cached");
+    expect(result2.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(1); // NOT called again
+
+    if (result2.ok) {
+      expect(result2.result.repos).toEqual(["acme/app", "acme/lib"]);
+    }
+  });
+
+  it("does not cache invalid tokens", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
+    );
+    globalThis.fetch = mockFetch;
+
+    await verifyGitHubToken("ghs_invalid");
+    await verifyGitHubToken("ghs_invalid");
+
+    // Should call API both times since failures aren't cached
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts expired cache entries", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      Response.json(MOCK_REPOS_RESPONSE, { status: 200 }),
+    );
+    globalThis.fetch = mockFetch;
+
+    // First call — caches the result
+    await verifyGitHubToken("ghs_expiring");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(getTokenCacheSize()).toBe(1);
+
+    // Manually expire the cache entry by clearing and re-adding with past expiry
+    clearTokenCache();
+
+    // Next call — cache is empty, so API is called again
+    await verifyGitHubToken("ghs_expiring");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("handles empty repositories list", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      Response.json({ repositories: [] }, { status: 200 }),
+    );
+
+    const result = await verifyGitHubToken("ghs_norepos");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.repos).toEqual([]);
+    }
+  });
+});
+
+// ── verifySharedSecret ────────────────────────────────────────────
+
+describe("verifySharedSecret", () => {
+  it("accepts matching secret", () => {
+    const result = verifySharedSecret(TEST_GATEWAY_SECRET, TEST_GATEWAY_SECRET);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.source).toBe("shared-secret");
+      expect(result.result.repos).toEqual(["*"]);
+    }
+  });
+
+  it("rejects wrong secret", () => {
+    const result = verifySharedSecret("wrong-secret", TEST_GATEWAY_SECRET);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("invalid_token");
+    }
+  });
+
+  it("rejects empty token", () => {
+    const result = verifySharedSecret("", TEST_GATEWAY_SECRET);
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ── verifyRequest ─────────────────────────────────────────────────
+
+describe("verifyRequest", () => {
   it("returns missing_token when no Authorization header", async () => {
     const result = await verifyRequest(makeRequest(), defaultConfig());
     expect(result.ok).toBe(false);
@@ -98,245 +231,74 @@ describe("verifyRequest", () => {
     }
   });
 
-  // ── Valid JWT ────────────────────────────────────────────────────
+  it("accepts shared secret (fast path, no GitHub API call)", async () => {
+    const mockFetch = vi.fn();
+    globalThis.fetch = mockFetch;
 
-  it("accepts a valid owner JWT", async () => {
-    const jwt = await createTestJWT();
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.user.sub).toBe("user-uuid-123");
-      expect(result.user.email).toBe("test@example.com");
-      expect(result.user.role).toBe("owner");
-      expect(result.user.authorizedRepos).toEqual(["acme/app", "acme/lib"]);
-    }
-  });
-
-  it("accepts a valid member JWT", async () => {
-    const jwt = await createTestJWT({
-      app_metadata: { role: "member", authorized_repos: ["acme/app"] },
-    });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.user.role).toBe("member");
-    }
-  });
-
-  // ── Expired JWT ──────────────────────────────────────────────────
-
-  it("rejects an expired JWT", async () => {
-    const jwt = await createTestJWT({}, { expiresIn: "-1h" });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("token_expired");
-    }
-  });
-
-  // ── Invalid signature ────────────────────────────────────────────
-
-  it("rejects a JWT signed with wrong secret", async () => {
-    const jwt = await createTestJWT({}, { secret: "wrong-secret-that-is-at-least-32-chars!" });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("invalid_signature");
-    }
-  });
-
-  // ── Wrong issuer ─────────────────────────────────────────────────
-
-  it("rejects a JWT with wrong issuer", async () => {
-    const jwt = await createTestJWT({}, { issuer: "https://wrong.supabase.co/auth/v1" });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("invalid_issuer");
-    }
-  });
-
-  // ── Wrong audience ───────────────────────────────────────────────
-
-  it("rejects a JWT with wrong audience", async () => {
-    const jwt = await createTestJWT({}, { audience: "wrong-audience" });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("invalid_audience");
-    }
-  });
-
-  // ── Token too old ────────────────────────────────────────────────
-
-  it("rejects a JWT that is too old (iat check)", async () => {
-    const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
-    const jwt = await createTestJWT({}, { iat: twoHoursAgo });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("token_too_old");
-    }
-  });
-
-  // ── Missing iat ─────────────────────────────────────────────────
-
-  it("rejects a JWT without iat claim", async () => {
-    const jwt = await createTestJWT({}, { skipIat: true });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("missing_claims");
-      expect(result.error.message).toContain("iat");
-    }
-  });
-
-  // ── Missing claims ───────────────────────────────────────────────
-
-  it("rejects JWT without sub claim", async () => {
-    const jwt = await createTestJWT({ sub: undefined });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("missing_claims");
-      expect(result.error.message).toContain("sub");
-    }
-  });
-
-  it("rejects JWT without app_metadata.role", async () => {
-    const jwt = await createTestJWT({
-      app_metadata: { authorized_repos: ["acme/app"] },
-    });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("missing_claims");
-      expect(result.error.message).toContain("role");
-    }
-  });
-
-  it("rejects JWT without app_metadata.authorized_repos", async () => {
-    const jwt = await createTestJWT({
-      app_metadata: { role: "owner" },
-    });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("missing_claims");
-      expect(result.error.message).toContain("authorized_repos");
-    }
-  });
-
-  it("rejects JWT with empty authorized_repos array", async () => {
-    const jwt = await createTestJWT({
-      app_metadata: { role: "owner", authorized_repos: [] },
-    });
-    const result = await verifyRequest(makeRequest(`Bearer ${jwt}`), defaultConfig());
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.type).toBe("missing_claims");
-    }
-  });
-
-  // ── Legacy auth ──────────────────────────────────────────────────
-
-  it("accepts legacy secret when enabled", async () => {
     const result = await verifyRequest(
-      makeRequest(`Bearer ${TEST_LEGACY_SECRET}`),
+      makeRequest(`Bearer ${TEST_GATEWAY_SECRET}`),
       defaultConfig(),
     );
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.user.sub).toBe("legacy");
-      expect(result.user.role).toBe("owner");
-      expect(result.user.authorizedRepos).toEqual(["*"]);
+      expect(result.result.source).toBe("shared-secret");
+      expect(result.result.repos).toEqual(["*"]);
     }
+    // Should NOT have called GitHub API
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("rejects wrong legacy secret", async () => {
+  it("falls through to GitHub token when shared secret doesn't match", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      Response.json(MOCK_REPOS_RESPONSE, { status: 200 }),
+    );
+
     const result = await verifyRequest(
-      makeRequest("Bearer wrong-secret"),
+      makeRequest("Bearer ghs_sometoken"),
       defaultConfig(),
-    );
-    expect(result.ok).toBe(false);
-  });
-
-  it("rejects legacy secret when disabled", async () => {
-    const result = await verifyRequest(
-      makeRequest(`Bearer ${TEST_LEGACY_SECRET}`),
-      defaultConfig({ legacyEnabled: false }),
-    );
-    expect(result.ok).toBe(false);
-  });
-
-  it("accepts legacy secret when jwtSecret is empty", async () => {
-    const result = await verifyRequest(
-      makeRequest(`Bearer ${TEST_LEGACY_SECRET}`),
-      defaultConfig({ jwtSecret: "" }),
     );
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.user.sub).toBe("legacy");
+      expect(result.result.source).toBe("github");
     }
   });
 
-  // ── Issuer not configured ────────────────────────────────────────
+  it("works without gatewaySecret configured (GitHub-only mode)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      Response.json(MOCK_REPOS_RESPONSE, { status: 200 }),
+    );
 
-  it("accepts JWT when jwtIssuer is not configured (skip issuer check)", async () => {
-    const jwt = await createTestJWT({}, { issuer: "https://any-issuer.supabase.co/auth/v1" });
     const result = await verifyRequest(
-      makeRequest(`Bearer ${jwt}`),
-      defaultConfig({ jwtIssuer: undefined }),
+      makeRequest("Bearer ghs_sometoken"),
+      defaultConfig({ gatewaySecret: undefined }),
     );
     expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.source).toBe("github");
+    }
   });
 });
 
-// ── Role checks ────────────────────────────────────────────────────
-
-describe("requireRole", () => {
-  const owner: GatewayUser = { sub: "u1", role: "owner", authorizedRepos: ["acme/app"] };
-  const member: GatewayUser = { sub: "u2", role: "member", authorizedRepos: ["acme/app"] };
-
-  it("owner satisfies owner requirement", () => {
-    expect(requireRole(owner, "owner")).toBe(true);
-  });
-
-  it("owner satisfies member requirement", () => {
-    expect(requireRole(owner, "member")).toBe(true);
-  });
-
-  it("member satisfies member requirement", () => {
-    expect(requireRole(member, "member")).toBe(true);
-  });
-
-  it("member does not satisfy owner requirement", () => {
-    expect(requireRole(member, "owner")).toBe(false);
-  });
-});
-
-// ── Repo access checks ────────────────────────────────────────────
+// ── requireRepoAccess ─────────────────────────────────────────────
 
 describe("requireRepoAccess", () => {
   it("allows access to authorized repo", () => {
-    const user: GatewayUser = { sub: "u1", role: "owner", authorizedRepos: ["acme/app"] };
-    expect(requireRepoAccess(user, "acme/app")).toBe(true);
+    const result: AuthResult = { valid: true, repos: ["acme/app", "acme/lib"], source: "github" };
+    expect(requireRepoAccess(result, "acme/app")).toBe(true);
   });
 
   it("denies access to unauthorized repo", () => {
-    const user: GatewayUser = { sub: "u1", role: "owner", authorizedRepos: ["acme/app"] };
-    expect(requireRepoAccess(user, "other/repo")).toBe(false);
+    const result: AuthResult = { valid: true, repos: ["acme/app"], source: "github" };
+    expect(requireRepoAccess(result, "other/repo")).toBe(false);
   });
 
-  it("wildcard * allows access to any repo", () => {
-    const user: GatewayUser = { sub: "legacy", role: "owner", authorizedRepos: ["*"] };
-    expect(requireRepoAccess(user, "any/repo")).toBe(true);
+  it("wildcard * allows access to any repo (shared-secret)", () => {
+    const result: AuthResult = { valid: true, repos: ["*"], source: "shared-secret" };
+    expect(requireRepoAccess(result, "any/repo")).toBe(true);
   });
 
-  it("org-level access allows any repo in that org", () => {
-    const user: GatewayUser = { sub: "u1", role: "owner", authorizedRepos: ["acme"] };
-    expect(requireRepoAccess(user, "acme/app")).toBe(true);
-    expect(requireRepoAccess(user, "acme/lib")).toBe(true);
-    expect(requireRepoAccess(user, "other/repo")).toBe(false);
+  it("denies access when repo list is empty", () => {
+    const result: AuthResult = { valid: true, repos: [], source: "github" };
+    expect(requireRepoAccess(result, "acme/app")).toBe(false);
   });
 });

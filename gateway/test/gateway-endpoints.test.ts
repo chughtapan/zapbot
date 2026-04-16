@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { SignJWT } from "jose";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { clearRegistry, registerBridge, getBridge } from "../src/registry.js";
 import { createFetchHandler } from "../src/handler.js";
-import { resetLegacyDeprecationFlag, type AuthConfig } from "../src/auth.js";
+import { clearTokenCache, type AuthConfig } from "../src/auth.js";
 
 /**
  * Integration tests for the gateway HTTP endpoints.
@@ -12,57 +11,52 @@ import { resetLegacyDeprecationFlag, type AuthConfig } from "../src/auth.js";
  * and startup validation that would interfere with tests).
  */
 
-const TEST_LEGACY_SECRET = "test-gateway-secret";
-const TEST_JWT_SECRET = "test-jwt-secret-at-least-32-chars-long!!";
-const TEST_ISSUER = "https://test.supabase.co/auth/v1";
-const encoder = new TextEncoder();
+const TEST_GATEWAY_SECRET = "test-gateway-secret";
+const TEST_GITHUB_TOKEN = "ghs_test_installation_token";
 
-const authConfig: AuthConfig = {
-  jwtSecret: TEST_JWT_SECRET,
-  jwtIssuer: TEST_ISSUER,
-  legacySecret: TEST_LEGACY_SECRET,
-  legacyEnabled: true,
-  maxAgeSeconds: 3600,
+const MOCK_REPOS_RESPONSE = {
+  repositories: [
+    { full_name: "acme/app" },
+    { full_name: "acme/lib" },
+  ],
 };
 
-async function createOwnerJWT(): Promise<string> {
-  return new SignJWT({
-    sub: "user-uuid-123",
-    email: "test@example.com",
-    app_metadata: {
-      role: "owner",
-      authorized_repos: ["acme/app", "acme/lib"],
-    },
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuer(TEST_ISSUER)
-    .setAudience("authenticated")
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(encoder.encode(TEST_JWT_SECRET));
-}
-
-async function createMemberJWT(): Promise<string> {
-  return new SignJWT({
-    sub: "member-uuid-456",
-    email: "member@example.com",
-    app_metadata: {
-      role: "member",
-      authorized_repos: ["acme/app"],
-    },
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuer(TEST_ISSUER)
-    .setAudience("authenticated")
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(encoder.encode(TEST_JWT_SECRET));
-}
+const authConfig: AuthConfig = {
+  gatewaySecret: TEST_GATEWAY_SECRET,
+};
 
 let server: ReturnType<typeof Bun.serve>;
 let baseUrl: string;
 let mockBridge: ReturnType<typeof Bun.serve>;
 let mockBridgeUrl: string;
+
+const originalFetch = globalThis.fetch;
+
+/**
+ * Wrap globalThis.fetch so that:
+ * - Calls to api.github.com return mocked responses
+ * - All other calls (localhost test servers) pass through to real fetch
+ */
+function installFetchMock() {
+  const mockFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("api.github.com")) {
+      // Check the auth header to decide the response
+      const headers = init?.headers as Record<string, string> | undefined;
+      const authHeader =
+        (headers && headers["authorization"]) ||
+        (input instanceof Request ? input.headers.get("authorization") : undefined);
+
+      if (authHeader === `Bearer ${TEST_GITHUB_TOKEN}`) {
+        return Response.json(MOCK_REPOS_RESPONSE, { status: 200 });
+      }
+      return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+    }
+    // Pass through to real fetch for localhost calls
+    return originalFetch(input, init);
+  });
+  globalThis.fetch = mockFn as typeof globalThis.fetch;
+}
 
 beforeAll(() => {
   // Start a mock bridge that echoes back a success response
@@ -99,7 +93,13 @@ afterAll(() => {
 
 beforeEach(() => {
   clearRegistry();
-  resetLegacyDeprecationFlag();
+  clearTokenCache();
+  installFetchMock();
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  vi.restoreAllMocks();
 });
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ describe("gateway endpoints", () => {
   // ── Health check ──────────────────────────────────────────────────
 
   it("GET /healthz returns 200 with status and bridge counts", async () => {
-    const resp = await fetch(`${baseUrl}/healthz`);
+    const resp = await originalFetch(`${baseUrl}/healthz`);
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.status).toBe("ok");
@@ -118,7 +118,7 @@ describe("gateway endpoints", () => {
 
   it("GET /healthz reflects registered bridges", async () => {
     registerBridge("acme/app", mockBridgeUrl);
-    const resp = await fetch(`${baseUrl}/healthz`);
+    const resp = await originalFetch(`${baseUrl}/healthz`);
     const body = await resp.json();
     expect(body.bridges.total).toBe(1);
     expect(body.bridges.active).toBe(1);
@@ -127,7 +127,7 @@ describe("gateway endpoints", () => {
   // ── Bridge registration ───────────────────────────────────────────
 
   it("POST /api/bridges/register without auth returns 401", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
       body: JSON.stringify({ repo: "acme/app", bridgeUrl: mockBridgeUrl }),
       headers: { "content-type": "application/json" },
@@ -137,13 +137,13 @@ describe("gateway endpoints", () => {
     expect(body.error.type).toBe("missing_token");
   });
 
-  it("POST /api/bridges/register with legacy auth registers bridge", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+  it("POST /api/bridges/register with shared secret registers bridge", async () => {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
       body: JSON.stringify({ repo: "acme/app", bridgeUrl: mockBridgeUrl }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(200);
@@ -153,14 +153,13 @@ describe("gateway endpoints", () => {
     expect(body.bridgeUrl).toBeUndefined(); // bridge URLs must not leak
   });
 
-  it("POST /api/bridges/register with JWT owner registers bridge", async () => {
-    const jwt = await createOwnerJWT();
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+  it("POST /api/bridges/register with GitHub token registers bridge", async () => {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
       body: JSON.stringify({ repo: "acme/app", bridgeUrl: mockBridgeUrl }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${jwt}`,
+        authorization: `Bearer ${TEST_GITHUB_TOKEN}`,
       },
     });
     expect(resp.status).toBe(200);
@@ -169,28 +168,27 @@ describe("gateway endpoints", () => {
     expect(body.repo).toBe("acme/app");
   });
 
-  it("POST /api/bridges/register with JWT member returns 403", async () => {
-    const jwt = await createMemberJWT();
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+  it("POST /api/bridges/register with GitHub token for unauthorized repo returns 403", async () => {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
-      body: JSON.stringify({ repo: "acme/app", bridgeUrl: mockBridgeUrl }),
+      body: JSON.stringify({ repo: "other/repo", bridgeUrl: mockBridgeUrl }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${jwt}`,
+        authorization: `Bearer ${TEST_GITHUB_TOKEN}`,
       },
     });
     expect(resp.status).toBe(403);
     const body = await resp.json();
-    expect(body.error.type).toBe("insufficient_role");
+    expect(body.error.type).toBe("repo_not_authorized");
   });
 
   it("POST /api/bridges/register with missing repo returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
       body: JSON.stringify({ bridgeUrl: mockBridgeUrl }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(400);
@@ -199,24 +197,24 @@ describe("gateway endpoints", () => {
   });
 
   it("POST /api/bridges/register with missing bridgeUrl returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
       body: JSON.stringify({ repo: "acme/app" }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(400);
   });
 
   it("POST /api/bridges/register with invalid JSON returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "POST",
       body: "not json{{{",
       headers: {
         "content-type": "text/plain",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(400);
@@ -225,7 +223,7 @@ describe("gateway endpoints", () => {
   // ── Bridge deregistration ─────────────────────────────────────────
 
   it("DELETE /api/bridges/register without auth returns 401", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "DELETE",
       body: JSON.stringify({ repo: "acme/app" }),
       headers: { "content-type": "application/json" },
@@ -233,14 +231,14 @@ describe("gateway endpoints", () => {
     expect(resp.status).toBe(401);
   });
 
-  it("DELETE /api/bridges/register removes a registered bridge", async () => {
+  it("DELETE /api/bridges/register with shared secret removes a bridge", async () => {
     registerBridge("acme/app", mockBridgeUrl);
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "DELETE",
       body: JSON.stringify({ repo: "acme/app" }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(200);
@@ -250,15 +248,14 @@ describe("gateway endpoints", () => {
     expect(getBridge("acme/app")).toBeUndefined();
   });
 
-  it("DELETE /api/bridges/register with JWT owner succeeds", async () => {
+  it("DELETE /api/bridges/register with GitHub token succeeds", async () => {
     registerBridge("acme/app", mockBridgeUrl);
-    const jwt = await createOwnerJWT();
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "DELETE",
       body: JSON.stringify({ repo: "acme/app" }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${jwt}`,
+        authorization: `Bearer ${TEST_GITHUB_TOKEN}`,
       },
     });
     expect(resp.status).toBe(200);
@@ -268,24 +265,24 @@ describe("gateway endpoints", () => {
   });
 
   it("DELETE /api/bridges/register with missing repo returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "DELETE",
       body: JSON.stringify({}),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(400);
   });
 
   it("DELETE /api/bridges/register for unknown repo returns removed=false", async () => {
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
       method: "DELETE",
       body: JSON.stringify({ repo: "unknown/repo" }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${TEST_LEGACY_SECRET}`,
+        authorization: `Bearer ${TEST_GATEWAY_SECRET}`,
       },
     });
     expect(resp.status).toBe(200);
@@ -293,14 +290,14 @@ describe("gateway endpoints", () => {
     expect(body.removed).toBe(false);
   });
 
-  it("POST /api/bridges/register with JWT owner for unauthorized repo returns 403", async () => {
-    const jwt = await createOwnerJWT(); // authorized for acme/app, acme/lib
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
-      method: "POST",
-      body: JSON.stringify({ repo: "other/repo", bridgeUrl: mockBridgeUrl }),
+  it("DELETE /api/bridges/register with GitHub token for unauthorized repo returns 403", async () => {
+    registerBridge("other/repo", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/bridges/register`, {
+      method: "DELETE",
+      body: JSON.stringify({ repo: "other/repo" }),
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${jwt}`,
+        authorization: `Bearer ${TEST_GITHUB_TOKEN}`,
       },
     });
     expect(resp.status).toBe(403);
@@ -308,57 +305,11 @@ describe("gateway endpoints", () => {
     expect(body.error.type).toBe("repo_not_authorized");
   });
 
-  it("DELETE /api/bridges/register with JWT member returns 403", async () => {
-    registerBridge("acme/app", mockBridgeUrl);
-    const jwt = await createMemberJWT();
-    const resp = await fetch(`${baseUrl}/api/bridges/register`, {
-      method: "DELETE",
-      body: JSON.stringify({ repo: "acme/app" }),
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${jwt}`,
-      },
-    });
-    expect(resp.status).toBe(403);
-    const body = await resp.json();
-    expect(body.error.type).toBe("insufficient_role");
-  });
-
-  // ── /api/auth/me ─────────────────────────────────────────────────
-
-  it("GET /api/auth/me with valid JWT returns user info", async () => {
-    const jwt = await createOwnerJWT();
-    const resp = await fetch(`${baseUrl}/api/auth/me`, {
-      headers: { authorization: `Bearer ${jwt}` },
-    });
-    expect(resp.status).toBe(200);
-    const body = await resp.json();
-    expect(body.sub).toBe("user-uuid-123");
-    expect(body.email).toBe("test@example.com");
-    expect(body.role).toBe("owner");
-    expect(body.authorizedRepos).toEqual(["acme/app", "acme/lib"]);
-  });
-
-  it("GET /api/auth/me without auth returns 401", async () => {
-    const resp = await fetch(`${baseUrl}/api/auth/me`);
-    expect(resp.status).toBe(401);
-  });
-
-  it("GET /api/auth/me with legacy secret returns legacy user", async () => {
-    const resp = await fetch(`${baseUrl}/api/auth/me`, {
-      headers: { authorization: `Bearer ${TEST_LEGACY_SECRET}` },
-    });
-    expect(resp.status).toBe(200);
-    const body = await resp.json();
-    expect(body.sub).toBe("legacy");
-    expect(body.role).toBe("owner");
-  });
-
   // ── Webhook forwarding ────────────────────────────────────────────
 
   it("POST /api/webhooks/github with no registered bridge returns 502", async () => {
     const payload = JSON.stringify({ repository: { full_name: "acme/app" } });
-    const resp = await fetch(`${baseUrl}/api/webhooks/github`, {
+    const resp = await originalFetch(`${baseUrl}/api/webhooks/github`, {
       method: "POST",
       body: payload,
       headers: { "content-type": "application/json" },
@@ -369,7 +320,7 @@ describe("gateway endpoints", () => {
   });
 
   it("POST /api/webhooks/github with invalid JSON returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/webhooks/github`, {
+    const resp = await originalFetch(`${baseUrl}/api/webhooks/github`, {
       method: "POST",
       body: "not json{{{",
       headers: { "content-type": "text/plain" },
@@ -380,7 +331,7 @@ describe("gateway endpoints", () => {
   });
 
   it("POST /api/webhooks/github with missing repo in payload returns 400", async () => {
-    const resp = await fetch(`${baseUrl}/api/webhooks/github`, {
+    const resp = await originalFetch(`${baseUrl}/api/webhooks/github`, {
       method: "POST",
       body: JSON.stringify({ action: "opened" }),
       headers: { "content-type": "application/json" },
@@ -393,7 +344,7 @@ describe("gateway endpoints", () => {
   it("POST /api/webhooks/github forwards to registered bridge", async () => {
     registerBridge("acme/app", mockBridgeUrl);
     const payload = JSON.stringify({ repository: { full_name: "acme/app" }, action: "opened" });
-    const resp = await fetch(`${baseUrl}/api/webhooks/github`, {
+    const resp = await originalFetch(`${baseUrl}/api/webhooks/github`, {
       method: "POST",
       body: payload,
       headers: {
@@ -412,7 +363,7 @@ describe("gateway endpoints", () => {
   it("POST /api/webhooks/github to unreachable bridge returns 502", async () => {
     registerBridge("acme/app", "http://localhost:1");
     const payload = JSON.stringify({ repository: { full_name: "acme/app" } });
-    const resp = await fetch(`${baseUrl}/api/webhooks/github`, {
+    const resp = await originalFetch(`${baseUrl}/api/webhooks/github`, {
       method: "POST",
       body: payload,
       headers: { "content-type": "application/json" },
@@ -422,17 +373,26 @@ describe("gateway endpoints", () => {
     expect(body.error.type).toBe("bridge_error");
   });
 
+  // ── /api/auth/me removed ──────────────────────────────────────────
+
+  it("GET /api/auth/me returns 404 (endpoint removed)", async () => {
+    const resp = await originalFetch(`${baseUrl}/api/auth/me`, {
+      headers: { authorization: `Bearer ${TEST_GATEWAY_SECRET}` },
+    });
+    expect(resp.status).toBe(404);
+  });
+
   // ── Method mismatch ────────────────────────────────────────────────
 
   it("GET /api/webhooks/github returns 404", async () => {
-    const resp = await fetch(`${baseUrl}/api/webhooks/github`);
+    const resp = await originalFetch(`${baseUrl}/api/webhooks/github`);
     expect(resp.status).toBe(404);
   });
 
   // ── 404 ───────────────────────────────────────────────────────────
 
   it("unknown endpoint returns 404", async () => {
-    const resp = await fetch(`${baseUrl}/not/a/real/endpoint`);
+    const resp = await originalFetch(`${baseUrl}/not/a/real/endpoint`);
     expect(resp.status).toBe(404);
     const body = await resp.json();
     expect(body.error.type).toBe("not_found");
