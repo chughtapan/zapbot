@@ -507,7 +507,12 @@ async function handleMentionCommand(
       return { status: 200, body: "insufficient permissions" };
     }
   } catch (err) {
-    log.warn(`Permission check failed for ${triggeredBy}, proceeding anyway: ${err}`);
+    log.error(`Permission check failed for ${triggeredBy}, rejecting command: ${err}`);
+    await executeSideEffects([{
+      type: "post_comment", issueNumber,
+      body: `Sorry @${triggeredBy}, I couldn't verify your permissions right now. Please try again in a moment.`,
+    }], repo);
+    return { status: 200, body: "permission check failed" };
   }
 
   const cmdLower = command.toLowerCase().trim();
