@@ -45,7 +45,13 @@ async function fetchWithRetry(
 
 export interface GatewayClientConfig {
   gatewayUrl: string;   // e.g. https://zapbot-gateway.up.railway.app
-  secret: string;       // GATEWAY_SECRET for Bearer auth
+  secret?: string;      // Legacy: ZAPBOT_GATEWAY_SECRET (deprecated)
+  token?: string;       // Supabase JWT: ZAPBOT_GATEWAY_TOKEN (preferred)
+}
+
+/** Returns the auth token to use — JWT token takes precedence over legacy secret. */
+function getAuthToken(config: GatewayClientConfig): string {
+  return config.token || config.secret || "";
 }
 
 /**
@@ -62,7 +68,7 @@ export async function registerBridge(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.secret}`,
+      Authorization: `Bearer ${getAuthToken(config)}`,
     },
     body: JSON.stringify({ repo, bridgeUrl }),
   });
@@ -89,7 +95,7 @@ export async function deregisterBridge(
       method: "DELETE",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${config.secret}`,
+        Authorization: `Bearer ${getAuthToken(config)}`,
       },
       body: JSON.stringify({ repo }),
       signal: AbortSignal.timeout(5_000),
