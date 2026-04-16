@@ -89,6 +89,37 @@ if (!WEBHOOK_SECRET) {
   process.exit(1);
 }
 const BOT_USERNAME = process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]";
+
+/**
+ * Check if an issue is assigned to the bot. Returns true if the bot username
+ * appears in the issue's assignees list. This gates all workflow creation
+ * and state machine transitions so the bot only works on issues explicitly
+ * assigned to it.
+ */
+function isAssignedToBot(payload: any): boolean {
+  const assignees: Array<{ login: string }> = payload.issue?.assignees || [];
+  return assignees.some((a) => a.login === BOT_USERNAME);
+}
+
+/** Map an issue label to the agent role it implies. */
+function labelToRole(labels: string[]): "triage" | "planner" | "implementer" | "qe" | null {
+  if (labels.includes("implementing")) return "implementer";
+  if (labels.includes("verifying")) return "qe";
+  if (labels.includes("planning") || labels.includes("review")) return "planner";
+  if (labels.includes("triage")) return "triage";
+  return null;
+}
+
+/** Map a workflow state to the agent role that should be working on it. */
+function stateToRole(state: string): "triage" | "planner" | "implementer" | "qe" | null {
+  switch (state) {
+    case "TRIAGE": return "triage";
+    case "PLANNING": case "REVIEW": return "planner";
+    case "IMPLEMENTING": case "DRAFT_REVIEW": return "implementer";
+    case "VERIFYING": return "qe";
+    default: return null;
+  }
+}
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -471,33 +502,50 @@ async function handleWebhook(
     sender: payload.sender?.login,
   });
 
-  // Special handling: new issue with triage label creates parent workflow
-  if (eventType === "issues" && payload.action === "opened") {
-    const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
-    if (labels.includes("triage")) {
-      const issueNumber = payload.issue.number;
-      const author = payload.sender?.login || "";
-      const intent = payload.issue?.title || "";
-      await createTriageWorkflow(repo, issueNumber, author, intent, deliveryId);
-      return { status: 200, body: "parent workflow created" };
+  // ── Assignment-based entry point ──────────────────────────────────
+  // The bot only starts work when an issue is assigned to it. Labels
+  // determine which agent to spawn (triage if no label).
+  if (eventType === "issues" && payload.action === "assigned") {
+    const assignee: string = payload.assignee?.login || "";
+    if (assignee !== BOT_USERNAME) {
+      return { status: 200, body: "not assigned to bot" };
     }
-  }
 
-  // Special handling: new issue with planning label creates sub workflow
-  if (eventType === "issues" && payload.action === "opened") {
+    const issueNumber: number = payload.issue.number;
+    const author: string = payload.sender?.login || "";
+    const intent: string = payload.issue?.title || "";
+    const body: string = payload.issue?.body || "";
     const labels: string[] = (payload.issue?.labels || []).map((l: any) => l.name);
-    if (labels.includes("planning")) {
-      const issueNumber = payload.issue.number;
-      const author = payload.sender?.login || "";
-      const intent = payload.issue?.title || "";
-      const body: string = payload.issue?.body || "";
-      const wfId = makeWorkflowId(repo, issueNumber);
 
-      // Extract parent reference from body
+    log.info(`Issue #${issueNumber} assigned to ${BOT_USERNAME}, labels: [${labels.join(", ")}]`, {
+      issueNumber,
+      labels,
+      author,
+    });
+
+    // Check if a workflow already exists (re-assignment = recovery)
+    const existingWf = await getWorkflowByIssue(db, issueNumber, repo);
+    if (existingWf) {
+      const agents = await getAgentSessions(db, existingWf.id);
+      if (allAgentsDead(agents)) {
+        // Determine role from label or current state
+        const role = labelToRole(labels) ?? stateToRole(existingWf.state) ?? "triage";
+        log.info(`Re-spawning ${role} agent for existing workflow ${existingWf.id}`, { issueNumber, role });
+        await executeSideEffects([{ type: "spawn_agent", role, issueNumber }], repo);
+        return { status: 200, body: `${role} agent re-spawned` };
+      }
+      log.debug("Workflow already active with live agents", { issueNumber, state: existingWf.state });
+      return { status: 200, body: "workflow already active" };
+    }
+
+    // No workflow yet — create one based on labels
+    if (labels.includes("planning")) {
+      // Sub-issue: create in PLANNING, spawn planner
+      const wfId = makeWorkflowId(repo, issueNumber);
       const parentMatch = body.match(/Part of #(\d+)/i);
       const parentWorkflowId = parentMatch ? makeWorkflowId(repo, parseInt(parentMatch[1], 10)) : null;
-
       const deps = parseDependencies(body);
+
       await upsertWorkflow(db, {
         id: wfId,
         issue_number: issueNumber,
@@ -515,7 +563,7 @@ async function handleWebhook(
         workflow_id: wfId,
         from_state: "NEW",
         to_state: "PLANNING",
-        event_type: "workflow_created",
+        event_type: "assigned_to_bot",
         triggered_by: author,
         metadata: null,
         github_delivery_id: deliveryId,
@@ -523,7 +571,6 @@ async function handleWebhook(
 
       log.info(`Created sub workflow ${wfId} in PLANNING`, { issueNumber, parent: parentWorkflowId });
 
-      // Check for dependencies before spawning planner (deps already parsed above)
       if (deps.length > 0) {
         const blocking = await findBlockingDepsAsync(deps, repo);
         if (blocking.length > 0) {
@@ -539,35 +586,22 @@ async function handleWebhook(
 
       await executeSideEffects([
         { type: "spawn_agent", role: "planner", issueNumber },
-        { type: "post_comment", issueNumber, body: "**Zapbot:** Sub-issue tracked. Spawning planner agent to draft an implementation plan." },
+        { type: "post_comment", issueNumber, body: "**Zapbot:** Assigned. Spawning planner agent." },
       ], repo);
       return { status: 200, body: "sub workflow created" };
     }
+
+    // Default: parent issue → triage
+    await createTriageWorkflow(repo, issueNumber, author, intent, deliveryId);
+    return { status: 200, body: "parent workflow created" };
   }
+
+  // ── Subsequent events (label changes, PRs, etc.) ─────────────────
+  // These only act on issues that already have a workflow (bot was
+  // previously assigned). No workflow = no action.
 
   // Map webhook to state machine event
   const mapped = mapWebhookToEvent(eventType, payload, BOT_USERNAME);
-
-  // Handle triage label on existing issue (creates parent workflow if none exists)
-  if (mapped && mapped.event.type === "triage_label_added") {
-    const existingWf = await getWorkflowByIssue(db, mapped.issueNumber, repo);
-    if (!existingWf) {
-      const author = payload.sender?.login || "";
-      const intent = payload.issue?.title || "";
-      await createTriageWorkflow(repo, mapped.issueNumber, author, intent, deliveryId);
-      return { status: 200, body: "parent workflow created" };
-    }
-    if (existingWf && existingWf.state === "TRIAGE") {
-      const agents = await getAgentSessions(db, existingWf.id);
-      if (allAgentsDead(agents)) {
-        log.info(`Re-spawning triage agent for stuck workflow ${existingWf.id}`, { issueNumber: mapped.issueNumber });
-        await executeSideEffects([{ type: "spawn_agent", role: "triage", issueNumber: mapped.issueNumber }], repo);
-        return { status: 200, body: "triage agent re-spawned" };
-      }
-      log.debug("Triage workflow already active, ignoring duplicate label event", { issueNumber: mapped.issueNumber });
-      return { status: 200, body: "triage already active" };
-    }
-  }
 
   if (!mapped) {
     log.debug("No state machine event for this webhook", { eventType, action: payload.action });

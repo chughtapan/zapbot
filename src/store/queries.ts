@@ -6,7 +6,7 @@ type WorkflowInsert = Omit<WorkflowTable, "created_at" | "updated_at" | "draft_r
   dependencies?: string | null;
   progress_comment_id?: number | null;
 };
-type AgentInsert = Omit<AgentSessionTable, "status" | "retry_count" | "max_retries" | "last_heartbeat" | "spawned_at" | "completed_at" | "claude_session_id"> & {
+type AgentInsert = Omit<AgentSessionTable, "status" | "retry_count" | "nudge_count" | "max_retries" | "last_heartbeat" | "spawned_at" | "completed_at" | "cleaned_up_at" | "claude_session_id"> & {
   status?: string;
   max_retries?: number;
   claude_session_id?: string | null;
@@ -137,7 +137,7 @@ export async function updateAgentHeartbeat(
   const now = Math.floor(Date.now() / 1000);
   await db
     .updateTable("agent_sessions")
-    .set({ last_heartbeat: now })
+    .set({ last_heartbeat: now, nudge_count: 0 })
     .where("id", "=", agentId)
     .execute();
 }
@@ -170,6 +170,17 @@ export async function incrementRetryCount(
   await db
     .updateTable("agent_sessions")
     .set((eb) => ({ retry_count: eb("retry_count", "+", 1) }))
+    .where("id", "=", agentId)
+    .execute();
+}
+
+export async function incrementNudgeCount(
+  db: Kysely<Database>,
+  agentId: string
+): Promise<void> {
+  await db
+    .updateTable("agent_sessions")
+    .set((eb) => ({ nudge_count: eb("nudge_count", "+", 1) }))
     .where("id", "=", agentId)
     .execute();
 }

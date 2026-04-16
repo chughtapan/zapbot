@@ -1,7 +1,8 @@
 import { Kysely } from "kysely";
 import type { Database } from "../store/database.js";
-import { getSessionsForCleanup, markSessionCleaned, getAgentSessions } from "../store/queries.js";
+import { getSessionsForCleanup, markSessionCleaned, getAgentSessions, getWorkflow } from "../store/queries.js";
 import { TERMINAL_STATES } from "../state-machine/states.js";
+import { findSessionForIssue } from "./session-lookup.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("cleanup");
@@ -46,34 +47,6 @@ async function killSession(sessionName: string): Promise<boolean> {
 }
 
 /**
- * Find the AO session name for a given issue number by parsing `ao session ls` output.
- * Looks for lines containing the branch pattern `feat/issue-{N}`.
- */
-async function findSessionNameForIssue(issueNumber: number): Promise<string | null> {
-  const branch = `feat/issue-${issueNumber}`;
-
-  for (const cmd of [["ao", "session", "ls"], ["ao", "status"]]) {
-    try {
-      const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-      const stdout = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) continue;
-
-      for (const line of stdout.split("\n")) {
-        if (line.includes(branch)) {
-          const match = line.match(/(zap-\d+)/);
-          if (match) return match[1];
-        }
-      }
-    } catch {
-      // Command failed, try next
-    }
-  }
-
-  return null;
-}
-
-/**
  * Clean up all agent sessions for a given workflow.
  * Kills the AO session and marks the agent session as cleaned.
  * Only marks cleaned_up_at on successful kill.
@@ -92,28 +65,28 @@ export async function cleanupWorkflowSessions(
     count: uncleaned.length,
   });
 
-  for (const session of uncleaned) {
-    // Extract issue number from workflow ID (format: "wf-{issueNumber}")
-    const issueMatch = workflowId.match(/^wf-(\d+)/);
-    if (!issueMatch) {
-      log.warn(`Cannot parse issue number from workflow ${workflowId}`, { workflowId });
-      continue;
-    }
+  const wf = await getWorkflow(db, workflowId);
+  if (!wf) {
+    log.warn(`Cannot find workflow ${workflowId} for cleanup`, { workflowId });
+    return;
+  }
 
-    const issueNumber = parseInt(issueMatch[1], 10);
-    const sessionName = await findSessionNameForIssue(issueNumber);
+  const sessionName = await findSessionForIssue(wf.issue_number);
 
-    if (!sessionName) {
-      // Session not found in AO — it may already be dead. Mark as cleaned.
-      log.info(`No AO session found for issue #${issueNumber}, marking as cleaned`, {
+  if (!sessionName) {
+    // Session not found in AO — it may already be dead. Mark all as cleaned.
+    for (const session of uncleaned) {
+      log.info(`No AO session found for issue #${wf.issue_number}, marking as cleaned`, {
         agentId: session.id,
-        issueNumber,
+        issueNumber: wf.issue_number,
       });
       await markSessionCleaned(db, session.id);
-      continue;
     }
+    return;
+  }
 
-    const killed = await killSession(sessionName);
+  const killed = await killSession(sessionName);
+  for (const session of uncleaned) {
     if (killed) {
       await markSessionCleaned(db, session.id);
     } else {

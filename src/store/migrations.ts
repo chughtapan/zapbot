@@ -142,4 +142,10 @@ const migrations: Migration[] = [
       await sql`ALTER TABLE agent_sessions ADD COLUMN claude_session_id TEXT DEFAULT NULL`.execute(db);
     },
   },
+  {
+    name: "006_add_nudge_count",
+    up: async (db: Kysely<Database>) => {
+      await sql`ALTER TABLE agent_sessions ADD COLUMN nudge_count INTEGER NOT NULL DEFAULT 0`.execute(db);
+    },
+  },
 ];
