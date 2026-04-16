@@ -175,8 +175,9 @@ export async function setupGateway(
     await registerBridge(config, repo, bridgeUrl);
   }
 
-  // Start periodic heartbeats
-  startHeartbeats(config, repos, bridgeUrl);
+  // Start periodic heartbeats (default 5min to keep Render free tier awake)
+  const intervalMs = parseInt(process.env.ZAPBOT_GATEWAY_HEARTBEAT_MS || "300000", 10);
+  startHeartbeats(config, repos, bridgeUrl, intervalMs);
 
   // Return cleanup function
   return async () => {
