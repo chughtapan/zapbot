@@ -45,6 +45,7 @@ export interface AgentSessionTable {
   pr_number: number | null;
   status: string; // "spawning" | "running" | "completed" | "failed" | "timeout"
   retry_count: number;
+  nudge_count: number;
   max_retries: number;
   last_heartbeat: number;
   spawned_at: number;

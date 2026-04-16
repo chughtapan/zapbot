@@ -16,6 +16,7 @@ import { cancelPendingRetries, type AgentRole, type SpawnContext } from "../src/
 // ── Read the spawner source for structural tests ────────────────────
 
 const spawnerSource = readFileSync(join(__dirname, "../src/agents/spawner.ts"), "utf-8");
+const sessionLookupSource = readFileSync(join(__dirname, "../src/agents/session-lookup.ts"), "utf-8");
 
 // ── Source code structural tests (a la multi-repo.test.ts) ──────────
 
@@ -244,13 +245,8 @@ describe("spawner: source structure", () => {
     expect(spawnerSource).toContain("findSessionForIssue(ctx.issueNumber)");
   });
 
-  it("findSessionForIssue tries ao session ls and ao status", () => {
-    expect(spawnerSource).toContain('"ao", "session", "ls"');
-    expect(spawnerSource).toContain('"ao", "status"');
-  });
-
-  it("findSessionForIssue matches session names like zap-NNN", () => {
-    expect(spawnerSource).toContain("/(zap-\\d+)/");
+  it("imports findSessionForIssue from shared session-lookup module", () => {
+    expect(spawnerSource).toContain('from "./session-lookup.js"');
   });
 
   // -- Bun.spawn usage --
@@ -631,38 +627,38 @@ describe("spawner: buildPrompt", () => {
 
 // ── findSessionForIssue analysis ────────────────────────────────────
 
-describe("spawner: findSessionForIssue", () => {
+describe("session-lookup: findSessionForIssue", () => {
   it("is an async function that returns string | null", () => {
-    expect(spawnerSource).toContain("async function findSessionForIssue(issueNumber: number): Promise<string | null>");
+    expect(sessionLookupSource).toContain("async function findSessionForIssue(issueNumber: number): Promise<string | null>");
   });
 
   it("tries two different commands to find session", () => {
-    expect(spawnerSource).toContain('["ao", "session", "ls"]');
-    expect(spawnerSource).toContain('["ao", "status"]');
+    expect(sessionLookupSource).toContain('["ao", "session", "ls"]');
+    expect(sessionLookupSource).toContain('["ao", "status"]');
   });
 
   it("uses a for loop to try fallback commands", () => {
-    expect(spawnerSource).toContain("for (const cmd of [");
+    expect(sessionLookupSource).toContain("for (const cmd of [");
   });
 
   it("reads process stdout to find the branch", () => {
-    expect(spawnerSource).toContain("new Response(proc.stdout).text()");
+    expect(sessionLookupSource).toContain("new Response(proc.stdout).text()");
   });
 
   it("matches session names with zap-NNN pattern", () => {
-    expect(spawnerSource).toContain("/(zap-\\d+)/");
+    expect(sessionLookupSource).toContain("/(zap-\\d+)/");
   });
 
   it("searches for the branch name in command output", () => {
-    expect(spawnerSource).toContain("line.includes(branch)");
+    expect(sessionLookupSource).toContain("line.includes(branch)");
   });
 
   it("returns null when session is not found", () => {
-    expect(spawnerSource).toContain("return null");
+    expect(sessionLookupSource).toContain("return null");
   });
 
   it("handles command errors gracefully", () => {
-    expect(spawnerSource).toContain("} catch (err)");
+    expect(sessionLookupSource).toContain("} catch (err)");
   });
 });
 

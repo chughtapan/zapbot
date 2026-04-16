@@ -5,6 +5,7 @@ import * as os from "os";
 import type { Database } from "../store/database.js";
 import { createAgentSession, updateAgentStatus, getAgentSession, incrementRetryCount, updateAgentSessionFields } from "../store/queries.js";
 import { createLogger } from "../logger.js";
+import { findSessionForIssue } from "./session-lookup.js";
 
 const ZAPBOT_DIR = path.resolve(import.meta.dir, "../..");
 
@@ -33,34 +34,6 @@ const pendingTimers = new Set<Timer>();
 export function cancelPendingRetries(): void {
   for (const t of pendingTimers) clearTimeout(t);
   pendingTimers.clear();
-}
-
-async function findSessionForIssue(issueNumber: number): Promise<string | null> {
-  const branch = `feat/issue-${issueNumber}`;
-
-  // Try ao session ls first, fall back to ao status
-  for (const cmd of [["ao", "session", "ls"], ["ao", "status"]]) {
-    try {
-      const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-      const stdout = await new Response(proc.stdout).text();
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) {
-        log.warn(`${cmd.join(" ")} exited with code ${exitCode}`, { branch });
-        continue;
-      }
-      for (const line of stdout.split("\n")) {
-        if (line.includes(branch)) {
-          const match = line.match(/(zap-\d+)/);
-          if (match) return match[1];
-        }
-      }
-    } catch (err) {
-      log.warn(`${cmd.join(" ")} threw: ${err}`, { branch });
-    }
-  }
-
-  log.warn(`Could not find AO session for ${branch}`, { issueNumber });
-  return null;
 }
 
 /**
