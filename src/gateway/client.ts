@@ -44,12 +44,11 @@ async function fetchWithRetry(
 // ── Public API ─────────────────────────────────────────────────────
 
 export interface GatewayClientConfig {
-  gatewayUrl: string;   // e.g. https://zapbot-gateway.up.railway.app
-  secret?: string;      // Legacy: ZAPBOT_GATEWAY_SECRET (deprecated)
-  token?: string;       // Supabase JWT: ZAPBOT_GATEWAY_TOKEN (preferred)
+  gatewayUrl: string;
+  secret?: string;      // ZAPBOT_GATEWAY_SECRET (shared secret)
+  token?: string;       // ZAPBOT_GATEWAY_TOKEN (Supabase JWT)
 }
 
-/** Returns the auth token to use — JWT token takes precedence over legacy secret. */
 function getAuthToken(config: GatewayClientConfig): string {
   return config.token || config.secret || "";
 }
@@ -144,6 +143,7 @@ export function startHeartbeats(
   bridgeUrl: string,
   intervalMs = 30_000,
 ): void {
+  if (heartbeatTimers.length > 0) stopHeartbeats();
   for (const repo of repos) {
     const timer = setInterval(() => heartbeat(config, repo, bridgeUrl), intervalMs);
     heartbeatTimers.push(timer);
@@ -175,8 +175,9 @@ export async function setupGateway(
     await registerBridge(config, repo, bridgeUrl);
   }
 
-  // Start periodic heartbeats
-  startHeartbeats(config, repos, bridgeUrl);
+  // Start periodic heartbeats (default 5min to keep Render free tier awake)
+  const intervalMs = parseInt(process.env.ZAPBOT_GATEWAY_HEARTBEAT_MS || "300000", 10);
+  startHeartbeats(config, repos, bridgeUrl, intervalMs);
 
   // Return cleanup function
   return async () => {

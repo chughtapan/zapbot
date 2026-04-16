@@ -10,12 +10,35 @@ allowed-tools:
 ## Preamble
 
 ```bash
-_UPD=$(~/.claude/skills/zapbot/bin/zapbot-update-check 2>/dev/null || true)
-[ -n "$_UPD" ] && echo "$_UPD" || true
+# Update check (1-hour cache)
+GITHUB_RAW=$(cat ~/.zapbot/github-raw-url 2>/dev/null || echo "https://raw.githubusercontent.com/chughtapan/zapbot/main")
+CACHE_FILE="$HOME/.zapbot/last-update-check"
+MARKER_FILE="$HOME/.zapbot/just-upgraded-from"
+LOCAL_VERSION=$(cat ~/.zapbot/skill-version 2>/dev/null || echo "0.0.0")
+
+if [ -f "$MARKER_FILE" ]; then
+  _OLD=$(cat "$MARKER_FILE" 2>/dev/null || echo "unknown")
+  rm -f "$MARKER_FILE"
+  echo "JUST_UPGRADED $_OLD $LOCAL_VERSION"
+else
+  NOW=$(date +%s)
+  LAST=$(cat "$CACHE_FILE" 2>/dev/null || echo 0)
+  if [ $((NOW - LAST)) -gt 3600 ]; then
+    REMOTE=$(curl -fsSL --max-time 3 "$GITHUB_RAW/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "")
+    date +%s > "$CACHE_FILE" 2>/dev/null || true
+    if echo "$REMOTE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null; then
+      [ "$LOCAL_VERSION" != "$REMOTE" ] && echo "UPGRADE_AVAILABLE $LOCAL_VERSION $REMOTE" || true
+    fi
+  fi
+fi
 ```
 
 If output shows `UPGRADE_AVAILABLE <old> <new>`:
-  1. Run: `cd ~/.claude/skills/zapbot && git pull origin main && ./setup`
+  1. Run:
+     ```bash
+     GITHUB_RAW=$(cat ~/.zapbot/github-raw-url 2>/dev/null || echo "https://raw.githubusercontent.com/chughtapan/zapbot/main")
+     curl -fsSL "$GITHUB_RAW/install.sh" | bash
+     ```
   2. Tell user: "Zapbot upgraded v{old} -> v{new}."
   3. Continue with the skill.
 

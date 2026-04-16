@@ -965,6 +965,7 @@ async function handleWebhook(
       log.warn(`Failed to add eyes reaction to issue #${issueNumber}: ${err}`);
     }
 
+
     // Check if a workflow already exists (re-assignment = recovery)
     const existingWf = await getWorkflowByIssue(db, issueNumber, repo);
     if (existingWf) {
@@ -1053,6 +1054,7 @@ async function handleWebhook(
   // ── Subsequent events (label changes, PRs, etc.) ─────────────────
   // These only act on issues that already have a workflow (bot was
   // previously assigned). No workflow = no action.
+
 
   if (!mapped) {
     log.debug("No state machine event for this webhook", { eventType, action: payload.action });

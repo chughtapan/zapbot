@@ -27,16 +27,26 @@ echo "REPO: $REPO"
 # Check plannotator
 command -v plannotator >/dev/null 2>&1 && echo "PLANNOTATOR: installed" || echo "PLANNOTATOR: missing"
 
-# Check for updates (cached 24h)
-ZAPBOT_DIR="$HOME/.claude/skills/zapbot"
-UPDATE_CHECK="$HOME/.zapbot/last-update-check"
-NOW=$(date +%s)
-LAST=$(cat "$UPDATE_CHECK" 2>/dev/null || echo 0)
-if [ $((NOW - LAST)) -gt 86400 ]; then
-  LATEST=$(git -C "$ZAPBOT_DIR" ls-remote --tags origin 2>/dev/null | tail -1 | sed 's/.*refs\/tags\///')
-  CURRENT=$(cat "$ZAPBOT_DIR/VERSION" 2>/dev/null || echo "unknown")
-  echo "$NOW" > "$UPDATE_CHECK" 2>/dev/null || true
-  [ -n "$LATEST" ] && [ "$LATEST" != "$CURRENT" ] && echo "UPGRADE_AVAILABLE: $CURRENT -> $LATEST" || true
+# Check for updates (1-hour cache)
+GITHUB_RAW=$(cat ~/.zapbot/github-raw-url 2>/dev/null || echo "https://raw.githubusercontent.com/chughtapan/zapbot/main")
+CACHE_FILE="$HOME/.zapbot/last-update-check"
+MARKER_FILE="$HOME/.zapbot/just-upgraded-from"
+LOCAL_VERSION=$(cat ~/.zapbot/skill-version 2>/dev/null || echo "0.0.0")
+
+if [ -f "$MARKER_FILE" ]; then
+  _OLD=$(cat "$MARKER_FILE" 2>/dev/null || echo "unknown")
+  rm -f "$MARKER_FILE"
+  echo "JUST_UPGRADED $_OLD $LOCAL_VERSION"
+else
+  NOW=$(date +%s)
+  LAST=$(cat "$CACHE_FILE" 2>/dev/null || echo 0)
+  if [ $((NOW - LAST)) -gt 3600 ]; then
+    REMOTE=$(curl -fsSL --max-time 3 "$GITHUB_RAW/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "")
+    date +%s > "$CACHE_FILE" 2>/dev/null || true
+    if echo "$REMOTE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null; then
+      [ "$LOCAL_VERSION" != "$REMOTE" ] && echo "UPGRADE_AVAILABLE $LOCAL_VERSION $REMOTE" || true
+    fi
+  fi
 fi
 ```
 
@@ -46,9 +56,17 @@ Single entry point for the zapbot plan-to-code workflow.
 
 ## Upgrade check
 
-If preamble shows `UPGRADE_AVAILABLE: X -> Y`, tell the user:
+If preamble shows `UPGRADE_AVAILABLE X Y`, tell the user:
 "Zapbot Y is available (you have X). Update now?"
-If yes, run: `cd $HOME/.claude/skills/zapbot && git pull && ./setup`
+If yes, run:
+```bash
+GITHUB_RAW=$(cat ~/.zapbot/github-raw-url 2>/dev/null || echo "https://raw.githubusercontent.com/chughtapan/zapbot/main")
+curl -fsSL "$GITHUB_RAW/install.sh" | bash
+```
+Then tell the user: "Upgraded! Re-run your command to use the new version."
+
+If preamble shows `JUST_UPGRADED X Y`, tell the user:
+"Running zapbot vY (just updated from vX)!" and continue.
 
 ## Routing
 
