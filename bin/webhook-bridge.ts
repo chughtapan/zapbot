@@ -474,7 +474,7 @@ async function createTriageWorkflow(
   log.info(`Created parent workflow ${wfId} in TRIAGE`, { issueNumber });
   await executeSideEffects([
     { type: "spawn_agent", role: "triage", issueNumber },
-    { type: "post_comment", issueNumber, body: "Workflow started. Spawning triage agent to analyze this issue and break it into sub-tasks." },
+    { type: "post_comment", issueNumber, body: "Workflow started. Spawning triage agent to analyze this issue and determine the best approach." },
   ], repo);
 }
 
