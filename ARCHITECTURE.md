@@ -191,7 +191,7 @@ Logic lives in `src/effects/executor.ts`.
 
 ### GitHub Comments
 
-Every state transition posts a `**Zapbot:**` prefixed comment on the GitHub issue explaining
+Every state transition posts a comment on the GitHub issue explaining
 what happened and what to do next. Comments include who approved (with @mention), what agent
 is spawning, and guidance for the next step. This gives users visibility into the pipeline
 without needing to check bridge logs. Defined in `src/state-machine/transitions.ts`.

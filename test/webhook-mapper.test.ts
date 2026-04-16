@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mapWebhookToEvent } from "../src/webhook/mapper.js";
+import { mapWebhookToEvent, stripQuotedContent, parseMentionCommand } from "../src/webhook/mapper.js";
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -200,9 +200,12 @@ describe("unknown events", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null for issue_comment.created", () => {
+  it("returns null for issue_comment.created without mention", () => {
     const result = mapWebhookToEvent("issue_comment", {
       action: "created",
+      comment: { body: "just a regular comment", id: 1 },
+      issue: { number: 42 },
+      sender: { login: "alice" },
       repository: { full_name: "acme/app" },
     });
     expect(result).toBeNull();
@@ -325,6 +328,169 @@ describe("label_state_override", () => {
   it("ignores unknown labels", () => {
     const result = mapWebhookToEvent("issues", issuePayload("wontfix", "human"));
     expect(result).toBeNull();
+  });
+});
+
+// ── stripQuotedContent ────────────────────────────────────────────
+
+describe("stripQuotedContent", () => {
+  it("removes fenced code blocks", () => {
+    const body = "before\n```\n@zapbot plan this\n```\nafter";
+    expect(stripQuotedContent(body)).toBe("before\n\nafter");
+  });
+
+  it("removes inline code", () => {
+    const body = "try running `@zapbot status` to check";
+    expect(stripQuotedContent(body)).toBe("try running  to check");
+  });
+
+  it("removes blockquote lines", () => {
+    const body = "my comment\n> @zapbot plan this\nnext line";
+    expect(stripQuotedContent(body)).toBe("my comment\nnext line");
+  });
+
+  it("removes indented blockquote lines", () => {
+    const body = "line 1\n  > quoted mention\nline 3";
+    expect(stripQuotedContent(body)).toBe("line 1\nline 3");
+  });
+
+  it("handles multi-line code blocks with language tag", () => {
+    const body = "look:\n```bash\n@zapbot investigate\necho done\n```\nend";
+    expect(stripQuotedContent(body)).toBe("look:\n\nend");
+  });
+
+  it("passes through plain text unchanged", () => {
+    const body = "just a normal comment with no special formatting";
+    expect(stripQuotedContent(body)).toBe(body);
+  });
+});
+
+// ── parseMentionCommand ───────────────────────────────────────────
+
+describe("parseMentionCommand", () => {
+  it("parses simple command after @zapbot", () => {
+    expect(parseMentionCommand("@zapbot plan this", "zapbot[bot]")).toBe("plan this");
+  });
+
+  it("parses command after @zapbot[bot]", () => {
+    expect(parseMentionCommand("@zapbot[bot] status", "zapbot[bot]")).toBe("status");
+  });
+
+  it("is case-insensitive for the mention", () => {
+    expect(parseMentionCommand("@Zapbot plan this", "zapbot[bot]")).toBe("plan this");
+  });
+
+  it("returns null when no mention present", () => {
+    expect(parseMentionCommand("just a regular comment", "zapbot[bot]")).toBeNull();
+  });
+
+  it("returns null when mention is bare with no command", () => {
+    expect(parseMentionCommand("@zapbot", "zapbot[bot]")).toBeNull();
+  });
+
+  it("returns null when mention is only in a code block", () => {
+    expect(parseMentionCommand("```\n@zapbot plan this\n```", "zapbot[bot]")).toBeNull();
+  });
+
+  it("returns null when mention is only in inline code", () => {
+    expect(parseMentionCommand("try `@zapbot status`", "zapbot[bot]")).toBeNull();
+  });
+
+  it("returns null when mention is only in a blockquote", () => {
+    expect(parseMentionCommand("> @zapbot plan this", "zapbot[bot]")).toBeNull();
+  });
+
+  it("extracts only the first line after mention", () => {
+    expect(parseMentionCommand("@zapbot investigate this\nmore context here", "zapbot[bot]")).toBe("investigate this");
+  });
+
+  it("handles mention mid-line", () => {
+    expect(parseMentionCommand("hey @zapbot help", "zapbot[bot]")).toBe("help");
+  });
+
+  it("works with custom bot username", () => {
+    expect(parseMentionCommand("@mybot do something", "mybot")).toBe("do something");
+  });
+});
+
+// ── mention_command mapping via mapWebhookToEvent ─────────────────
+
+describe("issue_comment mention_command", () => {
+  function commentPayload(body: string, actor = "alice", issueNumber = 42, commentId = 100) {
+    return {
+      action: "created",
+      comment: { body, id: commentId },
+      issue: { number: issueNumber },
+      sender: { login: actor },
+      repository: { full_name: "acme/app" },
+    };
+  }
+
+  it("maps @zapbot mention to mention_command event", () => {
+    const result = mapWebhookToEvent("issue_comment", commentPayload("@zapbot plan this"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("mention_command");
+    if (result!.event.type === "mention_command") {
+      expect(result!.event.command).toBe("plan this");
+      expect(result!.event.triggeredBy).toBe("alice");
+      expect(result!.event.commentId).toBe(100);
+      expect(result!.event.issueNumber).toBe(42);
+    }
+    expect(result!.issueNumber).toBe(42);
+    expect(result!.repo).toBe("acme/app");
+  });
+
+  it("maps @zapbot[bot] mention to mention_command event", () => {
+    const result = mapWebhookToEvent("issue_comment", commentPayload("@zapbot[bot] status"));
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("mention_command");
+    if (result!.event.type === "mention_command") {
+      expect(result!.event.command).toBe("status");
+    }
+  });
+
+  it("returns null when bot comments on its own (self-loop prevention)", () => {
+    const result = mapWebhookToEvent(
+      "issue_comment",
+      commentPayload("@zapbot plan this", "zapbot[bot]"),
+      "zapbot[bot]"
+    );
+    expect(result).toBeNull();
+  });
+
+  it("returns null for comment without mention", () => {
+    const result = mapWebhookToEvent("issue_comment", commentPayload("looks good to me"));
+    expect(result).toBeNull();
+  });
+
+  it("returns null for mention inside a code block", () => {
+    const result = mapWebhookToEvent("issue_comment", commentPayload("```\n@zapbot plan this\n```"));
+    expect(result).toBeNull();
+  });
+
+  it("returns null for bare mention without command text", () => {
+    const result = mapWebhookToEvent("issue_comment", commentPayload("@zapbot"));
+    expect(result).toBeNull();
+  });
+
+  it("includes the full comment body in the event", () => {
+    const body = "@zapbot investigate this\n\nHere is more context about the bug.";
+    const result = mapWebhookToEvent("issue_comment", commentPayload(body));
+    expect(result).not.toBeNull();
+    if (result!.event.type === "mention_command") {
+      expect(result!.event.body).toBe(body);
+      expect(result!.event.command).toBe("investigate this");
+    }
+  });
+
+  it("uses custom bot username for matching", () => {
+    const result = mapWebhookToEvent(
+      "issue_comment",
+      commentPayload("@mybot help"),
+      "mybot"
+    );
+    expect(result).not.toBeNull();
+    expect(result!.event.type).toBe("mention_command");
   });
 });
 

@@ -14,4 +14,5 @@ export type WorkflowEvent =
   | { type: "label_abandoned"; triggeredBy: string }
   | { type: "triage_label_added"; triggeredBy: string }
   | { type: "label_state_override"; label: string; targetState: string; triggeredBy: string }
-  | { type: "issue_closed_externally"; triggeredBy: string };
+  | { type: "issue_closed_externally"; triggeredBy: string }
+  | { type: "mention_command"; command: string; body: string; issueNumber: number; triggeredBy: string; commentId: number };

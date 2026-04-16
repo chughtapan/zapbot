@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0 (2026-04-16)
+
+Talk to zapbot in comments. @mention the bot in any issue or PR to trigger workflows, check status, or forward messages to running agents.
+
+### Added
+
+- **@mention triggers** — type `@zapbot plan this`, `@zapbot status`, `@zapbot help`, or any command in a GitHub comment. The bot reacts with eyes emoji, auto-assigns itself, and dispatches the right agent. Mentions inside code blocks and blockquotes are ignored.
+- **Assignment-based entry point** — assigning an issue to the bot starts a workflow. Labels determine which agent spawns (triage, planner, implementer, QE).
+- **Nudge-before-kill** — heartbeat checker sends "continue" to idle agents via tmux before timing out. Reduces unnecessary agent restarts.
+- **One-click deploy configs** — Render and Railway deploy buttons in the README. GitHub App setup guide with step-by-step instructions.
+- **Teammate install** — `curl | bash` one-liner downloads skill files without cloning the repo.
+
+### Changed
+
+- **GitHub client migrated to Octokit** — replaced hand-rolled REST client with `@octokit/rest`. GitHub App auth uses `@octokit/auth-app` for automatic token refresh.
+- **Comment prefix removed** — bot comments no longer start with `**Zapbot:**` (redundant when the bot account is visible).
+- **Mention parsing extracted** — `parseMentionCommand()` and `stripQuotedContent()` in `src/webhook/mapper.ts`, fully tested and importable.
+
+### Fixed
+
+- **Cleanup workflow ID parsing** — uses DB lookup instead of broken regex that couldn't parse `wf-owner-repo-N` format.
+- **Live agent progress** — GitHub comments update in real time as agents work.
+- **Claude Code project path encoding** — fixed path encoding for project directories with special characters.
+- **Worktree path backfill** — agents spawned before tracking fix now get their worktree path populated.
+
 ## 0.4.3 (2026-04-15)
 
 Railway gateway service. Static HTTPS URL replaces ngrok for GitHub webhooks.

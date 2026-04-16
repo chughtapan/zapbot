@@ -82,8 +82,8 @@ zapbot/                              # Globally installed at ~/.claude/skills/za
 │   │   ├── index.ts                 # Server entry point, liveness sweep, graceful shutdown
 │   │   └── registry.ts              # In-memory bridge registry (register, deregister, sweep)
 │   ├── test/
-│   │   ├── gateway-endpoints.test.ts # Gateway HTTP endpoint tests (18 tests)
-│   │   └── registry.test.ts         # Registry unit tests (13 tests)
+│   │   ├── gateway-endpoints.test.ts # Gateway HTTP endpoint tests
+│   │   └── registry.test.ts         # Registry unit tests
 │   ├── package.json                 # Standalone Bun service (no shared deps with root)
 │   ├── railway.json                 # Railway deployment config
 │   └── .env.example                 # Environment variable documentation
@@ -123,10 +123,10 @@ your-project/
 ## Running tests
 
 ```bash
-# Root unit tests (248 tests across 16 files, runs in ~400ms)
+# Run all unit tests
 bun test
 
-# Gateway unit tests (31 tests across 2 files)
+# Gateway unit tests
 cd gateway && bun test
 
 # E2E smoke tests (needs gh CLI, a test repo, and running bridge)
@@ -169,8 +169,8 @@ real GitHub issues and need the bridge running.
 | `skills/zapbot-status/SKILL.md` | Workflow status checker | Changing /zapbot-status behavior |
 | `templates/zapbot-bridge.service` | Systemd unit template | Changing service configuration |
 | `src/config/reload.ts` | SIGHUP config reload (parseEnvFile, reloadConfigFromDisk) | Changing hot-reload behavior |
-| `test/*.test.ts` | Vitest unit tests (248 tests across 16 files) | Adding tests for new features |
-| `gateway/test/*.test.ts` | Gateway service tests (31 tests across 2 files) | Adding gateway tests |
+| `test/*.test.ts` | Vitest unit tests | Adding tests for new features |
+| `gateway/test/*.test.ts` | Gateway service tests | Adding gateway tests |
 | `test/e2e-smoke.sh` | E2E test suite | Adding integration tests |
 
 ## Adding a new repo
