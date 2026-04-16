@@ -271,7 +271,13 @@ ZAPBOT_API_KEY=${GENERATED_SECRET}
 # Gateway mode (replaces ngrok): set these to register with the Railway gateway.
 # The gateway receives GitHub webhooks and forwards them to your bridge.
 # ZAPBOT_GATEWAY_URL=https://zapbot-gateway.up.railway.app
+#
+# Auth option 1 (recommended): Supabase JWT token
+# ZAPBOT_GATEWAY_TOKEN=<your Supabase JWT>
+#
+# Auth option 2 (legacy, deprecated): Shared secret
 # ZAPBOT_GATEWAY_SECRET=<must match GATEWAY_SECRET on the gateway>
+#
 # ZAPBOT_BRIDGE_URL=<public URL of this bridge, e.g. your tunnel URL>
 EOF
   echo "  Generated .env with webhook secret"
@@ -284,9 +290,10 @@ fi
 echo ""
 echo "--- Webhook setup ---"
 echo "  Option A (recommended): Use the gateway."
-echo "    1. Set ZAPBOT_GATEWAY_URL and ZAPBOT_GATEWAY_SECRET in .env"
-echo "    2. Set ZAPBOT_BRIDGE_URL to your bridge's public URL"
-echo "    3. Run ./start.sh — it registers with the gateway automatically"
+echo "    1. Set ZAPBOT_GATEWAY_URL in .env"
+echo "    2. Set ZAPBOT_GATEWAY_TOKEN (Supabase JWT) or ZAPBOT_GATEWAY_SECRET (legacy) in .env"
+echo "    3. Set ZAPBOT_BRIDGE_URL to your bridge's public URL"
+echo "    4. Run ./start.sh — it registers with the gateway automatically"
 echo ""
 echo "  Option B (legacy): Use ngrok."
 echo "    Run ./start.sh — it starts ngrok and registers GitHub webhooks automatically."

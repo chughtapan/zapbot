@@ -18,6 +18,7 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "jose": "^6.2.2",
     "kysely": "^0.28.16",
     "yaml": "^2.8.3"
   }

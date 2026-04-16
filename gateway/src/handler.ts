@@ -11,28 +11,27 @@ import {
   getBridge,
   getAllBridges,
 } from "./registry.js";
+import {
+  verifyRequest,
+  requireRole,
+  requireRepoAccess,
+  type AuthConfig,
+  type GatewayUser,
+  type AuthError,
+} from "./auth.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function errorResponse(status: number, type: string, message: string): Response {
-  return Response.json({ error: { type, message, status } }, { status });
+function errorResponse(status: number, type: string, message: string, extra?: Record<string, string>): Response {
+  return Response.json({ error: { type, message, status, ...extra } }, { status });
 }
 
-function verifyAuth(req: Request, secret: string): boolean {
-  if (!secret) return false;
-  const auth = req.headers.get("authorization");
-  return auth === `Bearer ${secret}`;
-}
-
-async function parseAuthenticatedBody(req: Request, secret: string): Promise<any | Response> {
-  if (!verifyAuth(req, secret)) {
-    return errorResponse(401, "authentication_error", "Invalid or missing gateway secret.");
-  }
-  try {
-    return await req.json();
-  } catch {
-    return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
-  }
+function authErrorResponse(error: AuthError): Response {
+  const status = error.type === "insufficient_role" || error.type === "repo_not_authorized" ? 403 : 401;
+  return Response.json(
+    { error: { type: error.type, message: error.message, fix: error.fix, status } },
+    { status },
+  );
 }
 
 const FORWARDED_HEADERS = [
@@ -48,14 +47,14 @@ const FORWARDED_HEADERS = [
 // ── Config ──────────────────────────────────────────────────────────
 
 export interface GatewayConfig {
-  gatewaySecret: string;
+  authConfig: AuthConfig;
   forwardTimeoutMs: number;
 }
 
 // ── Handler factory ─────────────────────────────────────────────────
 
 export function createFetchHandler(config: GatewayConfig) {
-  const { gatewaySecret, forwardTimeoutMs } = config;
+  const { authConfig, forwardTimeoutMs } = config;
 
   return async function fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -72,15 +71,42 @@ export function createFetchHandler(config: GatewayConfig) {
     }
 
     if (pathname === "/api/bridges/register" && req.method === "POST") {
-      return handleBridgeRegister(req, gatewaySecret);
+      return handleBridgeRegister(req, authConfig);
     }
 
     if (pathname === "/api/bridges/register" && req.method === "DELETE") {
-      return handleBridgeDeregister(req, gatewaySecret);
+      return handleBridgeDeregister(req, authConfig);
+    }
+
+    if (pathname === "/api/auth/me" && req.method === "GET") {
+      return handleAuthMe(req, authConfig);
     }
 
     return errorResponse(404, "not_found", "Resource not found.");
   };
+}
+
+// ── Auth helper ────────────────────────────────────────────────────
+
+async function authenticateRequest(
+  req: Request,
+  authConfig: AuthConfig,
+  requiredRole?: "owner" | "member",
+): Promise<GatewayUser | Response> {
+  const result = await verifyRequest(req, authConfig);
+  if (!result.ok) {
+    return authErrorResponse(result.error);
+  }
+
+  if (requiredRole && !requireRole(result.user, requiredRole)) {
+    return authErrorResponse({
+      type: "insufficient_role",
+      message: `Operation requires ${requiredRole} role, you have ${result.user.role}.`,
+      fix: "Contact bot owner for role upgrade.",
+    });
+  }
+
+  return result.user;
 }
 
 // ── Request handlers ────────────────────────────────────────────────
@@ -131,9 +157,16 @@ async function handleWebhookForward(req: Request, timeoutMs: number): Promise<Re
   }
 }
 
-async function handleBridgeRegister(req: Request, secret: string): Promise<Response> {
-  const body = await parseAuthenticatedBody(req, secret);
-  if (body instanceof Response) return body;
+async function handleBridgeRegister(req: Request, authConfig: AuthConfig): Promise<Response> {
+  const userOrResp = await authenticateRequest(req, authConfig, "owner");
+  if (userOrResp instanceof Response) return userOrResp;
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
+  }
 
   const { repo, bridgeUrl } = body;
   if (!repo || typeof repo !== "string") {
@@ -143,19 +176,54 @@ async function handleBridgeRegister(req: Request, secret: string): Promise<Respo
     return errorResponse(400, "invalid_request", "Missing or invalid 'bridgeUrl' field.");
   }
 
+  if (!requireRepoAccess(userOrResp, repo)) {
+    return authErrorResponse({
+      type: "repo_not_authorized",
+      message: `Not authorized for repo ${repo}.`,
+      fix: "Add repo to your authorized_repos in Supabase.",
+    });
+  }
+
   const entry = registerBridge(repo, bridgeUrl);
   return Response.json({ ok: true, repo: entry.repo, registeredAt: entry.registeredAt });
 }
 
-async function handleBridgeDeregister(req: Request, secret: string): Promise<Response> {
-  const body = await parseAuthenticatedBody(req, secret);
-  if (body instanceof Response) return body;
+async function handleBridgeDeregister(req: Request, authConfig: AuthConfig): Promise<Response> {
+  const userOrResp = await authenticateRequest(req, authConfig, "owner");
+  if (userOrResp instanceof Response) return userOrResp;
+
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
+  }
 
   const { repo } = body;
   if (!repo || typeof repo !== "string") {
     return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
   }
 
+  if (!requireRepoAccess(userOrResp, repo)) {
+    return authErrorResponse({
+      type: "repo_not_authorized",
+      message: `Not authorized for repo ${repo}.`,
+      fix: "Add repo to your authorized_repos in Supabase.",
+    });
+  }
+
   const removed = deregisterBridge(repo);
   return Response.json({ ok: true, removed });
+}
+
+async function handleAuthMe(req: Request, authConfig: AuthConfig): Promise<Response> {
+  const userOrResp = await authenticateRequest(req, authConfig);
+  if (userOrResp instanceof Response) return userOrResp;
+
+  return Response.json({
+    sub: userOrResp.sub,
+    email: userOrResp.email,
+    role: userOrResp.role,
+    authorizedRepos: userOrResp.authorizedRepos,
+  });
 }
