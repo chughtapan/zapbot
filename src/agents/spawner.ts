@@ -6,6 +6,7 @@ import type { Database } from "../store/database.js";
 import { createAgentSession, updateAgentStatus, getAgentSession, incrementRetryCount, updateAgentSessionFields } from "../store/queries.js";
 import { createLogger } from "../logger.js";
 import { findSessionForIssue } from "./session-lookup.js";
+import { getInstallationToken } from "../github/client.js";
 
 const ZAPBOT_DIR = path.resolve(import.meta.dir, "../..");
 
@@ -184,11 +185,16 @@ export async function spawnAgent(
 
     // Build env for ao spawn: it needs AO_CONFIG_PATH to find the yaml,
     // and AO_PROJECT_ID to select the right project in multi-repo setups.
+    // GH_TOKEN makes gh CLI and git operations run as the bot, not the user.
     const spawnEnv: Record<string, string | undefined> = {
       ...process.env,
       ZAPBOT_AGENT_ID: agentId,
       ZAPBOT_AGENT_ROLE: ctx.role,
     };
+    const botToken = await getInstallationToken();
+    if (botToken) {
+      spawnEnv.GH_TOKEN = botToken;
+    }
     if (process.env.ZAPBOT_CONFIG) {
       spawnEnv.AO_CONFIG_PATH = process.env.ZAPBOT_CONFIG;
     }

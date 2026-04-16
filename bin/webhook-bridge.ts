@@ -612,13 +612,42 @@ async function handleMentionCommand(
 
   // ── implement this ────────────────────────────────────────────────
   if (cmdLower === "implement this" || cmdLower === "implement") {
-    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    let wfRow = await getWorkflowByIssue(db, issueNumber, repo);
     if (!wfRow) {
-      await executeSideEffects([{
-        type: "post_comment", issueNumber,
-        body: `No workflow found. Use \`@${BOT_USERNAME} plan this\` first.`,
-      }], repo);
-      return { status: 200, body: "no workflow" };
+      // Create workflow on the fly and spawn implementer
+      try {
+        await gh.assignIssue(repo, issueNumber, [BOT_USERNAME]);
+      } catch (err) {
+        log.warn(`Failed to auto-assign bot to #${issueNumber}: ${err}`);
+      }
+      const intent = `Implementation triggered by @${triggeredBy}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: issueNumber,
+        repo,
+        state: "IMPLEMENTING",
+        level: "sub",
+        parent_workflow_id: null,
+        author: triggeredBy,
+        intent,
+      });
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "IMPLEMENTING",
+        event_type: "mention:implement",
+        triggered_by: triggeredBy,
+        metadata: JSON.stringify({ command, commentId }),
+        github_delivery_id: deliveryId,
+      });
+      await executeSideEffects([
+        { type: "spawn_agent", role: "implementer", issueNumber },
+        { type: "post_comment", issueNumber,
+          body: `Spawning **implementer** agent per @${triggeredBy}'s request.` },
+      ], repo);
+      return { status: 200, body: "implementer spawned (new workflow)" };
     }
 
     log.info(`Spawning implementer for #${issueNumber} via mention`, { issueNumber });
@@ -649,13 +678,42 @@ async function handleMentionCommand(
 
   // ── verify this ──────────────────────────────────────────────────
   if (cmdLower === "verify this" || cmdLower === "verify") {
-    const wfRow = await getWorkflowByIssue(db, issueNumber, repo);
+    let wfRow = await getWorkflowByIssue(db, issueNumber, repo);
     if (!wfRow) {
-      await executeSideEffects([{
-        type: "post_comment", issueNumber,
-        body: `No workflow found. Use \`@${BOT_USERNAME} plan this\` first.`,
-      }], repo);
-      return { status: 200, body: "no workflow" };
+      // Create workflow on the fly and spawn QE
+      try {
+        await gh.assignIssue(repo, issueNumber, [BOT_USERNAME]);
+      } catch (err) {
+        log.warn(`Failed to auto-assign bot to #${issueNumber}: ${err}`);
+      }
+      const intent = `Verification triggered by @${triggeredBy}`;
+      const wfId = makeWorkflowId(repo, issueNumber);
+      await upsertWorkflow(db, {
+        id: wfId,
+        issue_number: issueNumber,
+        repo,
+        state: "VERIFYING",
+        level: "sub",
+        parent_workflow_id: null,
+        author: triggeredBy,
+        intent,
+      });
+      await addTransition(db, {
+        id: `t-${crypto.randomUUID()}`,
+        workflow_id: wfId,
+        from_state: "NEW",
+        to_state: "VERIFYING",
+        event_type: "mention:verify",
+        triggered_by: triggeredBy,
+        metadata: JSON.stringify({ command, commentId }),
+        github_delivery_id: deliveryId,
+      });
+      await executeSideEffects([
+        { type: "spawn_agent", role: "qe", issueNumber },
+        { type: "post_comment", issueNumber,
+          body: `Spawning **QE** agent per @${triggeredBy}'s request.` },
+      ], repo);
+      return { status: 200, body: "qe spawned (new workflow)" };
     }
 
     log.info(`Spawning QE for #${issueNumber} via mention`, { issueNumber });

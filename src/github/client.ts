@@ -195,6 +195,28 @@ function wrapOctokit(octokit: Octokit): GitHubClient {
   };
 }
 
+// ── Installation token for agent sessions ──────────────────────────
+
+let _authInstance: ReturnType<typeof createAppAuth> | null = null;
+
+/**
+ * Get a fresh GitHub App installation token. Agents use this as GH_TOKEN
+ * so gh CLI and git operations run as the bot, not the user.
+ * Returns null if not using GitHub App auth (PAT mode).
+ */
+export async function getInstallationToken(): Promise<string | null> {
+  if (!_authInstance) {
+    const appId = process.env.GITHUB_APP_ID;
+    if (!appId) return null;
+    const privateKey = loadPrivateKey();
+    const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
+    if (!installationId) return null;
+    _authInstance = createAppAuth({ appId, privateKey, installationId });
+  }
+  const auth = await _authInstance({ type: "installation" });
+  return auth.token;
+}
+
 // ── Factory ─────────────────────────────────────────────────────────
 
 export function createGitHubClient(): GitHubClient {
