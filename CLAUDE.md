@@ -13,6 +13,24 @@ Key routing rules:
 - "publish plan", "share plan", "sync plan", "create issue from plan" → invoke zapbot-publish
 - "check status", "workflow status", "what happened to issue" → invoke zapbot-status
 
+## @mention commands (in GitHub issues/PRs)
+
+Users with write access can trigger zapbot by @mentioning it in any issue or PR comment:
+
+| Command | Description |
+|---------|-------------|
+| `@zapbot plan this` | Start a new workflow (triage, plan, implement, verify) |
+| `@zapbot investigate this` | Spawn an investigator agent to debug |
+| `@zapbot implement this` | Spawn an implementer agent |
+| `@zapbot verify this` | Spawn a QE agent to test and verify |
+| `@zapbot status` | Show current workflow state and active agents |
+| `@zapbot retry` | Re-spawn the last failed agent |
+| `@zapbot abandon` | Stop the workflow |
+| `@zapbot help` | Show available commands |
+| `@zapbot <message>` | Send a message to the running agent |
+
+The bot responds with an eyes emoji immediately and auto-assigns itself to the issue.
+
 ## Commands (teammates)
 
 ```
@@ -43,7 +61,8 @@ DRAFT_REVIEW → VERIFYING → DONE. See ARCHITECTURE.md for details.
 - `src/agents/` — Agent spawning, heartbeat, role-specific logic
 - `src/config/` — Config loader for agent-orchestrator.yaml, repo map, per-repo webhook secrets
 - `src/gateway/` — Gateway client (register/deregister/heartbeat with Railway gateway)
-- `src/webhook/` — Webhook event mapping (extracted for testability)
+- `src/webhook/` — Webhook event mapping + @mention parsing (extracted for testability)
+- `src/github/` — GitHub API client (Octokit + GitHub App auth)
 - `src/logger.ts` — Structured logging
 - `bin/` — CLI entry points (webhook-bridge, team-init, publish)
 - `gateway/` — Railway-deployed webhook proxy (routes GitHub webhooks to registered bridges)

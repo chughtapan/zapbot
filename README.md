@@ -21,6 +21,26 @@ Zapbot uses an SDS-inspired two-level state machine:
 | **Implementer** | Writes code from approved plan, creates draft PR |
 | **QE** | Runs tests, verifies quality, ships the PR |
 
+### Interacting with Zapbot
+
+**Via @mention (recommended):** Type `@zapbot <command>` in any issue or PR comment:
+
+```
+@zapbot plan this          # start a new workflow
+@zapbot investigate this   # spawn an investigator to debug
+@zapbot implement this     # spawn an implementer agent
+@zapbot verify this        # spawn a QE agent
+@zapbot status             # check workflow state
+@zapbot retry              # re-spawn a failed agent
+@zapbot abandon            # stop the workflow
+@zapbot help               # list all commands
+@zapbot <any message>      # forward to the running agent
+```
+
+The bot responds with an eyes emoji immediately and auto-assigns itself to the issue.
+
+**Via assignment:** Assign an issue to `zapbot[bot]` to start a workflow. Labels determine which agent to spawn.
+
 ---
 
 ## For Teammates
