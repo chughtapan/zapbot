@@ -54,6 +54,7 @@ into sub-issues     completes when
 | `REVIEW` | `review` | Plan under review via plannotator |
 | `APPROVED` | `plan-approved` | Plan approved, ready for implementation |
 | `IMPLEMENTING` | `implementing` | Implementer agent writing code, creating draft PR |
+| `INVESTIGATING` | `investigating` | Investigator agent debugging or analyzing an issue |
 | `DRAFT_REVIEW` | `draft-review` | Draft PR open, humans reviewing with agent |
 | `VERIFYING` | `verifying` | QE agent running tests, verifying, shipping |
 | `DONE` | (closed) | PR merged, sub-issue closed |
@@ -101,6 +102,7 @@ SQLite database at `~/.zapbot/state.db` managed via Kysely migrations.
 | Triage | Parent enters TRIAGE | Assesses complexity, then: single sub-issue (trivial), multiple ordered sub-issues (decomposable), or design sub-issue + implementation sub-issues (architectural) |
 | Planner | Sub-issue enters PLANNING | Implementation plan, published via plannotator |
 | Implementer | Sub-issue enters APPROVED | Draft PR with code changes |
+| Investigator | `@zapbot investigate this` mention | Root cause analysis and debugging |
 | QE | Draft PR marked ready | Merges PR after verification |
 
 ## API Endpoints
