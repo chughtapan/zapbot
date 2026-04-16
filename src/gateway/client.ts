@@ -46,7 +46,7 @@ async function fetchWithRetry(
 export interface GatewayClientConfig {
   gatewayUrl: string;
   secret?: string;      // ZAPBOT_GATEWAY_SECRET (shared secret)
-  token?: string;       // ZAPBOT_GATEWAY_TOKEN (Supabase JWT)
+  token?: string;       // GitHub App installation token
 }
 
 function getAuthToken(config: GatewayClientConfig): string {
