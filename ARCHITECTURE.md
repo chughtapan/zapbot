@@ -98,7 +98,7 @@ SQLite database at `~/.zapbot/state.db` managed via Kysely migrations.
 
 | Agent | Spawned At | Creates |
 |-------|-----------|---------|
-| Triage | Parent enters TRIAGE | Sub-issues with scoped descriptions |
+| Triage | Parent enters TRIAGE | Assesses complexity, then: single sub-issue (trivial), multiple ordered sub-issues (decomposable), or design sub-issue + implementation sub-issues (architectural) |
 | Planner | Sub-issue enters PLANNING | Implementation plan, published via plannotator |
 | Implementer | Sub-issue enters APPROVED | Draft PR with code changes |
 | QE | Draft PR marked ready | Merges PR after verification |
