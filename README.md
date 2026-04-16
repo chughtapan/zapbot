@@ -161,16 +161,13 @@ your local bridge. Deploy it once, use the URL forever. No ngrok, no dynamic URL
 
 #### One-Click Deploy
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/chughtapan/zapbot&rootDir=gateway&envs=GATEWAY_SECRET&GATEWAY_SECRETDesc=Shared+secret+for+bridge+auth)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/chughtapan/zapbot) Free tier
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/chughtapan/zapbot)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/chughtapan/zapbot&rootDir=gateway&envs=GATEWAY_SECRET&GATEWAY_SECRETDesc=Shared+secret+for+bridge+auth) $5 trial credit
 
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/chughtapan/zapbot)
-
-After deploying, your gateway URL will be something like:
-- Railway: `https://zapbot-gateway-production.up.railway.app`
+After deploying, your gateway URL will be:
 - Render: `https://zapbot-gateway.onrender.com`
-- Heroku: `https://your-app-name.herokuapp.com`
+- Railway: `https://zapbot-gateway-production.up.railway.app`
 
 The webhook endpoint is `<gateway-url>/api/webhooks/github`. Use this when
 setting up your GitHub App's webhook URL.
