@@ -40,3 +40,5 @@ asks for 10 features, create 10 sub-issues (or more), not 3 "simplified" ones.
 ## Commit style:
 - Use conventional commits (feat:, fix:, chore:)
 - Reference the issue number in the commit message: "feat: ... (closes #N)"
+
+Frequently update your task list using TaskCreate/TaskUpdate. Your progress is broadcast to users on GitHub.

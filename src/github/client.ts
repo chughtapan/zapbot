@@ -8,7 +8,8 @@ const API_BASE = "https://api.github.com";
 export interface GitHubClient {
   addLabel(repo: string, issueNumber: number, label: string): Promise<void>;
   removeLabel(repo: string, issueNumber: number, label: string): Promise<void>;
-  postComment(repo: string, issueNumber: number, body: string): Promise<void>;
+  postComment(repo: string, issueNumber: number, body: string): Promise<{ id: number }>;
+  updateComment(repo: string, commentId: number, body: string): Promise<void>;
   closeIssue(repo: string, issueNumber: number): Promise<void>;
   createIssue(repo: string, title: string, body: string, labels: string[]): Promise<string>;
   editIssue(repo: string, issueNumber: number, updates: Record<string, unknown>): Promise<void>;
@@ -94,8 +95,18 @@ function createRestClient(getToken: TokenProvider): GitHubClient {
 
     async postComment(repo, issueNumber, body) {
       log.debug(`Posting comment on #${issueNumber} via API`, { repo, issueNumber });
-      await authedFetch(`/repos/${repo}/issues/${issueNumber}/comments`, {
+      const resp = await authedFetch(`/repos/${repo}/issues/${issueNumber}/comments`, {
         method: "POST",
+        body: JSON.stringify({ body }),
+      });
+      const data = await resp.json() as { id: number };
+      return { id: data.id };
+    },
+
+    async updateComment(repo, commentId, body) {
+      log.debug(`Updating comment ${commentId} via API`, { repo, commentId });
+      await authedFetch(`/repos/${repo}/issues/comments/${commentId}`, {
+        method: "PATCH",
         body: JSON.stringify({ body }),
       });
     },
@@ -306,88 +317,20 @@ function createAppClient(appId: string, privateKey: string, installationId: stri
   return createRestClient(getToken);
 }
 
-// ── Legacy gh CLI client ────────────────────────────────────────────
+// ── Legacy client: resolves token from `gh auth token`, then uses REST ─────
 
 function createLegacyClient(): GitHubClient {
-  async function runGh(args: string[]): Promise<string> {
-    const proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
+  async function resolveGhToken(): Promise<string> {
+    const proc = Bun.spawn(["gh", "auth", "token"], { stdout: "pipe", stderr: "pipe" });
     const output = await new Response(proc.stdout).text();
     const exitCode = await proc.exited;
     if (exitCode !== 0) {
-      const stderr = await new Response(proc.stderr).text();
-      const errMsg = `gh ${args.join(" ")} → ${stderr.trim()}`;
-      log.error(`gh command failed: ${errMsg}`);
-      throw new Error(errMsg);
+      throw new Error("gh auth token failed — is `gh` authenticated?");
     }
     return output.trim();
   }
 
-  return {
-    async addLabel(repo, issueNumber, label) {
-      await runGh(["issue", "edit", String(issueNumber), "--repo", repo, "--add-label", label]);
-    },
-    async removeLabel(repo, issueNumber, label) {
-      await runGh(["issue", "edit", String(issueNumber), "--repo", repo, "--remove-label", label]);
-    },
-    async postComment(repo, issueNumber, body) {
-      await runGh(["issue", "comment", String(issueNumber), "--repo", repo, "--body", body]);
-    },
-    async closeIssue(repo, issueNumber) {
-      await runGh(["issue", "close", String(issueNumber), "--repo", repo]);
-    },
-    async getIssue(repo, issueNumber) {
-      const result = await runGh(["issue", "view", String(issueNumber), "--repo", repo, "--json", "state,body"]);
-      const data = JSON.parse(result) as { state: string; body: string };
-      return { state: data.state?.toLowerCase() === "closed" ? "closed" as const : "open" as const, body: data.body || "" };
-    },
-    async getIssueState(repo, issueNumber) {
-      return (await this.getIssue(repo, issueNumber)).state;
-    },
-    async getIssueBody(repo, issueNumber) {
-      return (await this.getIssue(repo, issueNumber)).body;
-    },
-    async createIssue(repo, title, body, labels) {
-      const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];
-      for (const l of labels) args.push("--label", l);
-      return runGh(args);
-    },
-    async editIssue(repo, issueNumber, updates) {
-      const args = ["issue", "edit", String(issueNumber), "--repo", repo];
-      if (updates.body) args.push("--body", String(updates.body));
-      if (updates.title) args.push("--title", String(updates.title));
-      await runGh(args);
-    },
-    async convertPrToDraft(repo, prNumber) {
-      await runGh(["pr", "ready", String(prNumber), "--repo", repo, "--undo"]);
-    },
-    async listWebhooks(repo) {
-      const output = await runGh(["api", `repos/${repo}/hooks`]);
-      return JSON.parse(output || "[]");
-    },
-    async createWebhook(repo, config) {
-      const output = await runGh([
-        "api", `repos/${repo}/hooks`, "--method", "POST",
-        "-f", `config[url]=${config.url}`,
-        "-f", `config[content_type]=${config.content_type}`,
-        "-f", `config[secret]=${config.secret}`,
-        ...config.events.flatMap((e) => ["-F", `events[]=${e}`]),
-        "-F", `active=${config.active}`,
-        "--jq", ".id",
-      ]);
-      return parseInt(output, 10);
-    },
-    async updateWebhook(repo, hookId, config) {
-      const args = ["api", `repos/${repo}/hooks/${hookId}`, "--method", "PATCH"];
-      if (config.url) args.push("-f", `config[url]=${config.url}`);
-      if (config.content_type) args.push("-f", `config[content_type]=${config.content_type}`);
-      if (config.secret) args.push("-f", `config[secret]=${config.secret}`);
-      if (config.active !== undefined) args.push("-F", `active=${config.active}`);
-      await runGh(args);
-    },
-    async deactivateWebhook(repo, hookId) {
-      await runGh(["api", `repos/${repo}/hooks/${hookId}`, "--method", "PATCH", "-F", "active=false"]);
-    },
-  };
+  return createRestClient(resolveGhToken);
 }
 
 // ── Factory ─────────────────────────────────────────────────────────

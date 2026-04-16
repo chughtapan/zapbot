@@ -22,6 +22,8 @@ import type { SideEffect } from "../src/state-machine/effects.js";
 import type { Workflow } from "../src/state-machine/transitions.js";
 import { spawnAgent, cancelPendingRetries, type AgentRole, type AgentFailureHandler } from "../src/agents/spawner.js";
 import { startHeartbeatChecker, stopHeartbeatChecker } from "../src/agents/heartbeat.js";
+import { cleanupWorkflowSessions, cleanupStaleSessions } from "../src/agents/cleanup.js";
+import { startProgressPoller } from "../src/agents/progress.js";
 import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
@@ -362,6 +364,13 @@ async function checkParentCompletion(parentWorkflowId: string, repo: string): Pr
       trigger: "all_subs_done",
     });
     await executeSideEffects(result.sideEffects, repo);
+
+    // GC: clean up parent workflow sessions when it reaches terminal state
+    if (TERMINAL_STATES.has(result.newState)) {
+      cleanupWorkflowSessions(db, parentWorkflowId).catch((err) =>
+        log.warn(`Parent completion cleanup failed for ${parentWorkflowId}: ${err}`)
+      );
+    }
   }
 }
 
@@ -660,6 +669,13 @@ async function handleWebhook(
     }
   }
 
+  // GC: clean up agent sessions when a workflow reaches a terminal state
+  if (TERMINAL_STATES.has(result.newState)) {
+    cleanupWorkflowSessions(db, workflow.id).catch((err) =>
+      log.warn(`Post-transition cleanup failed for ${workflow.id}: ${err}`)
+    );
+  }
+
   return { status: 200, body: `${result.transition.from} → ${result.transition.to}` };
 }
 
@@ -912,6 +928,13 @@ async function main() {
                   event: event.type,
                 });
                 await executeSideEffects(result.sideEffects, wfRow.repo);
+
+                // GC: clean up sessions when agent completion triggers terminal state
+                if (TERMINAL_STATES.has(result.newState)) {
+                  cleanupWorkflowSessions(db, workflow.id).catch((err) =>
+                    log.warn(`Agent-complete cleanup failed for ${workflow.id}: ${err}`)
+                  );
+                }
               }
             }
           }
@@ -1063,6 +1086,17 @@ async function main() {
   // Periodic token cleanup (every hour)
   const tokenCleanupInterval = setInterval(pruneExpiredTokens, 60 * 60 * 1000);
 
+  // Periodic session GC sweep (every hour) — catches leaked sessions
+  const gcSweepInterval = setInterval(() => {
+    cleanupStaleSessions(db).catch((err) => log.error(`GC sweep failed: ${err}`));
+  }, 60 * 60 * 1000);
+
+  // Run initial GC sweep on startup to clean backlog
+  cleanupStaleSessions(db).catch((err) => log.error(`Initial GC sweep failed: ${err}`));
+
+  // Live agent progress poller (updates GitHub comments with task status)
+  const progressPoller = startProgressPoller(db, gh);
+
   // Gateway registration (if configured)
   let gatewayCleanup: (() => Promise<void>) | null = null;
   const gatewayUrl = process.env.ZAPBOT_GATEWAY_URL;
@@ -1097,7 +1131,9 @@ async function main() {
     log.info("Shutting down...");
     stopHeartbeatChecker();
     cancelPendingRetries();
+    progressPoller.stop();
     clearInterval(tokenCleanupInterval);
+    clearInterval(gcSweepInterval);
     if (gatewayCleanup) {
       await gatewayCleanup();
     }
