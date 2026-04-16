@@ -1,0 +1,17 @@
+{
+  "name": "zapbot-gateway",
+  "description": "Webhook gateway that routes GitHub webhooks to registered zapbot bridge instances",
+  "stack": "container",
+  "env": {
+    "GATEWAY_SECRET": {
+      "description": "Shared secret for bridge registration auth. Bridges send this as a Bearer token.",
+      "generator": "secret"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}
