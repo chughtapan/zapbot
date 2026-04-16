@@ -4,8 +4,8 @@ services:
     rootDir: gateway
     runtime: node
     plan: free
-    buildCommand: curl -fsSL https://bun.sh/install | bash && ~/.bun/bin/bun install --production
-    startCommand: ~/.bun/bin/bun run src/index.ts
+    buildCommand: bun install --production
+    startCommand: bun run src/index.ts
     healthCheckPath: /healthz
     envVars:
       - key: GATEWAY_SECRET
