@@ -23,183 +23,133 @@ Zapbot uses an SDS-inspired two-level state machine:
 
 ---
 
-## For Teammates
+## Quick Start (Eng Lead)
 
-### Install (30 seconds)
+Three steps: deploy the gateway, create a GitHub App, start the bridge.
 
-```bash
-git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot && ./setup
-```
+### 1. Deploy the Gateway
 
-This installs the Claude Code skill only. No server infrastructure.
+The gateway gives you a stable HTTPS URL that routes GitHub webhooks to your
+bridge. Deploy it once, use the URL forever.
 
-### Configure
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/chughtapan/zapbot) Free tier
 
-Your eng lead will share a bridge config snippet. When you first run `/zapbot-publish`,
-Claude will ask for your bridge URL and secret and save them to `~/.zapbot/config.json`.
+After deploy, verify: `curl https://your-app.onrender.com/healthz`
 
-### Use
+Your webhook endpoint is `https://your-app.onrender.com/api/webhooks/github`.
 
-In Claude Code:
-- `/zapbot-publish` — publish a plan as a GitHub issue with review link
-- `/zapbot-status` — check workflow status for an issue
+### 2. Create a GitHub App
 
----
-
-## For Eng Leads
-
-### Server Setup
-
-```bash
-git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot && ./setup --server
-```
-
-The `--server` flag installs additional dependencies: ngrok, agent-orchestrator,
-and validates each installation.
-
-### Onboard a Repo
-
-```bash
-bin/zapbot-team-init <owner/repo>
-```
-
-This generates `agent-orchestrator.yaml`, `.env`, GitHub labels, and a config
-snippet to share with teammates.
-
-### Start the Bridge
-
-```bash
-./start.sh [project-dir]
-```
-
-Starts ngrok, configures GitHub webhooks, and launches the agent-orchestrator.
-Webhook bridge on `http://localhost:3000` (configurable via `ZAPBOT_BRIDGE_PORT` in `.env`),
-AO dashboard on `http://localhost:3001` (configurable via `port:` in `agent-orchestrator.yaml`).
-
-### GitHub App Setup
-
-Zapbot needs a GitHub App so it can be assigned to issues and interact with repos
-as `zapbot[bot]`. A GitHub App is preferred over a regular account (no seat consumed,
-proper `[bot]` suffix, fine-grained permissions).
-
-#### 1. Create the App
-
-Create a new GitHub App at https://github.com/settings/apps/new and fill in:
+Create a new app at https://github.com/settings/apps/new:
 
 | Field | Value |
 |-------|-------|
-| App name | `zapbot` (or any name you like) |
-| Homepage URL | Your repo URL or `https://github.com` |
-| Webhook URL | Your gateway URL + `/api/webhooks/github` (deploy the gateway first, see below) |
-| Webhook secret | A random secret (save this, you'll need it for `ZAPBOT_API_KEY`) |
+| App name | Pick any name (shows as `your-name[bot]` on issues) |
+| Homepage URL | `https://github.com/chughtapan/zapbot` |
+| Webhook URL | `https://your-app.onrender.com/api/webhooks/github` |
+| Webhook secret | Run `openssl rand -hex 32` and save the output |
 
-#### 2. Set Permissions
-
-Under **Repository permissions**:
+**Permissions** (Repository):
 
 | Permission | Access |
 |------------|--------|
 | Issues | Read & write |
 | Pull requests | Read & write |
 | Contents | Read & write |
-| Metadata | Read-only |
+| Checks | Read-only |
+| Commit statuses | Read-only |
 
-Under **Organization permissions**: none needed.
+**Events:** Issues, Issue comment, Pull request, Pull request review, Check run, Check suite
 
-#### 3. Subscribe to Events
+After creating:
 
-Check these boxes under **Subscribe to events**:
+1. Note the **App ID** from the app's General page
+2. Generate a **private key** (`.pem` file), save to `~/.zapbot/`
+3. Click **Install App**, select your repos
+4. Note the **Installation ID** from `https://github.com/settings/installations/<ID>`
 
-- [x] Issues
-- [x] Issue comment
-- [x] Pull request
-- [x] Pull request review
-
-#### 4. Generate a Private Key
-
-After creating the app, scroll to **Private keys** and click **Generate a private key**.
-Save the downloaded `.pem` file somewhere safe (e.g. `~/.zapbot/zapbot-app.pem`).
-
-#### 5. Install the App
-
-Go to your app's page → **Install App** → select your account/org → choose
-**Only select repositories** → pick the repos zapbot should manage.
-
-After installing, note the **Installation ID** from the URL:
-`https://github.com/settings/installations/<INSTALLATION_ID>`
-
-#### 6. Configure Environment
-
-Add these to your `.env`:
+### 3. Configure and Start the Bridge
 
 ```bash
-GITHUB_APP_ID=<your-app-id>              # from the app's General page
-GITHUB_APP_PRIVATE_KEY=~/.zapbot/zapbot-app.pem  # path to .pem file
-GITHUB_APP_INSTALLATION_ID=<installation-id>     # from step 5
+git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
+cd ~/.claude/skills/zapbot && ./setup --server
 ```
 
-The bridge auto-detects GitHub App auth when `GITHUB_APP_ID` is set. It takes
-priority over `ZAPBOT_GITHUB_TOKEN` (PAT mode).
-
-#### 7. Verify
-
-Restart the bridge and check the logs for:
-
-```
-Using GitHub App for API calls  appId=<your-app-id> installationId=<id>
-```
-
-The bot will now appear as `zapbot[bot]` (or `your-app-name[bot]`) and can be
-assigned to issues to trigger workflows.
-
-### Gateway (replaces ngrok)
-
-The `gateway/` service provides a stable HTTPS URL that routes GitHub webhooks to
-your local bridge. Deploy it once, use the URL forever. No ngrok, no dynamic URLs.
-
-#### One-Click Deploy
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/chughtapan/zapbot) Free tier
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/chughtapan/zapbot&rootDir=gateway&envs=GATEWAY_SECRET&GATEWAY_SECRETDesc=Shared+secret+for+bridge+auth) $5 trial credit
-
-After deploying, your gateway URL will be:
-- Render: `https://zapbot-gateway.onrender.com`
-- Railway: `https://zapbot-gateway-production.up.railway.app`
-
-The webhook endpoint is `<gateway-url>/api/webhooks/github`. Use this when
-setting up your GitHub App's webhook URL.
-
-Verify it's running: `curl <gateway-url>/healthz`
-
-#### Manual Deploy
+Create `~/.zapbot/.env`:
 
 ```bash
-cd gateway && bun run src/index.ts   # start locally
+ZAPBOT_API_KEY=<webhook-secret-from-step-2>
+ZAPBOT_CONFIG=~/.zapbot/agent-orchestrator.yaml
+
+GITHUB_APP_ID=<app-id>
+GITHUB_APP_PRIVATE_KEY=~/.zapbot/<your-app>.pem
+GITHUB_APP_INSTALLATION_ID=<installation-id>
+ZAPBOT_BOT_USERNAME=<your-app-name>[bot]
+
+ZAPBOT_GATEWAY_URL=https://your-app.onrender.com
+ZAPBOT_GATEWAY_SECRET=<gateway-secret-from-render-dashboard>
+ZAPBOT_BRIDGE_URL=http://<your-server-ip>:3000
 ```
 
-Or with Docker:
+Onboard your repo and start:
 
 ```bash
-cd gateway && docker build -t zapbot-gateway .
-docker run -p 8080:8080 -e GATEWAY_SECRET=<your-secret> zapbot-gateway
+bin/zapbot-team-init <owner/repo>
+./start.sh --gateway
 ```
 
-See `gateway/.env.example` for all configuration options.
+You should see:
 
-#### Environment Variables
+```
+Using GitHub App for API calls  appId=<id> installationId=<id>
+Registered 1 repo(s) with gateway at https://your-app.onrender.com
+```
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GATEWAY_SECRET` | Yes (unless using JWT) | Shared secret for bridge registration auth |
-| `PORT` | No (default: 8080) | Port to listen on (set automatically by Railway/Render/Heroku) |
-| `SUPABASE_JWT_SECRET` | No | JWT secret for Supabase-based auth (advanced) |
+### Alternative: Personal Access Token
 
-### Multi-Repo Support
+If you don't want to create a GitHub App, you can use a personal access token
+from a dedicated GitHub account instead. Create the account, generate a
+[fine-grained PAT](https://github.com/settings/personal-access-tokens/new)
+with Issues, Pull requests, and Contents permissions, then set:
 
-Define multiple projects in `agent-orchestrator.yaml`:
+```bash
+ZAPBOT_GITHUB_TOKEN=<pat>
+ZAPBOT_BOT_USERNAME=<account-username>
+```
+
+The bot will appear as a regular user, not `[bot]`. You'll need to assign
+issues to this account to trigger workflows.
+
+---
+
+## For Teammates
+
+### Install (10 seconds)
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
+cd ~/.claude/skills/zapbot && git sparse-checkout set skills
+```
+
+This pulls only the Claude Code skill files (~36KB), not the full server codebase.
+
+### Configure
+
+Your eng lead will share a bridge URL and secret. When you first run `/zapbot-publish`,
+Claude will ask for these and save them to `~/.zapbot/config.json`.
+
+### Use
+
+In Claude Code:
+- `/zapbot-publish` -- publish a plan as a GitHub issue with review link
+- `/zapbot-status` -- check workflow status for an issue
+
+---
+
+## Multi-Repo Support
+
+Define multiple projects in `~/.zapbot/agent-orchestrator.yaml`:
 
 ```yaml
 projects:
@@ -222,12 +172,35 @@ projects:
 The bridge routes webhooks by `repository.full_name`, verifies HMAC signatures
 with per-repo secrets, and passes `--project` context to `ao spawn`.
 
-### Development
+---
+
+## Development
 
 ```bash
 bun test              # run unit tests
 bun run bridge        # start webhook bridge directly
 ./test/e2e-smoke.sh   # end-to-end smoke test
+```
+
+## Other Deploy Options
+
+The gateway is a plain Bun HTTP server. Besides Render, you can deploy it anywhere:
+
+**Railway** ($5 trial credit):
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template?template=https://github.com/chughtapan/zapbot&rootDir=gateway&envs=GATEWAY_SECRET&GATEWAY_SECRETDesc=Shared+secret+for+bridge+auth)
+
+**Docker** (any cloud or self-hosted):
+
+```bash
+cd gateway && docker build -t zapbot-gateway .
+docker run -p 8080:8080 -e GATEWAY_SECRET=<your-secret> zapbot-gateway
+```
+
+**Bare Bun** (run directly on your server):
+
+```bash
+cd gateway && bun install && GATEWAY_SECRET=<secret> bun run src/index.ts
 ```
 
 ## Architecture

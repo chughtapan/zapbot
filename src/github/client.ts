@@ -66,7 +66,6 @@ async function ghFetch(
 // ── REST client (shared by token + app modes) ──────────────────────
 
 function createRestClient(getToken: TokenProvider): GitHubClient {
-  /** Resolve token then delegate to ghFetch. */
   async function authedFetch(path: string, options: RequestInit = {}): Promise<Response> {
     return ghFetch(await getToken(), path, options);
   }
@@ -317,26 +316,10 @@ function createAppClient(appId: string, privateKey: string, installationId: stri
   return createRestClient(getToken);
 }
 
-// ── Legacy client: resolves token from `gh auth token`, then uses REST ─────
-
-function createLegacyClient(): GitHubClient {
-  async function resolveGhToken(): Promise<string> {
-    const proc = Bun.spawn(["gh", "auth", "token"], { stdout: "pipe", stderr: "pipe" });
-    const output = await new Response(proc.stdout).text();
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) {
-      throw new Error("gh auth token failed — is `gh` authenticated?");
-    }
-    return output.trim();
-  }
-
-  return createRestClient(resolveGhToken);
-}
-
 // ── Factory ─────────────────────────────────────────────────────────
 
 export function createGitHubClient(): GitHubClient {
-  // Priority 1: GitHub App auth
+  // Priority 1: GitHub App auth (recommended)
   const appId = process.env.GITHUB_APP_ID;
   if (appId) {
     const privateKey = loadPrivateKey();
@@ -348,18 +331,14 @@ export function createGitHubClient(): GitHubClient {
     return createAppClient(appId, privateKey, installationId);
   }
 
-  // Priority 2: PAT / legacy
-  const mode = process.env.ZAPBOT_AUTH_MODE || "bot";
+  // Priority 2: Personal access token
   const token = process.env.ZAPBOT_GITHUB_TOKEN;
-
-  if (mode === "legacy" || !token) {
-    if (mode !== "legacy" && !token) {
-      log.warn("ZAPBOT_GITHUB_TOKEN not set, falling back to gh CLI (legacy mode)");
-    }
-    log.info("Using legacy gh CLI for GitHub API calls");
-    return createLegacyClient();
+  if (token) {
+    log.info("Using personal access token for GitHub API calls");
+    return createTokenClient(token);
   }
 
-  log.info("Using bot token for GitHub API calls");
-  return createTokenClient(token);
+  throw new Error(
+    "No GitHub credentials configured. Set GITHUB_APP_ID (recommended) or ZAPBOT_GITHUB_TOKEN in your .env"
+  );
 }

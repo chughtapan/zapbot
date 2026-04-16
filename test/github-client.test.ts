@@ -28,43 +28,16 @@ describe("GitHub client factory", () => {
     process.env = { ...originalEnv };
   });
 
-  it("falls back to legacy mode when ZAPBOT_GITHUB_TOKEN is not set", async () => {
+  it("throws when no credentials are configured", async () => {
     delete process.env.ZAPBOT_GITHUB_TOKEN;
-    delete process.env.ZAPBOT_AUTH_MODE;
     delete process.env.GITHUB_APP_ID;
 
     const { createGitHubClient } = await import("../src/github/client.js");
-    const client = createGitHubClient();
-
-    expect(client).toBeDefined();
-    expect(typeof client.addLabel).toBe("function");
-    expect(typeof client.removeLabel).toBe("function");
-    expect(typeof client.postComment).toBe("function");
-    expect(typeof client.closeIssue).toBe("function");
-    expect(typeof client.createIssue).toBe("function");
-    expect(typeof client.editIssue).toBe("function");
-    expect(typeof client.convertPrToDraft).toBe("function");
-    expect(typeof client.listWebhooks).toBe("function");
-    expect(typeof client.createWebhook).toBe("function");
-    expect(typeof client.updateWebhook).toBe("function");
-    expect(typeof client.deactivateWebhook).toBe("function");
+    expect(() => createGitHubClient()).toThrow("No GitHub credentials configured");
   });
 
-  it("uses bot mode when ZAPBOT_GITHUB_TOKEN is set", async () => {
+  it("uses token mode when ZAPBOT_GITHUB_TOKEN is set", async () => {
     process.env.ZAPBOT_GITHUB_TOKEN = "test-token-123";
-    delete process.env.ZAPBOT_AUTH_MODE;
-    delete process.env.GITHUB_APP_ID;
-
-    const { createGitHubClient } = await import("../src/github/client.js");
-    const client = createGitHubClient();
-
-    expect(client).toBeDefined();
-    expect(typeof client.addLabel).toBe("function");
-  });
-
-  it("forces legacy mode when ZAPBOT_AUTH_MODE=legacy", async () => {
-    process.env.ZAPBOT_GITHUB_TOKEN = "test-token-123";
-    process.env.ZAPBOT_AUTH_MODE = "legacy";
     delete process.env.GITHUB_APP_ID;
 
     const { createGitHubClient } = await import("../src/github/client.js");
