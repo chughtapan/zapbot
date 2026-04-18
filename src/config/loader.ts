@@ -22,8 +22,6 @@ export interface ProjectConfig {
   repo: string;
   path: string;
   defaultBranch: string;
-  sessionPrefix: string;
-  agentRulesFile: string;
   scm: ScmConfig;
 }
 
@@ -77,13 +75,11 @@ export function loadConfig(configPath?: string): {
           repo: singleRepo,
           path: process.cwd(),
           defaultBranch: "main",
-          sessionPrefix: (singleRepo.split("/").pop() || "zap").slice(0, 3),
-          agentRulesFile: ".agent-rules.md",
           scm: {
             plugin: "github",
             webhook: {
               path: "/api/webhooks/github",
-              secretEnvVar: "ZAPBOT_API_KEY",
+              secretEnvVar: "ZAPBOT_WEBHOOK_SECRET",
               signatureHeader: "x-hub-signature-256",
               eventHeader: "x-github-event",
             },
@@ -128,7 +124,7 @@ export function resolveWebhookSecret(
   if (!entry) return sharedSecret;
 
   const envVar = entry.config.scm?.webhook?.secretEnvVar;
-  if (envVar && envVar !== "ZAPBOT_API_KEY") {
+  if (envVar && envVar !== "ZAPBOT_WEBHOOK_SECRET") {
     const perRepoSecret = process.env[envVar];
     if (perRepoSecret) return perRepoSecret;
   }

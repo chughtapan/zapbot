@@ -43,7 +43,7 @@ describe("reloadConfigFromDisk", () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-reload-test-"));
     // Save env vars we'll modify
-    originalEnv.ZAPBOT_API_KEY = process.env.ZAPBOT_API_KEY;
+    originalEnv.ZAPBOT_WEBHOOK_SECRET = process.env.ZAPBOT_WEBHOOK_SECRET;
     originalEnv.ZAPBOT_REPO = process.env.ZAPBOT_REPO;
   });
 
@@ -61,7 +61,7 @@ describe("reloadConfigFromDisk", () => {
 
   it("reloads config from valid .env file", () => {
     const envFile = path.join(tmpDir, ".env");
-    fs.writeFileSync(envFile, "ZAPBOT_API_KEY=new-secret-123\nZAPBOT_REPO=owner/repo\n");
+    fs.writeFileSync(envFile, "ZAPBOT_WEBHOOK_SECRET=new-secret-123\nZAPBOT_REPO=owner/repo\n");
 
     const result = reloadConfigFromDisk(envFile, undefined, "old-secret");
     expect(result).not.toBeNull();
@@ -71,18 +71,18 @@ describe("reloadConfigFromDisk", () => {
 
   it("detects when secret has not rotated", () => {
     const envFile = path.join(tmpDir, ".env");
-    fs.writeFileSync(envFile, "ZAPBOT_API_KEY=same-secret\nZAPBOT_REPO=owner/repo\n");
+    fs.writeFileSync(envFile, "ZAPBOT_WEBHOOK_SECRET=same-secret\nZAPBOT_REPO=owner/repo\n");
 
     const result = reloadConfigFromDisk(envFile, undefined, "same-secret");
     expect(result).not.toBeNull();
     expect(result!.secretRotated).toBe(false);
   });
 
-  it("returns null when ZAPBOT_API_KEY is empty after re-read", () => {
+  it("returns null when ZAPBOT_WEBHOOK_SECRET is empty after re-read", () => {
     const envFile = path.join(tmpDir, ".env");
     fs.writeFileSync(envFile, "ZAPBOT_REPO=owner/repo\n");
     // Clear the env var so it's empty
-    delete process.env.ZAPBOT_API_KEY;
+    delete process.env.ZAPBOT_WEBHOOK_SECRET;
 
     const result = reloadConfigFromDisk(envFile, undefined, "old-secret");
     expect(result).toBeNull();
@@ -90,7 +90,7 @@ describe("reloadConfigFromDisk", () => {
 
   it("returns null when config YAML fails to parse", () => {
     const envFile = path.join(tmpDir, ".env");
-    fs.writeFileSync(envFile, "ZAPBOT_API_KEY=valid-secret\n");
+    fs.writeFileSync(envFile, "ZAPBOT_WEBHOOK_SECRET=valid-secret\n");
 
     const yamlFile = path.join(tmpDir, "agent-orchestrator.yaml");
     fs.writeFileSync(yamlFile, "this is: [not: valid: yaml: {{{}}}");
@@ -109,7 +109,7 @@ describe("reloadConfigFromDisk", () => {
   });
 
   it("works without envFilePath (config-only reload)", () => {
-    process.env.ZAPBOT_API_KEY = "existing-secret";
+    process.env.ZAPBOT_WEBHOOK_SECRET = "existing-secret";
     process.env.ZAPBOT_REPO = "owner/repo";
 
     const result = reloadConfigFromDisk(undefined, undefined, "old-secret");
@@ -120,7 +120,7 @@ describe("reloadConfigFromDisk", () => {
 
   it("populates repoMap from ZAPBOT_REPO env var", () => {
     const envFile = path.join(tmpDir, ".env");
-    fs.writeFileSync(envFile, "ZAPBOT_API_KEY=secret\nZAPBOT_REPO=org/my-app\n");
+    fs.writeFileSync(envFile, "ZAPBOT_WEBHOOK_SECRET=secret\nZAPBOT_REPO=org/my-app\n");
 
     const result = reloadConfigFromDisk(envFile, undefined, "secret");
     expect(result).not.toBeNull();
@@ -213,14 +213,4 @@ describe("SIGHUP handler: bridge registers signal handler", () => {
     expect(bridge).toContain("reloadConfigFromDisk");
   });
 
-  it("uses let (not const) for reloadable variables", () => {
-    const bridge = fs.readFileSync(
-      path.join(__dirname, "../bin/webhook-bridge.ts"),
-      "utf-8"
-    );
-
-    // WEBHOOK_SECRET and repoMap must be let (not const) so SIGHUP can swap them
-    expect(bridge).toMatch(/let WEBHOOK_SECRET/);
-    expect(bridge).toMatch(/let \{ repoMap \}/);
-  });
 });

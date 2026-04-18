@@ -28,7 +28,7 @@ export function parseEnvFile(content: string): Record<string, string> {
  * validation fails (caller should keep old config).
  *
  * Validation rules:
- * - ZAPBOT_API_KEY must be non-empty after re-read
+ * - ZAPBOT_WEBHOOK_SECRET must be non-empty after re-read
  * - YAML config must parse without error (if configPath provided)
  */
 export function reloadConfigFromDisk(
@@ -49,11 +49,11 @@ export function reloadConfigFromDisk(
     }
 
     const newConfig = loadConfig(configPath);
-    const newSecret = process.env.ZAPBOT_API_KEY;
+    const newSecret = process.env.ZAPBOT_WEBHOOK_SECRET;
 
     // Validate before applying
     if (!newSecret) {
-      log.error("Config reload failed: ZAPBOT_API_KEY is empty after re-read. Keeping old config.");
+      log.error("Config reload failed: ZAPBOT_WEBHOOK_SECRET is empty after re-read. Keeping old config.");
       return null;
     }
 

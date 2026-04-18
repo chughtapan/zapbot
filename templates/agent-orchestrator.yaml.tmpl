@@ -1,33 +1,22 @@
 port: 3000
-bridge_url: http://localhost:3000  # Set to your ngrok/tunnel URL for remote access
-
-defaults:
-  runtime: tmux
-  agent: claude-code
-  workspace: worktree
-  notifiers: [desktop]
-  maxAgentsPerRepo: 5
 
 # Each key under `projects:` is a project name. The bridge builds a
 # repo -> projectName lookup from these entries so incoming webhooks
 # are routed to the correct project automatically.
 #
 # To add another repo, duplicate a project block with a unique key,
-# repo, path, and sessionPrefix. Or run:
+# repo, and path. Or run:
 #   zapbot-team-init --add-repo <owner/repo>
 projects:
   {{REPO_NAME}}:
     repo: {{REPO}}
     path: {{REPO_PATH}}
     defaultBranch: main
-    sessionPrefix: zap
-    agentRulesFile: .agent-rules.md
-
     scm:
       plugin: github
       webhook:
         path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_API_KEY
+        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event
 
@@ -36,8 +25,6 @@ projects:
   #   repo: owner/frontend-app
   #   path: /path/to/frontend-app
   #   defaultBranch: main
-  #   sessionPrefix: fe
-  #   agentRulesFile: .agent-rules.md
   #   scm:
   #     plugin: github
   #     webhook:
@@ -45,16 +32,3 @@ projects:
   #       secretEnvVar: ZAPBOT_API_KEY
   #       signatureHeader: x-hub-signature-256
   #       eventHeader: x-github-event
-
-reactions:
-  ci-failed:
-    auto: true
-    action: send-to-agent
-    retries: 2
-  changes-requested:
-    auto: true
-    action: send-to-agent
-    escalateAfter: 30m
-  approved-and-green:
-    auto: false
-    action: notify
