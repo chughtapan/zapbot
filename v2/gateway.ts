@@ -128,6 +128,86 @@ export type ClassifiedWebhook =
       readonly triggeredBy: string;
     };
 
+// ── Boundary schema: issue_comment payload ──────────────────────────
+
+interface IssueCommentPayload {
+  readonly action: string;
+  readonly comment: { readonly id: number; readonly body: string };
+  readonly issue: { readonly number: number; readonly isPullRequest: boolean };
+  readonly sender: { readonly login: string };
+}
+
+type DecodeResult =
+  | { readonly kind: "decoded"; readonly value: IssueCommentPayload }
+  | { readonly kind: "invalid"; readonly reason: string }
+  | { readonly kind: "other_event"; readonly reason: string };
+
+/**
+ * Validate the shape of an issue_comment webhook payload. Returns `decoded`
+ * on success, `other_event` when the payload is structurally valid JSON that
+ * isn't an issue_comment we care about (→ caller should ignore), or `invalid`
+ * when the shape is wrong (→ caller should reject).
+ */
+function decodeIssueCommentPayload(
+  payload: unknown,
+  eventType: string
+): DecodeResult {
+  if (payload === null || typeof payload !== "object") {
+    return { kind: "invalid", reason: "payload is not an object" };
+  }
+  if (eventType !== "issue_comment") {
+    return { kind: "other_event", reason: `event ${eventType}` };
+  }
+  const p = payload as Record<string, unknown>;
+  const action = p.action;
+  if (typeof action !== "string") {
+    return { kind: "invalid", reason: "missing string 'action'" };
+  }
+  if (action !== "created") {
+    return { kind: "other_event", reason: `action ${action}` };
+  }
+
+  const comment = p.comment;
+  if (comment === null || typeof comment !== "object") {
+    return { kind: "invalid", reason: "missing 'comment' object" };
+  }
+  const c = comment as Record<string, unknown>;
+  if (typeof c.id !== "number" || typeof c.body !== "string") {
+    return { kind: "invalid", reason: "comment.id/body malformed" };
+  }
+
+  const issue = p.issue;
+  if (issue === null || typeof issue !== "object") {
+    return { kind: "invalid", reason: "missing 'issue' object" };
+  }
+  const i = issue as Record<string, unknown>;
+  if (typeof i.number !== "number") {
+    return { kind: "invalid", reason: "issue.number malformed" };
+  }
+
+  const sender = p.sender;
+  if (sender === null || typeof sender !== "object") {
+    return { kind: "invalid", reason: "missing 'sender' object" };
+  }
+  const s = sender as Record<string, unknown>;
+  if (typeof s.login !== "string") {
+    return { kind: "invalid", reason: "sender.login malformed" };
+  }
+
+  return {
+    kind: "decoded",
+    value: {
+      action,
+      comment: { id: c.id, body: c.body },
+      issue: {
+        number: i.number,
+        isPullRequest: i.pull_request !== undefined && i.pull_request !== null,
+      },
+      sender: { login: s.login },
+    },
+  };
+}
+
 /**
  * Verify HMAC, then classify the envelope into either `ignore` or a
  * `mention_command`. Only `issue_comment.created` events whose body mentions
@@ -143,34 +223,20 @@ export async function verifyAndClassify(
   const verified = await verifySignature(envelope.rawBody, envelope.signature, secret);
   if (!verified) return err({ _tag: "SignatureMismatch" });
 
-  const p = envelope.payload as {
-    action?: string;
-    comment?: { id?: number; body?: string };
-    issue?: { number?: number; pull_request?: unknown };
-    sender?: { login?: string };
-  } | null;
-
-  if (!p || typeof p !== "object") {
-    return ok({ kind: "ignore", reason: "payload not an object" });
+  const decoded = decodeIssueCommentPayload(envelope.payload, envelope.eventType);
+  if (decoded.kind === "invalid") {
+    return err({ _tag: "PayloadShapeInvalid", reason: decoded.reason });
+  }
+  if (decoded.kind === "other_event") {
+    return ok({ kind: "ignore", reason: decoded.reason });
   }
 
-  if (envelope.eventType !== "issue_comment" || p.action !== "created") {
-    return ok({ kind: "ignore", reason: `event ${envelope.eventType}.${p.action ?? "?"}` });
-  }
-
-  const actor = p.sender?.login ?? "";
-  if (actor === (botUsername as unknown as string)) {
+  const p = decoded.value;
+  if (p.sender.login === (botUsername as unknown as string)) {
     return ok({ kind: "ignore", reason: "self-mention" });
   }
 
-  const issueNum = p.issue?.number;
-  const commentId = p.comment?.id;
-  const commentBody = p.comment?.body ?? "";
-  if (typeof issueNum !== "number" || typeof commentId !== "number") {
-    return ok({ kind: "ignore", reason: "missing issue/comment id" });
-  }
-
-  const command = parseMention(commentBody, botUsername);
+  const command = parseMention(p.comment.body, botUsername);
   if (command === null) {
     return ok({ kind: "ignore", reason: "no bot mention" });
   }
@@ -178,9 +244,9 @@ export async function verifyAndClassify(
   return ok({
     kind: "mention_command",
     repo: envelope.repo,
-    issue: asIssueNumber(issueNum),
-    commentId: asCommentId(commentId),
+    issue: asIssueNumber(p.issue.number),
+    commentId: asCommentId(p.comment.id),
     command,
-    triggeredBy: actor,
+    triggeredBy: p.sender.login,
   });
 }

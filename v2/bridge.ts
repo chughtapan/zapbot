@@ -13,17 +13,21 @@
 
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
-import { parseMention } from "./mention-parser.ts";
 import { dispatch } from "./ao/dispatcher.ts";
-import { getIssue, listOpenIssuesWithLabel, postComment as ghPostComment } from "./github-state.ts";
+import { getIssue } from "./github-state.ts";
 import {
   absurd,
+  asAoSessionName,
   asDeliveryId,
   asRepoFullName,
+  err,
+  ok,
 } from "./types.ts";
 import type {
   BotUsername,
   DispatchError,
+  GhCallError,
+  HandleOutcome,
   InstallationToken,
   IssueNumber,
   ProjectName,
@@ -31,6 +35,7 @@ import type {
   Result,
 } from "./types.ts";
 import { createGitHubClient, getInstallationToken } from "../src/github/client.ts";
+import { createLogger } from "../src/logger.ts";
 import { errorResponse } from "../src/http/error-response.ts";
 import {
   handleInstallationTokenRequest,
@@ -38,6 +43,27 @@ import {
 } from "../src/http/routes/installation-token.ts";
 
 const WRITE_PERMISSIONS = new Set(["write", "maintain", "admin"]);
+const log = createLogger("v2/bridge");
+
+// ── Typed wrapper around v1 gh.* (which throws) ─────────────────────
+
+/**
+ * Call an async function from the v1 GitHub client and map thrown errors into
+ * a typed `GhCallError`. The bridge never re-throws across a module boundary.
+ * Failures are logged at `warn` so silent catches do not hide regressions.
+ */
+async function safeGh<T>(
+  label: string,
+  fn: () => Promise<T>
+): Promise<Result<T, GhCallError>> {
+  try {
+    return ok(await fn());
+  } catch (e) {
+    const cause = e instanceof Error ? e.message : String(e);
+    log.warn(`gh_call_failed label=${label} cause=${cause}`);
+    return err({ _tag: "GhCallFailed", label, cause });
+  }
+}
 
 // ── Boot config ─────────────────────────────────────────────────────
 
@@ -48,6 +74,7 @@ export interface BridgeConfig {
   readonly gatewaySecret: string | null;
   readonly botUsername: BotUsername;
   readonly aoConfigPath: string;
+  readonly apiKey: string;
   readonly repos: ReadonlyMap<RepoFullName, RepoRoute>;
 }
 
@@ -65,15 +92,18 @@ export interface RunningBridge {
 }
 
 export interface BridgeHandlerContext {
-  readonly mintToken: () => Promise<InstallationToken>;
+  readonly mintToken: () => Promise<Result<InstallationToken, DispatchError>>;
+  readonly gh: GhAdapter;
   readonly config: BridgeConfig;
 }
 
-export type HandleOutcome =
-  | { readonly kind: "ignored"; readonly reason: string }
-  | { readonly kind: "dispatched"; readonly repo: RepoFullName; readonly session: string }
-  | { readonly kind: "unauthorized"; readonly actor: string }
-  | { readonly kind: "command_unknown"; readonly raw: string };
+export interface GhAdapter {
+  readonly addReaction: (repo: RepoFullName, commentId: number, reaction: string) => Promise<Result<void, GhCallError>>;
+  readonly getUserPermission: (repo: RepoFullName, user: string) => Promise<Result<string, GhCallError>>;
+  readonly postComment: (repo: RepoFullName, issue: IssueNumber, body: string) => Promise<Result<void, GhCallError>>;
+}
+
+export type { HandleOutcome } from "./types.ts";
 
 // ── Handler ─────────────────────────────────────────────────────────
 
@@ -98,33 +128,25 @@ async function handleMention(
   c: Extract<ClassifiedWebhook, { kind: "mention_command" }>,
   ctx: BridgeHandlerContext
 ): Promise<Result<HandleOutcome, DispatchError>> {
-  const gh = createGitHubClient();
+  // Eyes reaction for immediate UX feedback (best-effort; log on failure, never bubble).
+  void ctx.gh.addReaction(c.repo, c.commentId as unknown as number, "eyes");
 
-  // Eyes reaction for immediate UX feedback (best-effort).
-  try {
-    await gh.addReaction(c.repo as unknown as string, c.commentId as unknown as number, "eyes");
-  } catch {
-    // ignored
-  }
-
-  // Permission check
-  try {
-    const perm = await gh.getUserPermission(c.repo as unknown as string, c.triggeredBy);
-    if (!WRITE_PERMISSIONS.has(perm)) {
-      await gh.postComment(
-        c.repo as unknown as string,
-        c.issue as unknown as number,
-        `Sorry @${c.triggeredBy}, you need write access to this repo to use commands.`
-      );
-      return { _tag: "Ok", value: { kind: "unauthorized", actor: c.triggeredBy } };
-    }
-  } catch {
-    await gh.postComment(
-      c.repo as unknown as string,
-      c.issue as unknown as number,
+  const permResult = await ctx.gh.getUserPermission(c.repo, c.triggeredBy);
+  if (permResult._tag === "Err") {
+    void ctx.gh.postComment(
+      c.repo,
+      c.issue,
       `Sorry @${c.triggeredBy}, I couldn't verify your permissions right now. Please try again in a moment.`
     );
-    return { _tag: "Ok", value: { kind: "unauthorized", actor: c.triggeredBy } };
+    return ok({ kind: "unauthorized", actor: c.triggeredBy, reason: "permission_check_failed" });
+  }
+  if (!WRITE_PERMISSIONS.has(permResult.value)) {
+    void ctx.gh.postComment(
+      c.repo,
+      c.issue,
+      `Sorry @${c.triggeredBy}, you need write access to this repo to use commands.`
+    );
+    return ok({ kind: "unauthorized", actor: c.triggeredBy, reason: "insufficient_permission" });
   }
 
   const cmd = c.command;
@@ -133,41 +155,38 @@ async function handleMention(
     case "investigate_this": {
       const route = ctx.config.repos.get(c.repo);
       if (route === undefined) {
-        return { _tag: "Err", error: { _tag: "ProjectNotConfigured", repo: c.repo } };
+        return err({ _tag: "ProjectNotConfigured", repo: c.repo });
       }
-      let token: InstallationToken;
-      try {
-        token = await ctx.mintToken();
-      } catch (e) {
-        return { _tag: "Err", error: { _tag: "TokenMintFailed", cause: String(e) } };
-      }
-      const result = await dispatch({
+      const tokenResult = await ctx.mintToken();
+      if (tokenResult._tag === "Err") return tokenResult;
+      const dispatched = await dispatch({
         repo: c.repo,
         issue: c.issue,
         projectName: route.projectName,
         configPath: ctx.config.aoConfigPath,
-        installationToken: token,
+        installationToken: tokenResult.value,
       });
-      if (result._tag === "Err") return result;
-      await gh.postComment(
-        c.repo as unknown as string,
-        c.issue as unknown as number,
-        `Dispatching agent for @${c.triggeredBy}. Session: \`${result.value as unknown as string}\`.`
+      if (dispatched._tag === "Err") return dispatched;
+      const session = asAoSessionName(dispatched.value as unknown as string);
+      void ctx.gh.postComment(
+        c.repo,
+        c.issue,
+        `Dispatching agent for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`
       );
-      return { _tag: "Ok", value: { kind: "dispatched", repo: c.repo, session: result.value as unknown as string } };
+      return ok({ kind: "dispatched", repo: c.repo, session });
     }
     case "status": {
       const summary = await summarizeIssue(c.repo, c.issue);
-      await gh.postComment(c.repo as unknown as string, c.issue as unknown as number, summary);
-      return { _tag: "Ok", value: { kind: "ignored", reason: "status posted" } };
+      void ctx.gh.postComment(c.repo, c.issue, summary);
+      return ok({ kind: "replied", command: "status" });
     }
     case "unknown_command": {
-      await gh.postComment(
-        c.repo as unknown as string,
-        c.issue as unknown as number,
+      void ctx.gh.postComment(
+        c.repo,
+        c.issue,
         `@${c.triggeredBy} I don't recognize the command \`${cmd.raw}\`. Try \`plan this\`, \`investigate this\`, or \`status\`.`
       );
-      return { _tag: "Ok", value: { kind: "command_unknown", raw: cmd.raw } };
+      return ok({ kind: "replied", command: "unknown_command" });
     }
     default:
       return absurd(cmd);
@@ -188,10 +207,40 @@ async function summarizeIssue(repo: RepoFullName, issue: IssueNumber): Promise<s
   return lines.join("\n");
 }
 
-// Re-export so callers at the edge have a one-stop import for postComment.
-export { ghPostComment as postComment, listOpenIssuesWithLabel };
-
 // ── Server boot ─────────────────────────────────────────────────────
+
+/**
+ * Build the default `GhAdapter` that wraps v1 `createGitHubClient()` with
+ * `safeGh`. Tests substitute their own adapter via `BridgeHandlerContext`.
+ */
+export function buildDefaultGhAdapter(): GhAdapter {
+  const gh = createGitHubClient();
+  return {
+    addReaction: (repo, commentId, reaction) =>
+      safeGh("addReaction", () => gh.addReaction(repo as unknown as string, commentId, reaction)),
+    getUserPermission: (repo, user) =>
+      safeGh("getUserPermission", () => gh.getUserPermission(repo as unknown as string, user)),
+    postComment: (repo, issue, body) =>
+      safeGh("postComment", async () => {
+        await gh.postComment(repo as unknown as string, issue as unknown as number, body);
+      }),
+  };
+}
+
+/**
+ * Default `mintToken` implementation — delegates to the v1 singleton
+ * `getInstallationToken` and maps `null`/throw into `DispatchError`.
+ */
+export async function defaultMintToken(): Promise<Result<InstallationToken, DispatchError>> {
+  try {
+    const t = await getInstallationToken();
+    if (!t) return err({ _tag: "TokenMintFailed", cause: "no installation token available" });
+    return ok(t as unknown as InstallationToken);
+  } catch (e) {
+    const cause = e instanceof Error ? e.message : String(e);
+    return err({ _tag: "TokenMintFailed", cause });
+  }
+}
 
 /**
  * Boot the HTTP server, register every configured repo with the gateway,
@@ -200,12 +249,6 @@ export { ghPostComment as postComment, listOpenIssuesWithLabel };
 export async function startBridge(config: BridgeConfig): Promise<RunningBridge> {
   let current = config;
   let stopHeartbeat: (() => void) | null = null;
-
-  const gatewayClient: GatewayClientConfig = {
-    gatewayUrl: current.gatewayUrl,
-    secret: current.gatewaySecret,
-    token: null,
-  };
 
   async function registerAll(cfg: BridgeConfig): Promise<void> {
     const repos = Array.from(cfg.repos.keys());
@@ -235,12 +278,10 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     );
   }
 
+  const ghAdapter = buildDefaultGhAdapter();
   const ctx: BridgeHandlerContext = {
-    mintToken: async () => {
-      const t = await getInstallationToken();
-      if (!t) throw new Error("no installation token available");
-      return t as unknown as InstallationToken;
-    },
+    mintToken: defaultMintToken,
+    gh: ghAdapter,
     get config() {
       return current;
     },
@@ -259,15 +300,13 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       // Installation token broker (paired with safer-by-default#50).
       // Thin wrapper around getInstallationToken() — no new mint path.
       if (pathname === "/api/tokens/installation" && req.method === "GET") {
-        const apiKey = process.env.ZAPBOT_API_KEY;
-        if (!apiKey) {
-          return errorResponse(500, "configuration_error", "ZAPBOT_API_KEY not set.");
-        }
         const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
           mintToken: getInstallationToken,
-          apiKey,
+          apiKey: current.apiKey,
           now: () => new Date(),
         });
+        const clientIp = req.headers.get("x-forwarded-for") ?? "local";
+        log.info(`installation_token.request status=${result.status} client_ip=${clientIp}`);
         return Response.json(result.body, { status: result.status });
       }
 
@@ -311,10 +350,8 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
           switch (e._tag) {
             case "SignatureMismatch":
               return errorResponse(401, "signature_error", "Webhook signature verification failed.");
-            case "InvalidJson":
-              return errorResponse(400, "invalid_request", "Invalid payload.");
-            case "UnconfiguredRepo":
-              return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' is not configured.`);
+            case "PayloadShapeInvalid":
+              return errorResponse(400, "invalid_request", `Malformed issue_comment payload: ${e.reason}.`);
             case "SecretMissing":
               return errorResponse(403, "configuration_error", `No webhook secret for '${e.repo as unknown as string}'.`);
             default:
@@ -346,12 +383,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
 
   await registerAll(current);
 
-  const sighupHandler = () => {
-    // Caller rewires via `running.reload(newConfig)`; the server-side SIGHUP
-    // handler is installed by the CLI entrypoint, not by this function.
-  };
-  void sighupHandler;
-
   const running: RunningBridge = {
     async stop(): Promise<void> {
       if (stopHeartbeat) stopHeartbeat();
@@ -363,9 +394,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       await registerAll(current);
     },
   };
-  // Reference gatewayClient so it's not an unused binding — we use it as the
-  // boot-time snapshot; actual requests read `current`.
-  void gatewayClient;
   return running;
 }
 

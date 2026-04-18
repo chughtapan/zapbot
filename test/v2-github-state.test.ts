@@ -68,12 +68,12 @@ describe("getIssue", () => {
     if (r._tag === "Err") expect(r.error._tag).toBe("IssueNotFound");
   });
 
-  it("returns GhCliMissing when no auth is configured", async () => {
+  it("returns GitHubAuthMissing when no auth is configured", async () => {
     delete process.env.ZAPBOT_GITHUB_TOKEN;
     __resetForTests();
     const r = await getIssue(repo, issue);
     expect(r._tag).toBe("Err");
-    if (r._tag === "Err") expect(r.error._tag).toBe("GhCliMissing");
+    if (r._tag === "Err") expect(r.error._tag).toBe("GitHubAuthMissing");
   });
 });
 

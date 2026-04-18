@@ -34,6 +34,21 @@ export type MentionCommand =
   | { readonly kind: "status" }
   | { readonly kind: "unknown_command"; readonly raw: string };
 
+/**
+ * Typed outcome for `handleClassifiedWebhook` — one tag per observable branch.
+ * `replied` covers status and unknown_command (bridge posted a comment, no
+ * dispatch). `ignored` is reserved for classify passthrough.
+ */
+export type HandleOutcome =
+  | { readonly kind: "ignored"; readonly reason: string }
+  | {
+      readonly kind: "dispatched";
+      readonly repo: RepoFullName;
+      readonly session: AoSessionName;
+    }
+  | { readonly kind: "unauthorized"; readonly actor: string; readonly reason: string }
+  | { readonly kind: "replied"; readonly command: MentionCommand["kind"] };
+
 // ── Errors surfaced across module boundaries ────────────────────────
 
 export type GatewayError =
@@ -42,9 +57,8 @@ export type GatewayError =
   | { readonly _tag: "GatewayAuthMissing" };
 
 export type WebhookIntakeError =
-  | { readonly _tag: "InvalidJson" }
   | { readonly _tag: "SignatureMismatch" }
-  | { readonly _tag: "UnconfiguredRepo"; readonly repo: RepoFullName }
+  | { readonly _tag: "PayloadShapeInvalid"; readonly reason: string }
   | { readonly _tag: "SecretMissing"; readonly repo: RepoFullName };
 
 export type DispatchError =
@@ -53,10 +67,19 @@ export type DispatchError =
   | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName };
 
 export type GithubStateError =
-  | { readonly _tag: "GhCliMissing" }
-  | { readonly _tag: "GhCliFailed"; readonly exitCode: number; readonly stderr: string }
-  | { readonly _tag: "IssueNotFound"; readonly repo: RepoFullName; readonly issue: IssueNumber }
-  | { readonly _tag: "ParseFailed"; readonly raw: string };
+  | { readonly _tag: "GitHubAuthMissing" }
+  | { readonly _tag: "GitHubApiFailed"; readonly status: number; readonly message: string }
+  | { readonly _tag: "IssueNotFound"; readonly repo: RepoFullName; readonly issue: IssueNumber };
+
+/**
+ * Typed error channel for gh.* (v1 GitHub client) calls the bridge makes
+ * in handleMention. These are local wrappers — not a public v2 module.
+ */
+export type GhCallError = {
+  readonly _tag: "GhCallFailed";
+  readonly label: string;
+  readonly cause: string;
+};
 
 // ── Exhaustiveness helper ───────────────────────────────────────────
 

@@ -31,14 +31,15 @@ function buildBridgeConfig(): BridgeConfig {
   const botUsername = asBotUsername(process.env.ZAPBOT_BOT_USERNAME || "zapbot[bot]");
   const aoConfigPath = process.env.ZAPBOT_CONFIG || "";
 
-  if (!process.env.ZAPBOT_API_KEY) {
+  const apiKey = process.env.ZAPBOT_API_KEY;
+  if (!apiKey) {
     console.error("[bridge] ZAPBOT_API_KEY is required. Set it in .env or export it.");
     process.exit(1);
   }
 
   const { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
   const repos = buildRepos(repoMap);
-  return { port, publicUrl, gatewayUrl, gatewaySecret, botUsername, aoConfigPath, repos };
+  return { port, publicUrl, gatewayUrl, gatewaySecret, botUsername, aoConfigPath, apiKey, repos };
 }
 
 function buildRepos(repoMap: RepoMap): ReadonlyMap<import("../v2/types.ts").RepoFullName, RepoRoute> {

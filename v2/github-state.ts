@@ -53,7 +53,7 @@ function splitRepo(repo: RepoFullName): { owner: string; repo: string } {
 function toError(repo: RepoFullName, issue: IssueNumber, e: unknown): GithubStateError {
   const anyErr = e as { status?: number; message?: string };
   if (anyErr?.status === 404) return { _tag: "IssueNotFound", repo, issue };
-  return { _tag: "GhCliFailed", exitCode: anyErr?.status ?? -1, stderr: anyErr?.message ?? String(e) };
+  return { _tag: "GitHubApiFailed", status: anyErr?.status ?? -1, message: anyErr?.message ?? String(e) };
 }
 
 function extractLabels(labels: Array<string | { name?: string | null }>): string[] {
@@ -73,7 +73,7 @@ export async function getIssue(
   issue: IssueNumber
 ): Promise<Result<IssueSnapshot, GithubStateError>> {
   const client = getOctokit();
-  if (client === null) return err({ _tag: "GhCliMissing" });
+  if (client === null) return err({ _tag: "GitHubAuthMissing" });
   const r = splitRepo(repo);
   try {
     const { data } = await client.rest.issues.get({
@@ -113,7 +113,7 @@ export async function listOpenIssuesWithLabel(
   label: string
 ): Promise<Result<ReadonlyArray<IssueSnapshot>, GithubStateError>> {
   const client = getOctokit();
-  if (client === null) return err({ _tag: "GhCliMissing" });
+  if (client === null) return err({ _tag: "GitHubAuthMissing" });
   const r = splitRepo(repo);
   try {
     const { data } = await client.rest.issues.listForRepo({
@@ -146,7 +146,7 @@ export async function postComment(
   body: string
 ): Promise<Result<CommentId, GithubStateError>> {
   const client = getOctokit();
-  if (client === null) return err({ _tag: "GhCliMissing" });
+  if (client === null) return err({ _tag: "GitHubAuthMissing" });
   const r = splitRepo(repo);
   try {
     const { data } = await client.rest.issues.createComment({

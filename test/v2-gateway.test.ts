@@ -102,6 +102,35 @@ describe("verifyAndClassify", () => {
     if (r._tag === "Ok") expect(r.value.kind).toBe("ignore");
   });
 
+  it("rejects a malformed issue_comment.created payload with PayloadShapeInvalid", async () => {
+    // eventType=issue_comment, action=created, but `comment` object missing.
+    const body = JSON.stringify({
+      action: "created",
+      sender: { login: "alice" },
+      issue: { number: 7 },
+      // comment: missing
+    });
+    const env = await buildEnvelope(body, secret);
+    const r = await verifyAndClassify(env, () => secret, bot);
+    expect(r._tag).toBe("Err");
+    if (r._tag === "Err") {
+      expect(r.error._tag).toBe("PayloadShapeInvalid");
+      if (r.error._tag === "PayloadShapeInvalid") {
+        expect(r.error.reason).toContain("comment");
+      }
+    }
+  });
+
+  it("ignores non-object payloads without surfacing an error", async () => {
+    const body = "null";
+    const env = await buildEnvelope(body, secret);
+    const r = await verifyAndClassify(env, () => secret, bot);
+    // null is structurally invalid for issue_comment but we don't want to
+    // 400 on it — gateway treats as decode failure → PayloadShapeInvalid.
+    expect(r._tag).toBe("Err");
+    if (r._tag === "Err") expect(r.error._tag).toBe("PayloadShapeInvalid");
+  });
+
   it("classifies a plan_this mention", async () => {
     const body = JSON.stringify({
       action: "created",
