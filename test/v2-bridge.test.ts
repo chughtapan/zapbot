@@ -64,7 +64,7 @@ function makeConfig(withRoute = true): BridgeConfig {
   if (withRoute) {
     repos.set(repo, {
       projectName: asProjectName("app"),
-      webhookSecretEnvVar: "ZAPBOT_API_KEY",
+      webhookSecretEnvVar: "ZAPBOT_WEBHOOK_SECRET",
       defaultBranch: "main",
     });
   }
@@ -75,7 +75,8 @@ function makeConfig(withRoute = true): BridgeConfig {
     gatewaySecret: null,
     botUsername: bot,
     aoConfigPath: "",
-    apiKey: "test-key",
+    apiKey: "test-broker-key",
+    webhookSecret: "test-webhook-secret",
     repos,
   };
 }

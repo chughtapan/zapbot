@@ -74,7 +74,10 @@ export interface BridgeConfig {
   readonly gatewaySecret: string | null;
   readonly botUsername: BotUsername;
   readonly aoConfigPath: string;
+  /** Bearer for the loopback broker route (GET /api/tokens/installation). */
   readonly apiKey: string;
+  /** HMAC-SHA256 secret for GitHub webhooks. Must differ from `apiKey`. */
+  readonly webhookSecret: string;
   readonly repos: ReadonlyMap<RepoFullName, RepoRoute>;
 }
 
@@ -211,19 +214,146 @@ async function summarizeIssue(repo: RepoFullName, issue: IssueNumber): Promise<s
 
 /**
  * Build the default `GhAdapter` that wraps v1 `createGitHubClient()` with
- * `safeGh`. Tests substitute their own adapter via `BridgeHandlerContext`.
+ * `safeGh`. Client construction is lazy — we do not instantiate the
+ * Octokit until the first call, so `startBridge` boots cleanly in
+ * environments (tests, cold installs) where no GitHub credentials are
+ * configured yet. Construction failure is mapped to a typed `GhCallError`
+ * rather than a boot-time throw.
+ *
+ * Tests substitute their own adapter via `BridgeHandlerContext`.
  */
 export function buildDefaultGhAdapter(): GhAdapter {
-  const gh = createGitHubClient();
+  let cached: ReturnType<typeof createGitHubClient> | null = null;
+  async function lazy<T>(label: string, fn: (gh: ReturnType<typeof createGitHubClient>) => Promise<T>): Promise<Result<T, GhCallError>> {
+    if (cached === null) {
+      try {
+        cached = createGitHubClient();
+      } catch (e) {
+        const cause = e instanceof Error ? e.message : String(e);
+        log.warn(`gh_call_failed label=${label} cause=${cause}`);
+        return err({ _tag: "GhCallFailed", label, cause });
+      }
+    }
+    return safeGh(label, () => fn(cached!));
+  }
   return {
     addReaction: (repo, commentId, reaction) =>
-      safeGh("addReaction", () => gh.addReaction(repo as unknown as string, commentId, reaction)),
+      lazy("addReaction", (gh) => gh.addReaction(repo as unknown as string, commentId, reaction)),
     getUserPermission: (repo, user) =>
-      safeGh("getUserPermission", () => gh.getUserPermission(repo as unknown as string, user)),
+      lazy("getUserPermission", (gh) => gh.getUserPermission(repo as unknown as string, user)),
     postComment: (repo, issue, body) =>
-      safeGh("postComment", async () => {
+      lazy("postComment", async (gh) => {
         await gh.postComment(repo as unknown as string, issue as unknown as number, body);
       }),
+  };
+}
+
+/**
+ * Pure request router. Extracted from `startBridge` so tests can exercise
+ * the HTTP surface without booting `Bun.serve`. `getConfig` is a getter
+ * so SIGHUP reload is visible to the handler without re-building the
+ * closure.
+ */
+export function buildFetchHandler(
+  getConfig: () => BridgeConfig,
+  ctx: BridgeHandlerContext
+): (req: Request) => Promise<Response> {
+  return async (req: Request): Promise<Response> => {
+    const current = getConfig();
+    const url = new URL(req.url);
+    const pathname = url.pathname;
+
+    if (pathname === "/healthz") {
+      return new Response("ok", { status: 200 });
+    }
+
+    // Installation token broker (paired with safer-by-default#50).
+    // Thin wrapper around getInstallationToken() — no new mint path.
+    if (pathname === "/api/tokens/installation" && req.method === "GET") {
+      const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
+        mintToken: getInstallationToken,
+        apiKey: current.apiKey,
+      });
+      const clientIp = req.headers.get("x-forwarded-for") ?? "local";
+      log.info(`installation_token.request status=${result.status} client_ip=${clientIp}`);
+      return Response.json(result.body, { status: result.status });
+    }
+
+    if (pathname === "/api/webhooks/github" && req.method === "POST") {
+      const body = await req.text();
+      const signature = req.headers.get("x-hub-signature-256");
+      const eventType = req.headers.get("x-github-event") ?? "";
+      const deliveryId = req.headers.get("x-github-delivery") ?? "";
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
+      }
+
+      const repoName =
+        (payload as { repository?: { full_name?: string } })?.repository?.full_name ?? "";
+      const repo = asRepoFullName(repoName);
+
+      // Repo enumeration pre-auth oracle: don't distinguish unknown-repo
+      // from bad signature. `verifyAndClassify` will fail HMAC on secret
+      // mismatch regardless; we also refuse unknown repos up front with
+      // the same 401 body so the two states are indistinguishable to an
+      // unauthenticated caller.
+      const configuredAndUnknown =
+        current.repos.size > 0 && repoName !== "" && !current.repos.has(repo);
+
+      const envelope: GatewayWebhookEnvelope = {
+        rawBody: body,
+        signature,
+        eventType,
+        deliveryId: asDeliveryId(deliveryId),
+        repo,
+        payload,
+      };
+
+      const classified = await verifyAndClassify(
+        envelope,
+        (r) => resolveSecret(r, current),
+        current.botUsername
+      );
+
+      if (configuredAndUnknown) {
+        return errorResponse(401, "signature_error", "Webhook signature verification failed.");
+      }
+      if (classified._tag === "Err") {
+        const e = classified.error;
+        switch (e._tag) {
+          case "SignatureMismatch":
+          case "SecretMissing":
+            return errorResponse(401, "signature_error", "Webhook signature verification failed.");
+          case "PayloadShapeInvalid":
+            return errorResponse(400, "invalid_request", `Malformed issue_comment payload: ${e.reason}.`);
+          default:
+            return absurd(e);
+        }
+      }
+
+      const outcome = await handleClassifiedWebhook(classified.value, ctx);
+      if (outcome._tag === "Err") {
+        const e = outcome.error;
+        switch (e._tag) {
+          case "AoSpawnFailed":
+            return errorResponse(502, "dispatch_failed", `ao spawn failed (exit ${e.exitCode}).`);
+          case "TokenMintFailed":
+            return errorResponse(503, "auth_unavailable", "Installation token unavailable.");
+          case "ProjectNotConfigured":
+            return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' not routed.`);
+          default:
+            return absurd(e);
+        }
+      }
+
+      return Response.json({ ok: true, outcome: outcome.value });
+    }
+
+    return errorResponse(404, "not_found", "Resource not found.");
   };
 }
 
@@ -235,7 +365,7 @@ export async function defaultMintToken(): Promise<Result<InstallationToken, Disp
   try {
     const t = await getInstallationToken();
     if (!t) return err({ _tag: "TokenMintFailed", cause: "no installation token available" });
-    return ok(t as unknown as InstallationToken);
+    return ok(t.token as unknown as InstallationToken);
   } catch (e) {
     const cause = e instanceof Error ? e.message : String(e);
     return err({ _tag: "TokenMintFailed", cause });
@@ -287,99 +417,8 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     },
   };
 
-  const server = Bun.serve({
-    port: current.port,
-    async fetch(req) {
-      const url = new URL(req.url);
-      const pathname = url.pathname;
-
-      if (pathname === "/healthz") {
-        return new Response("ok", { status: 200 });
-      }
-
-      // Installation token broker (paired with safer-by-default#50).
-      // Thin wrapper around getInstallationToken() — no new mint path.
-      if (pathname === "/api/tokens/installation" && req.method === "GET") {
-        const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
-          mintToken: getInstallationToken,
-          apiKey: current.apiKey,
-          now: () => new Date(),
-        });
-        const clientIp = req.headers.get("x-forwarded-for") ?? "local";
-        log.info(`installation_token.request status=${result.status} client_ip=${clientIp}`);
-        return Response.json(result.body, { status: result.status });
-      }
-
-      if (pathname === "/api/webhooks/github" && req.method === "POST") {
-        const body = await req.text();
-        const signature = req.headers.get("x-hub-signature-256");
-        const eventType = req.headers.get("x-github-event") ?? "";
-        const deliveryId = req.headers.get("x-github-delivery") ?? "";
-
-        let payload: unknown;
-        try {
-          payload = JSON.parse(body);
-        } catch {
-          return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
-        }
-
-        const repoName = (payload as { repository?: { full_name?: string } })?.repository?.full_name ?? "";
-        const repo = asRepoFullName(repoName);
-
-        if (current.repos.size > 0 && repoName && !current.repos.has(repo)) {
-          return errorResponse(403, "configuration_error", `Repo '${repoName}' is not configured on this bridge.`);
-        }
-
-        const envelope: GatewayWebhookEnvelope = {
-          rawBody: body,
-          signature,
-          eventType,
-          deliveryId: asDeliveryId(deliveryId),
-          repo,
-          payload,
-        };
-
-        const classified = await verifyAndClassify(
-          envelope,
-          (r) => resolveSecret(r, current),
-          current.botUsername
-        );
-
-        if (classified._tag === "Err") {
-          const e = classified.error;
-          switch (e._tag) {
-            case "SignatureMismatch":
-              return errorResponse(401, "signature_error", "Webhook signature verification failed.");
-            case "PayloadShapeInvalid":
-              return errorResponse(400, "invalid_request", `Malformed issue_comment payload: ${e.reason}.`);
-            case "SecretMissing":
-              return errorResponse(403, "configuration_error", `No webhook secret for '${e.repo as unknown as string}'.`);
-            default:
-              return absurd(e);
-          }
-        }
-
-        const outcome = await handleClassifiedWebhook(classified.value, ctx);
-        if (outcome._tag === "Err") {
-          const e = outcome.error;
-          switch (e._tag) {
-            case "AoSpawnFailed":
-              return errorResponse(502, "dispatch_failed", `ao spawn failed (exit ${e.exitCode}).`);
-            case "TokenMintFailed":
-              return errorResponse(503, "auth_unavailable", "Installation token unavailable.");
-            case "ProjectNotConfigured":
-              return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' not routed.`);
-            default:
-              return absurd(e);
-          }
-        }
-
-        return Response.json({ ok: true, outcome: outcome.value });
-      }
-
-      return errorResponse(404, "not_found", "Resource not found.");
-    },
-  });
+  const handler = buildFetchHandler(() => current, ctx);
+  const server = Bun.serve({ port: current.port, fetch: handler });
 
   await registerAll(current);
 
@@ -400,10 +439,9 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
 function resolveSecret(repo: RepoFullName, cfg: BridgeConfig): string | null {
   const route = cfg.repos.get(repo);
   if (!route) {
-    // Fall back to shared secret env var.
-    return process.env.ZAPBOT_API_KEY ?? null;
+    return cfg.webhookSecret;
   }
   const perRepo = process.env[route.webhookSecretEnvVar];
   if (perRepo) return perRepo;
-  return process.env.ZAPBOT_API_KEY ?? null;
+  return cfg.webhookSecret;
 }

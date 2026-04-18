@@ -36,10 +36,35 @@ function buildBridgeConfig(): BridgeConfig {
     console.error("[bridge] ZAPBOT_API_KEY is required. Set it in .env or export it.");
     process.exit(1);
   }
+  const webhookSecret = process.env.ZAPBOT_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    console.error(
+      "[bridge] ZAPBOT_WEBHOOK_SECRET is required (distinct from ZAPBOT_API_KEY). " +
+        "Generate with `openssl rand -hex 32` and set in .env."
+    );
+    process.exit(1);
+  }
+  if (webhookSecret === apiKey) {
+    console.error(
+      "[bridge] ZAPBOT_WEBHOOK_SECRET must not equal ZAPBOT_API_KEY. " +
+        "The webhook HMAC secret and the broker bearer key must be distinct."
+    );
+    process.exit(1);
+  }
 
   const { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
   const repos = buildRepos(repoMap);
-  return { port, publicUrl, gatewayUrl, gatewaySecret, botUsername, aoConfigPath, apiKey, repos };
+  return {
+    port,
+    publicUrl,
+    gatewayUrl,
+    gatewaySecret,
+    botUsername,
+    aoConfigPath,
+    apiKey,
+    webhookSecret,
+    repos,
+  };
 }
 
 function buildRepos(repoMap: RepoMap): ReadonlyMap<import("../v2/types.ts").RepoFullName, RepoRoute> {
@@ -47,7 +72,7 @@ function buildRepos(repoMap: RepoMap): ReadonlyMap<import("../v2/types.ts").Repo
   for (const [repoFullName, entry] of repoMap) {
     result.set(asRepoFullName(repoFullName), {
       projectName: asProjectName(entry.projectName),
-      webhookSecretEnvVar: entry.config.scm?.webhook?.secretEnvVar || "ZAPBOT_API_KEY",
+      webhookSecretEnvVar: entry.config.scm?.webhook?.secretEnvVar || "ZAPBOT_WEBHOOK_SECRET",
       defaultBranch: entry.config.defaultBranch || "main",
     });
   }
@@ -71,7 +96,7 @@ async function main() {
     (async () => {
       try {
         const envPath = process.env.ZAPBOT_CONFIG?.replace(/agent-orchestrator\.yaml$/, ".env");
-        const result = reloadConfigFromDisk(envPath, process.env.ZAPBOT_CONFIG, process.env.ZAPBOT_API_KEY!);
+        const result = reloadConfigFromDisk(envPath, process.env.ZAPBOT_CONFIG, process.env.ZAPBOT_WEBHOOK_SECRET!);
         if (!result) return;
         const next = buildBridgeConfig();
         await running.reload(next);

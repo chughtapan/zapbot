@@ -200,11 +200,23 @@ function wrapOctokit(octokit: Octokit): GitHubClient {
 let _authInstance: ReturnType<typeof createAppAuth> | null = null;
 
 /**
+ * Installation token plus the real `expiresAt` returned by
+ * `@octokit/auth-app`. Callers that need the raw token (legacy v1 paths,
+ * `ao spawn` env) can destructure `.token`; callers that broker the token
+ * across a trust boundary (HTTP) propagate `.expiresAt` so downstream
+ * caches refresh on the real GitHub expiry, not a wall-clock guess.
+ */
+export interface InstallationTokenPair {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
+/**
  * Get a fresh GitHub App installation token. Agents use this as GH_TOKEN
  * so gh CLI and git operations run as the bot, not the user.
  * Returns null if not using GitHub App auth (PAT mode).
  */
-export async function getInstallationToken(): Promise<string | null> {
+export async function getInstallationToken(): Promise<InstallationTokenPair | null> {
   if (!_authInstance) {
     const appId = process.env.GITHUB_APP_ID;
     if (!appId) return null;
@@ -214,7 +226,7 @@ export async function getInstallationToken(): Promise<string | null> {
     _authInstance = createAppAuth({ appId, privateKey, installationId });
   }
   const auth = await _authInstance({ type: "installation" });
-  return auth.token;
+  return { token: auth.token, expiresAt: auth.expiresAt };
 }
 
 // ── Factory ─────────────────────────────────────────────────────────

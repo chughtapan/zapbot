@@ -2,7 +2,7 @@
  * Token-broker endpoint: GET /api/tokens/installation
  *
  * Thin wrapper around the existing _authInstance singleton at
- * src/github/client.ts:200-218 (getInstallationToken). No new mint path.
+ * src/github/client.ts (getInstallationToken). No new mint path.
  *
  * Auth: Authorization: Bearer $ZAPBOT_API_KEY. Bearer match is constant-time
  * (timingSafeEqual). No JWT, no Supabase — this endpoint is local-only on the
@@ -12,6 +12,9 @@
  *   - One mint path. All tokens originate from getInstallationToken().
  *   - No token written to disk. Handler holds the token in-memory only for
  *     the duration of the response.
+ *   - `expires_at` is the real value returned by `@octokit/auth-app`, not a
+ *     wall-clock guess. Propagating the truth lets downstream caches refresh
+ *     at the actual GitHub expiry.
  *   - 409 app_not_configured when getInstallationToken() returns null
  *     (GITHUB_APP_ID or GITHUB_APP_INSTALLATION_ID unset).
  */
@@ -48,10 +51,19 @@ export type InstallationTokenStatus =
 
 // ── Handler dependencies ───────────────────────────────────────────
 
+/**
+ * Minted token + real GitHub App installation expiry (ISO-8601 UTC from
+ * `@octokit/auth-app`). Callers at the bridge edge pass this through to the
+ * broker response body.
+ */
+export interface MintedInstallationToken {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
 export interface InstallationTokenDeps {
-  readonly mintToken: () => Promise<string | null>;
+  readonly mintToken: () => Promise<MintedInstallationToken | null>;
   readonly apiKey: string;
-  readonly now: () => Date;
 }
 
 // ── Exhaustiveness helper ──────────────────────────────────────────
@@ -91,8 +103,6 @@ export function verifyBearer(
 
 // ── Handler ────────────────────────────────────────────────────────
 
-const TOKEN_TTL_MS = 60 * 60 * 1000;
-
 export async function handleInstallationTokenRequest(
   req: Request,
   deps: InstallationTokenDeps,
@@ -102,7 +112,7 @@ export async function handleInstallationTokenRequest(
     return { status: 401, body: authFailure };
   }
 
-  let minted: string | null;
+  let minted: MintedInstallationToken | null;
   try {
     minted = await deps.mintToken();
   } catch {
@@ -124,8 +134,8 @@ export async function handleInstallationTokenRequest(
     };
   }
 
-  const token = minted as InstallationToken;
-  const expires_at = new Date(deps.now().getTime() + TOKEN_TTL_MS).toISOString() as Iso8601;
+  const token = minted.token as InstallationToken;
+  const expires_at = minted.expiresAt as Iso8601;
   return { status: 200, body: { token, expires_at } };
 }
 

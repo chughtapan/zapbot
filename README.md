@@ -39,7 +39,7 @@ Create an app at https://github.com/settings/apps/new with:
 | Field | Value |
 |-------|-------|
 | Webhook URL | `https://<gateway-or-bridge-host>/api/webhooks/github` |
-| Webhook secret | `openssl rand -hex 32` |
+| Webhook secret | `openssl rand -hex 32` (store as `ZAPBOT_WEBHOOK_SECRET`) |
 | Permissions | Issues R/W, Pull requests R/W, Contents R/W, Checks R |
 | Events | Issue comment |
 
@@ -56,7 +56,9 @@ cd ~/.claude/skills/zapbot && ./setup --server
 Create `.env` in your project:
 
 ```bash
-ZAPBOT_API_KEY=<webhook-secret>
+# Two distinct secrets — webhook HMAC vs. broker Bearer.
+ZAPBOT_WEBHOOK_SECRET=<openssl rand -hex 32, also configured on the GitHub App>
+ZAPBOT_API_KEY=<openssl rand -hex 32, bearer for the local broker>
 
 # GitHub App (preferred)
 GITHUB_APP_ID=<app-id>
@@ -105,7 +107,7 @@ projects:
     scm:
       plugin: github
       webhook:
-        secretEnvVar: ZAPBOT_API_KEY
+        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
   frontend:
     repo: chughtapan/frontend-app
     path: /home/user/frontend
@@ -113,7 +115,7 @@ projects:
     scm:
       plugin: github
       webhook:
-        secretEnvVar: ZAPBOT_API_KEY_FRONTEND
+        secretEnvVar: ZAPBOT_WEBHOOK_SECRET_FRONTEND
 ```
 
 The bridge routes by `repository.full_name` and verifies HMAC with the

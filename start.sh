@@ -38,6 +38,15 @@ if [ -z "${ZAPBOT_API_KEY:-}" ]; then
   echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env, or set it manually."
   exit 1
 fi
+if [ -z "${ZAPBOT_WEBHOOK_SECRET:-}" ]; then
+  echo "ERROR: ZAPBOT_WEBHOOK_SECRET is not set."
+  echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env with both secrets."
+  exit 1
+fi
+if [ "${ZAPBOT_WEBHOOK_SECRET}" = "${ZAPBOT_API_KEY}" ]; then
+  echo "ERROR: ZAPBOT_WEBHOOK_SECRET must differ from ZAPBOT_API_KEY."
+  exit 1
+fi
 
 ZAPBOT_REPOS=()
 while IFS= read -r line; do
@@ -78,6 +87,7 @@ echo "AO ready on port ${AO_PORT}"
 
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
 export ZAPBOT_API_KEY
+export ZAPBOT_WEBHOOK_SECRET
 export ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml"
 export ZAPBOT_PORT=$BRIDGE_PORT
 [ -n "${ZAPBOT_GATEWAY_URL:-}" ] && export ZAPBOT_GATEWAY_URL

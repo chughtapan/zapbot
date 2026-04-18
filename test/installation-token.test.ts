@@ -6,13 +6,12 @@ import {
 } from "../src/http/routes/installation-token.js";
 
 const API_KEY = "test-zapbot-api-key-abcdef0123456789";
-const FROZEN_NOW = new Date("2026-04-18T00:00:00Z");
+const FAKE_EXPIRES_AT = "2026-04-18T01:00:00Z";
 
 function deps(overrides: Partial<InstallationTokenDeps> = {}): InstallationTokenDeps {
   return {
-    mintToken: async () => "ghs_mockinstallationtoken",
+    mintToken: async () => ({ token: "ghs_mockinstallationtoken", expiresAt: FAKE_EXPIRES_AT }),
     apiKey: API_KEY,
-    now: () => FROZEN_NOW,
     ...overrides,
   };
 }
@@ -62,9 +61,22 @@ describe("handleInstallationTokenRequest", () => {
     expect(result.status).toBe(200);
     if (result.status !== 200) throw new Error("unreachable");
     expect(result.body.token).toBe("ghs_mockinstallationtoken");
-    expect(result.body.expires_at).toBe(
-      new Date(FROZEN_NOW.getTime() + 60 * 60 * 1000).toISOString(),
+    // expires_at is the real GitHub App installation expiry — not a
+    // wall-clock guess computed from `now()`.
+    expect(result.body.expires_at).toBe(FAKE_EXPIRES_AT);
+  });
+
+  it("propagates the real expiresAt from mintToken (no wall-clock guess)", async () => {
+    const realExpiresAt = "2026-04-18T03:59:59Z";
+    const result = await handleInstallationTokenRequest(
+      request({ auth: `Bearer ${API_KEY}` }),
+      deps({
+        mintToken: async () => ({ token: "ghs_another", expiresAt: realExpiresAt }),
+      }),
     );
+    expect(result.status).toBe(200);
+    if (result.status !== 200) throw new Error("unreachable");
+    expect(result.body.expires_at).toBe(realExpiresAt);
   });
 
   it("returns 401 when Authorization header is missing", async () => {
@@ -115,7 +127,7 @@ describe("handleInstallationTokenRequest", () => {
       deps({
         mintToken: async () => {
           called = true;
-          return "should-not-be-reached";
+          return { token: "should-not-be-reached", expiresAt: "2099-01-01T00:00:00Z" };
         },
       }),
     );

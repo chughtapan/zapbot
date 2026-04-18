@@ -16,7 +16,7 @@ projects:
       plugin: github
       webhook:
         path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_API_KEY
+        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event
 
