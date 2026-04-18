@@ -130,6 +130,18 @@ bun run bridge         # start webhook bridge directly
 ./test/e2e-smoke.sh    # end-to-end smoke test
 ```
 
+## Testing
+
+Unit and property tests run under [vitest](https://vitest.dev).
+[fast-check](https://fast-check.dev) drives property-based coverage of the
+HMAC webhook verifier (`test/verify-signature.property.test.ts`, ~200 runs per
+property): valid signatures accepted, and mutations of the signature, body, or
+secret rejected.
+
+testcontainers and Playwright are deferred — v2 has no database layer and no
+browser-facing surface, so they have no target yet. Reintroduce when a DB or
+UI subsystem lands.
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the v2 module layout.
