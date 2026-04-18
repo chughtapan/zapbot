@@ -20,7 +20,6 @@
   "dependencies": {
     "@octokit/auth-app": "^8.2.0",
     "@octokit/rest": "^22.0.1",
-    "kysely": "^0.28.16",
     "yaml": "^2.8.3"
   }
 }

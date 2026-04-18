@@ -26,8 +26,6 @@ projects:
     repo: chughtapan/zapbot
     path: /home/user/zapbot
     defaultBranch: main
-    sessionPrefix: zap
-    agentRulesFile: .agent-rules.md
     scm:
       plugin: github
       webhook:
@@ -55,8 +53,6 @@ projects:
     repo: chughtapan/zapbot
     path: /home/user/zapbot
     defaultBranch: main
-    sessionPrefix: zap
-    agentRulesFile: .agent-rules.md
     scm:
       plugin: github
       webhook:
@@ -68,8 +64,6 @@ projects:
     repo: chughtapan/frontend-app
     path: /home/user/frontend
     defaultBranch: main
-    sessionPrefix: fe
-    agentRulesFile: .agent-rules.md
     scm:
       plugin: github
       webhook:
@@ -122,8 +116,6 @@ describe("resolveWebhookSecret", () => {
           repo: e.repo,
           path: "/tmp",
           defaultBranch: "main",
-          sessionPrefix: "zap",
-          agentRulesFile: ".agent-rules.md",
           scm: {
             plugin: "github",
             webhook: {

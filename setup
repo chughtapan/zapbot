@@ -20,7 +20,7 @@ for arg in "$@"; do
       echo "Usage: ./setup [--server]"
       echo ""
       echo "  (no flags)   Teammate install — skill + minimal deps"
-      echo "  --server     Server install — adds orchestrator deps (ngrok, ao, tmux, jq, node)"
+      echo "  --server     Server install — adds orchestrator deps (ao, tmux, jq, node)"
       echo "  --help       Show this help"
       exit 0
       ;;
@@ -61,35 +61,12 @@ if ! command -v bun >/dev/null 2>&1; then
   curl -fsSL https://bun.sh/install | bash
 fi
 
-# --- Install npm dependencies (kysely, etc.) ---
+# --- Install npm dependencies ---
 echo "Installing dependencies..."
 (cd "$ZAPBOT_DIR" && bun install --frozen-lockfile 2>/dev/null || cd "$ZAPBOT_DIR" && bun install)
 
-# --- Install plannotator (if missing) ---
-if ! command -v plannotator >/dev/null 2>&1; then
-  echo "Installing plannotator..."
-  curl -fsSL https://plannotator.ai/install.sh | bash
-fi
-
 # --- Server-only installs ---
 if $SERVER_MODE; then
-  # Install ngrok (if missing)
-  if ! command -v ngrok >/dev/null 2>&1; then
-    echo "Installing ngrok..."
-    if [[ "$(uname)" == "Darwin" ]]; then
-      brew install ngrok 2>/dev/null || {
-        ARCH=$(uname -m)
-        [ "$ARCH" = "x86_64" ] && ARCH="amd64"
-        [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ] && ARCH="arm64"
-        curl -fsSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-darwin-${ARCH}.tgz" -o /tmp/ngrok.tgz
-        tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
-      }
-    else
-      curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz
-      sudo tar -xzf /tmp/ngrok.tgz -C /usr/local/bin && rm /tmp/ngrok.tgz
-    fi
-  fi
-
   # Install agent-orchestrator (if missing)
   if ! command -v ao >/dev/null 2>&1; then
     echo "Installing agent-orchestrator..."
@@ -105,11 +82,6 @@ if $SERVER_MODE; then
   # Validate server installs
   echo ""
   echo "Validating server dependencies..."
-  if command -v ngrok >/dev/null 2>&1; then
-    echo "  ngrok: $(ngrok version 2>&1 || echo 'installed')"
-  else
-    echo "  WARNING: ngrok not found after install"
-  fi
   if command -v ao >/dev/null 2>&1; then
     echo "  agent-orchestrator: $(ao --version 2>&1 || echo 'installed')"
   else

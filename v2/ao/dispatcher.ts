@@ -1,18 +1,15 @@
 /**
- * v2/ao/dispatcher — shell out to `ao spawn <issue>` with the bot's
- * installation token and the per-repo project id.
+ * v2/ao/dispatcher — shell out to `ao spawn <issue>`.
  *
- * Principle 5 (Junior Dev Rule): this module owns exactly one responsibility:
- * translate a "dispatch this issue" intent into a spawned `ao` process with
- * the right env. No DB writes, no role-rules file copy, no session lookup,
- * no heartbeat/cleanup. Those were v1 bookkeeping against the SQLite store.
- *
- * Invariant 3 from the spec: nested spawn is first-class. Agents call this
- * module's CLI equivalent (`ao spawn`) directly from their own VM; the
- * bridge is NOT a spawn-routing bottleneck. This module exists for the
- * bridge's own webhook-triggered spawns; nested spawns bypass it entirely.
+ * Principle 5: one responsibility — translate a dispatch intent into a
+ * spawned `ao` process with the right env. No DB, no role-rules copy.
  */
 
+import {
+  asAoSessionName,
+  err,
+  ok,
+} from "../types.ts";
 import type {
   AoSessionName,
   DispatchError,
@@ -33,15 +30,36 @@ export interface DispatchContext {
 
 /**
  * Invoke `ao spawn <issue>` with env `AO_CONFIG_PATH`, `AO_PROJECT_ID`,
- * `GH_TOKEN`. Returns the ao session name on success. Does NOT wait for
- * the spawned agent to finish; returns as soon as `ao spawn` exits cleanly.
+ * `GH_TOKEN`. Returns the ao session name on success.
  *
- * Failure modes are enumerated in `DispatchError`. The caller decides
- * whether to retry (there is no built-in retry here — v1's retry loop was
- * coupled to DB rows; v2 callers that want retry build it from this).
+ * No retry — v1's retry loop was coupled to DB rows; v2 callers that want
+ * retry wrap this themselves.
  */
-export function dispatch(
-  _ctx: DispatchContext
+export async function dispatch(
+  ctx: DispatchContext
 ): Promise<Result<AoSessionName, DispatchError>> {
-  throw new Error("not implemented");
+  const spawnEnv: Record<string, string | undefined> = {
+    ...process.env,
+    AO_CONFIG_PATH: ctx.configPath,
+    AO_PROJECT_ID: ctx.projectName as unknown as string,
+    GH_TOKEN: ctx.installationToken as unknown as string,
+  };
+
+  try {
+    const proc = Bun.spawn(["ao", "spawn", String(ctx.issue)], {
+      env: spawnEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text().catch(() => "");
+      return err({ _tag: "AoSpawnFailed", exitCode, stderr });
+    }
+    // Session name convention: `<projectName>-<issue>`. `ao` itself assigns it;
+    // we reconstruct it here rather than parsing stdout for testability.
+    return ok(asAoSessionName(`${ctx.projectName as unknown as string}-${ctx.issue}`));
+  } catch (e) {
+    return err({ _tag: "AoSpawnFailed", exitCode: -1, stderr: String(e) });
+  }
 }

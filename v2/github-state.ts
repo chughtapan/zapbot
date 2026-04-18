@@ -1,16 +1,18 @@
 /**
- * v2/github-state — read durable workflow state from GitHub via `gh`.
+ * v2/github-state — read durable workflow state from GitHub via Octokit.
  *
- * Replaces v1's SQLite `workflows` / `agent_sessions` / `transitions` tables.
- * Spec invariant 2: GitHub is the record. Every read here is a `gh` shell
- * call (or the Octokit equivalent) against the live repo; nothing is
- * cached across process restart.
- *
- * Principle 2 (Validate at every boundary): every call's return value is
- * decoded at the boundary from `gh`'s JSON output into the branded types
- * declared here. No `Record<string, unknown>` on the public surface.
+ * Architect Open Question 2 default B: Octokit directly, not the `gh` CLI.
  */
 
+import { Octokit } from "@octokit/rest";
+import { createAppAuth } from "@octokit/auth-app";
+import { readFileSync } from "fs";
+import {
+  asCommentId,
+  asIssueNumber,
+  err,
+  ok,
+} from "./types.ts";
 import type {
   BotUsername,
   CommentId,
@@ -39,58 +41,167 @@ export interface CommentSnapshot {
   readonly createdAt: string;
 }
 
-/**
- * Read current state of an issue. Fails if `gh` is missing or the issue
- * does not exist. Does NOT retry — the caller's concern.
- */
-export function getIssue(
-  _repo: RepoFullName,
-  _issue: IssueNumber
-): Promise<Result<IssueSnapshot, GithubStateError>> {
-  throw new Error("not implemented");
-}
-
-/**
- * Does this issue already have an agent working on it? Implemented as:
- * "is the bot an assignee AND is the issue open." No local cache.
- * The two possible answers are modeled as a discriminated union so callers
- * cannot conflate "not claimed" with "query failed."
- */
 export type Claim =
   | { readonly kind: "unclaimed" }
   | { readonly kind: "claimed"; readonly by: BotUsername };
 
-export function getAgentClaim(
-  _repo: RepoFullName,
-  _issue: IssueNumber,
-  _bot: BotUsername
+function splitRepo(repo: RepoFullName): { owner: string; repo: string } {
+  const [owner, name] = (repo as unknown as string).split("/");
+  return { owner, repo: name };
+}
+
+function toError(repo: RepoFullName, issue: IssueNumber, e: unknown): GithubStateError {
+  const anyErr = e as { status?: number; message?: string };
+  if (anyErr?.status === 404) return { _tag: "IssueNotFound", repo, issue };
+  return { _tag: "GhCliFailed", exitCode: anyErr?.status ?? -1, stderr: anyErr?.message ?? String(e) };
+}
+
+function extractLabels(labels: Array<string | { name?: string | null }>): string[] {
+  return labels
+    .map((l) => (typeof l === "string" ? l : l.name ?? ""))
+    .filter((s) => s !== "");
+}
+
+function extractAssignees(assignees: Array<{ login: string } | null> | null): string[] {
+  return (assignees ?? [])
+    .map((a) => a?.login ?? "")
+    .filter((s) => s !== "");
+}
+
+export async function getIssue(
+  repo: RepoFullName,
+  issue: IssueNumber
+): Promise<Result<IssueSnapshot, GithubStateError>> {
+  const client = getOctokit();
+  if (client === null) return err({ _tag: "GhCliMissing" });
+  const r = splitRepo(repo);
+  try {
+    const { data } = await client.rest.issues.get({
+      owner: r.owner,
+      repo: r.repo,
+      issue_number: issue as unknown as number,
+    });
+    return ok({
+      repo,
+      number: issue,
+      state: data.state === "closed" ? "closed" : "open",
+      labels: extractLabels(data.labels ?? []),
+      assignees: extractAssignees(data.assignees ?? null),
+      body: data.body ?? "",
+      author: data.user?.login ?? "",
+    });
+  } catch (e) {
+    return err(toError(repo, issue, e));
+  }
+}
+
+export async function getAgentClaim(
+  repo: RepoFullName,
+  issue: IssueNumber,
+  bot: BotUsername
 ): Promise<Result<Claim, GithubStateError>> {
-  throw new Error("not implemented");
+  const snap = await getIssue(repo, issue);
+  if (snap._tag === "Err") return snap;
+  const botStr = bot as unknown as string;
+  const claimed = snap.value.assignees.includes(botStr) && snap.value.state === "open";
+  if (claimed) return ok({ kind: "claimed", by: bot });
+  return ok({ kind: "unclaimed" });
 }
 
-/**
- * List open issues in `repo` that carry `label`. Used by the bridge's
- * startup recovery (if any): "what issues were the bot dispatched on and
- * haven't closed yet." v1 derived this from SQLite; v2 derives it from
- * GitHub.
- */
-export function listOpenIssuesWithLabel(
-  _repo: RepoFullName,
-  _label: string
+export async function listOpenIssuesWithLabel(
+  repo: RepoFullName,
+  label: string
 ): Promise<Result<ReadonlyArray<IssueSnapshot>, GithubStateError>> {
-  throw new Error("not implemented");
+  const client = getOctokit();
+  if (client === null) return err({ _tag: "GhCliMissing" });
+  const r = splitRepo(repo);
+  try {
+    const { data } = await client.rest.issues.listForRepo({
+      owner: r.owner,
+      repo: r.repo,
+      state: "open",
+      labels: label,
+      per_page: 100,
+    });
+    const snaps: IssueSnapshot[] = data
+      .filter((row) => !row.pull_request)
+      .map((row) => ({
+        repo,
+        number: asIssueNumber(row.number),
+        state: (row.state === "closed" ? "closed" : "open") as IssueState,
+        labels: extractLabels(row.labels ?? []),
+        assignees: extractAssignees(row.assignees ?? null),
+        body: row.body ?? "",
+        author: row.user?.login ?? "",
+      }));
+    return ok(snaps);
+  } catch (e) {
+    return err(toError(repo, asIssueNumber(-1), e));
+  }
+}
+
+export async function postComment(
+  repo: RepoFullName,
+  issue: IssueNumber,
+  body: string
+): Promise<Result<CommentId, GithubStateError>> {
+  const client = getOctokit();
+  if (client === null) return err({ _tag: "GhCliMissing" });
+  const r = splitRepo(repo);
+  try {
+    const { data } = await client.rest.issues.createComment({
+      owner: r.owner,
+      repo: r.repo,
+      issue_number: issue as unknown as number,
+      body,
+    });
+    return ok(asCommentId(data.id));
+  } catch (e) {
+    return err(toError(repo, issue, e));
+  }
+}
+
+// ── Octokit wiring ──────────────────────────────────────────────────
+
+let _client: Octokit | null = null;
+
+function getOctokit(): Octokit | null {
+  if (_client !== null) return _client;
+  _client = buildOctokit();
+  return _client;
+}
+
+function buildOctokit(): Octokit | null {
+  const appId = process.env.GITHUB_APP_ID;
+  if (appId) {
+    const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
+    if (!installationId) return null;
+    const privateKey = loadPrivateKey();
+    if (privateKey === null) return null;
+    return new Octokit({
+      authStrategy: createAppAuth,
+      auth: { appId, privateKey, installationId },
+    });
+  }
+  const pat = process.env.ZAPBOT_GITHUB_TOKEN;
+  if (pat) return new Octokit({ auth: pat });
+  return null;
+}
+
+function loadPrivateKey(): string | null {
+  const keyOrPath = process.env.GITHUB_APP_PRIVATE_KEY;
+  if (!keyOrPath) return null;
+  if (keyOrPath.startsWith("-----BEGIN")) return keyOrPath;
+  try {
+    return readFileSync(keyOrPath, "utf-8");
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Post a comment as the bot. `installationToken` is resolved upstream by
- * `v2/github-auth` (which wraps the existing `src/github/client.ts` token
- * mint — not re-architected in v2). Returns the new comment's id so
- * downstream code can edit it if needed.
+ * Test-only: reset the memoized client. Not part of the public API.
  */
-export function postComment(
-  _repo: RepoFullName,
-  _issue: IssueNumber,
-  _body: string
-): Promise<Result<CommentId, GithubStateError>> {
-  throw new Error("not implemented");
+export function __resetForTests(): void {
+  _client = null;
 }

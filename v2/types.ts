@@ -1,10 +1,5 @@
 /**
  * v2 shared types — branded IDs, discriminated command shapes, typed error tags.
- *
- * Downstream rule: every public function in v2/ declares its parameter types
- * and error channel from this file. No raw `string` for identifiers on a
- * public signature. No `Promise<T>` for fallible calls — use `Result<T, E>`
- * with a discriminated `E`.
  */
 
 // ── Branded identifiers ─────────────────────────────────────────────
@@ -24,20 +19,15 @@ export type Ok<T> = { readonly _tag: "Ok"; readonly value: T };
 export type Err<E> = { readonly _tag: "Err"; readonly error: E };
 export type Result<T, E> = Ok<T> | Err<E>;
 
-export function ok<T>(_value: T): Ok<T> {
-  throw new Error("not implemented");
+export function ok<T>(value: T): Ok<T> {
+  return { _tag: "Ok", value };
 }
-export function err<E>(_error: E): Err<E> {
-  throw new Error("not implemented");
+export function err<E>(error: E): Err<E> {
+  return { _tag: "Err", error };
 }
 
 // ── Mention command (discriminated union) ───────────────────────────
 
-/**
- * Parsed `@zapbot <command>` intent. `unknown_command` carries the raw text
- * so the bridge can respond with a "I don't recognize that command" comment
- * without embedding its own command vocabulary here.
- */
 export type MentionCommand =
   | { readonly kind: "plan_this" }
   | { readonly kind: "investigate_this" }
@@ -70,6 +60,33 @@ export type GithubStateError =
 
 // ── Exhaustiveness helper ───────────────────────────────────────────
 
-export function absurd(_x: never): never {
-  throw new Error("not implemented");
+export function absurd(x: never): never {
+  throw new Error(`unreachable: ${JSON.stringify(x)}`);
+}
+
+// ── Constructors (centralized branding at boundaries) ───────────────
+
+export function asRepoFullName(s: string): RepoFullName {
+  return s as RepoFullName;
+}
+export function asIssueNumber(n: number): IssueNumber {
+  return n as IssueNumber;
+}
+export function asCommentId(n: number): CommentId {
+  return n as CommentId;
+}
+export function asDeliveryId(s: string): DeliveryId {
+  return s as DeliveryId;
+}
+export function asProjectName(s: string): ProjectName {
+  return s as ProjectName;
+}
+export function asInstallationToken(s: string): InstallationToken {
+  return s as InstallationToken;
+}
+export function asAoSessionName(s: string): AoSessionName {
+  return s as AoSessionName;
+}
+export function asBotUsername(s: string): BotUsername {
+  return s as BotUsername;
 }

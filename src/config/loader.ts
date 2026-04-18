@@ -22,8 +22,6 @@ export interface ProjectConfig {
   repo: string;
   path: string;
   defaultBranch: string;
-  sessionPrefix: string;
-  agentRulesFile: string;
   scm: ScmConfig;
 }
 
@@ -77,8 +75,6 @@ export function loadConfig(configPath?: string): {
           repo: singleRepo,
           path: process.cwd(),
           defaultBranch: "main",
-          sessionPrefix: (singleRepo.split("/").pop() || "zap").slice(0, 3),
-          agentRulesFile: ".agent-rules.md",
           scm: {
             plugin: "github",
             webhook: {

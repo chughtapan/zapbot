@@ -8,7 +8,9 @@
     "rootDir": ".",
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["bun-types"]
+    "types": ["bun-types"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true
   },
-  "include": ["src", "bin"]
+  "include": ["src", "bin", "v2"]
 }

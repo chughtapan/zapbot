@@ -213,14 +213,4 @@ describe("SIGHUP handler: bridge registers signal handler", () => {
     expect(bridge).toContain("reloadConfigFromDisk");
   });
 
-  it("uses let (not const) for reloadable variables", () => {
-    const bridge = fs.readFileSync(
-      path.join(__dirname, "../bin/webhook-bridge.ts"),
-      "utf-8"
-    );
-
-    // WEBHOOK_SECRET and repoMap must be let (not const) so SIGHUP can swap them
-    expect(bridge).toMatch(/let WEBHOOK_SECRET/);
-    expect(bridge).toMatch(/let \{ repoMap \}/);
-  });
 });

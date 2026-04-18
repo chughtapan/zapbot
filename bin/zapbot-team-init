@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # zapbot-team-init — Configure a GitHub repo for the zapbot workflow.
-# Creates required labels, initializes SQLite database, and generates
-# agent-orchestrator config from templates.
+# Creates the plan label and generates agent-orchestrator config.
 #
 # Usage:
 #   zapbot-team-init <owner/repo>              — full init (first repo)
@@ -16,7 +15,6 @@ GITHUB_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
 
 ADD_REPO_MODE=false
 ZAPBOT_REPO=""
-SESSION_PREFIX=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,19 +22,10 @@ while [[ $# -gt 0 ]]; do
       ADD_REPO_MODE=true
       shift
       ;;
-    --session-prefix)
-      SESSION_PREFIX="$2"
-      shift 2
-      ;;
     --help|-h)
       echo "Usage:"
-      echo "  zapbot-team-init <owner/repo>                          Full init (first repo)"
-      echo "  zapbot-team-init --add-repo <owner/repo>               Add repo to existing config"
-      echo "  zapbot-team-init --add-repo <owner/repo> --session-prefix <prefix>"
-      echo ""
-      echo "Options:"
-      echo "  --add-repo          Add a repo to an existing agent-orchestrator.yaml"
-      echo "  --session-prefix    Session prefix for the new project (default: first 3 chars of repo name)"
+      echo "  zapbot-team-init <owner/repo>               Full init (first repo)"
+      echo "  zapbot-team-init --add-repo <owner/repo>    Add repo to existing config"
       exit 0
       ;;
     *)
@@ -48,9 +37,7 @@ done
 
 if [ -z "$ZAPBOT_REPO" ]; then
   echo "Usage: zapbot-team-init <owner/repo>"
-  echo "       zapbot-team-init --add-repo <owner/repo> [--session-prefix <prefix>]"
-  echo ""
-  echo "Run with --help for more info."
+  echo "       zapbot-team-init --add-repo <owner/repo>"
   exit 1
 fi
 
@@ -62,10 +49,22 @@ fi
 REPO_NAME=$(basename "$ZAPBOT_REPO")
 REPO_PATH=$(pwd)
 
-# Default session prefix: first 3 lowercase chars of repo name
-if [ -z "$SESSION_PREFIX" ]; then
-  SESSION_PREFIX=$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | cut -c1-3)
-fi
+LABELS=(
+  "zapbot-plan:0E8A16:Plan published via zapbot"
+)
+
+create_labels() {
+  local repo="$1"
+  for entry in "${LABELS[@]}"; do
+    IFS=: read -r name color desc <<< "$entry"
+    gh label create "$name" \
+      --repo "$repo" \
+      --color "$color" \
+      --description "$desc" \
+      --force 2>/dev/null || true
+    echo "  Label: $name"
+  done
+}
 
 # ── Add-repo mode: append project to existing config ────────────────
 
@@ -76,7 +75,6 @@ if [ "$ADD_REPO_MODE" = true ]; then
     exit 1
   fi
 
-  # Check if this repo is already configured
   if grep -q "repo: ${ZAPBOT_REPO}" "$CONFIG_FILE" 2>/dev/null; then
     echo "ERROR: ${ZAPBOT_REPO} is already configured in agent-orchestrator.yaml"
     exit 1
@@ -84,35 +82,9 @@ if [ "$ADD_REPO_MODE" = true ]; then
 
   echo "=== Adding repo: $ZAPBOT_REPO ==="
   echo ""
-
-  # Create labels on the new repo
   echo "--- Creating labels on $ZAPBOT_REPO ---"
-  LABELS=(
-    "triage:D93F0B:Parent issue in triage"
-    "triaged:FBCA04:Triage complete, sub-issues in progress"
-    "planning:BFD4F2:Plan in progress"
-    "review:0E8A16:Plan under review"
-    "plan-approved:1D76DB:Plan approved for implementation"
-    "implementing:5319E7:Agent implementing code"
-    "investigating:D4C5F9:Agent investigating issue"
-    "draft-review:C2E0C6:Draft PR under human review"
-    "verifying:006B75:QE agent verifying"
-    "abandoned:E4E669:Workflow abandoned"
-    "zapbot-plan:0E8A16:Plan published via zapbot"
-  )
+  create_labels "$ZAPBOT_REPO"
 
-  for entry in "${LABELS[@]}"; do
-    IFS=: read -r name color desc <<< "$entry"
-    gh label create "$name" \
-      --repo "$ZAPBOT_REPO" \
-      --color "$color" \
-      --description "$desc" \
-      --force 2>/dev/null || true
-    echo "  Label: $name"
-  done
-
-  # Append new project block to agent-orchestrator.yaml
-  # Insert before the `reactions:` section
   echo ""
   echo "--- Adding project to agent-orchestrator.yaml ---"
 
@@ -121,9 +93,6 @@ if [ "$ADD_REPO_MODE" = true ]; then
     repo: ${ZAPBOT_REPO}
     path: ${REPO_PATH}
     defaultBranch: main
-    sessionPrefix: ${SESSION_PREFIX}
-    agentRulesFile: .agent-rules.md
-
     scm:
       plugin: github
       webhook:
@@ -132,40 +101,20 @@ if [ "$ADD_REPO_MODE" = true ]; then
         signatureHeader: x-hub-signature-256
         eventHeader: x-github-event"
 
-  # Find the line number of `reactions:` and insert before it
-  REACTIONS_LINE=$(grep -n "^reactions:" "$CONFIG_FILE" | head -1 | cut -d: -f1)
-  if [ -n "$REACTIONS_LINE" ]; then
-    # Insert project block before reactions (atomic via mktemp)
-    TMPFILE=$(mktemp "${CONFIG_FILE}.XXXXXX")
-    trap "rm -f '$TMPFILE'" EXIT
-    head -n $((REACTIONS_LINE - 1)) "$CONFIG_FILE" > "$TMPFILE"
-    echo "$PROJECT_BLOCK" >> "$TMPFILE"
-    echo "" >> "$TMPFILE"
-    tail -n +"$REACTIONS_LINE" "$CONFIG_FILE" >> "$TMPFILE"
-    mv "$TMPFILE" "$CONFIG_FILE"
-  else
-    # No reactions section, append at end
-    echo "$PROJECT_BLOCK" >> "$CONFIG_FILE"
-  fi
-
+  echo "$PROJECT_BLOCK" >> "$CONFIG_FILE"
   echo "  Added project: $REPO_NAME (${ZAPBOT_REPO})"
-
-  # Copy agent rules to the new repo if it has a local path
-  if [ -d "$REPO_PATH" ]; then
-    RULES_TEMPLATE="$REPO_DIR/templates/agent-rules.md.tmpl"
-    if [ -f "$RULES_TEMPLATE" ] && [ ! -f "$REPO_PATH/.agent-rules.md" ]; then
-      cp "$RULES_TEMPLATE" "$REPO_PATH/.agent-rules.md"
-      echo "  Copied .agent-rules.md to $REPO_PATH"
-    fi
-  fi
 
   echo ""
   echo "================================================"
   echo "  Added $ZAPBOT_REPO to zapbot!"
   echo "================================================"
   echo ""
-  echo "Restart the bridge to pick up the new project:"
-  echo "  ./start.sh"
+  echo "Reload the bridge to pick up the new project:"
+  if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
+    sudo systemctl reload zapbot-bridge 2>/dev/null && echo "  Bridge reloaded." || echo "  Run: sudo systemctl reload zapbot-bridge"
+  else
+    echo "  Restart ./start.sh"
+  fi
   echo ""
   exit 0
 fi
@@ -176,78 +125,22 @@ echo "=== Zapbot Team Init ==="
 echo "Repo: $ZAPBOT_REPO"
 echo ""
 
-# ── 1. Create GitHub labels ─────────────────────────────────────────
-
 echo "--- Creating labels ---"
-LABELS=(
-  "triage:D93F0B:Parent issue in triage"
-  "triaged:FBCA04:Triage complete, sub-issues in progress"
-  "planning:BFD4F2:Plan in progress"
-  "review:0E8A16:Plan under review"
-  "plan-approved:1D76DB:Plan approved for implementation"
-  "implementing:5319E7:Agent implementing code"
-  "investigating:D4C5F9:Agent investigating issue"
-  "draft-review:C2E0C6:Draft PR under human review"
-  "verifying:006B75:QE agent verifying"
-  "abandoned:E4E669:Workflow abandoned"
-  "zapbot-plan:0E8A16:Plan published via zapbot"
-)
-
-for entry in "${LABELS[@]}"; do
-  IFS=: read -r name color desc <<< "$entry"
-  gh label create "$name" \
-    --repo "$ZAPBOT_REPO" \
-    --color "$color" \
-    --description "$desc" \
-    --force 2>/dev/null || true
-  echo "  Label: $name"
-done
-
-# ── 2. Initialize SQLite database ───────────────────────────────────
-
-echo ""
-echo "--- Initializing database ---"
-ZAPBOT_DIR="$HOME/.zapbot"
-mkdir -p "$ZAPBOT_DIR/logs"
-
-if [ -f "$ZAPBOT_DIR/state.db" ]; then
-  echo "  Database already exists at $ZAPBOT_DIR/state.db"
-else
-  echo "  Database will be created on first bridge start at $ZAPBOT_DIR/state.db"
-fi
-
-# ── 3. Generate agent-orchestrator.yaml from template ────────────────
+create_labels "$ZAPBOT_REPO"
 
 echo ""
 echo "--- Generating agent-orchestrator.yaml ---"
 TEMPLATE="$REPO_DIR/templates/agent-orchestrator.yaml.tmpl"
 if [ -f "$TEMPLATE" ]; then
-  BRIDGE_URL_VALUE="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
   sed \
     -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
     -e "s|{{REPO_PATH}}|$REPO_PATH|g" \
     -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
     "$TEMPLATE" > "$REPO_DIR/agent-orchestrator.yaml"
-  # Set bridge_url from env or default
-  sed -i "s|^bridge_url:.*|bridge_url: ${BRIDGE_URL_VALUE}|" "$REPO_DIR/agent-orchestrator.yaml"
   echo "  Generated agent-orchestrator.yaml"
 else
   echo "  Template not found at $TEMPLATE, skipping"
 fi
-
-# ── 4. Generate agent rules from template ────────────────────────────
-
-echo ""
-echo "--- Generating .agent-rules.md ---"
-RULES_TEMPLATE="$REPO_DIR/templates/agent-rules.md.tmpl"
-if [ -f "$RULES_TEMPLATE" ]; then
-  cp "$RULES_TEMPLATE" "$REPO_DIR/.agent-rules.md"
-  echo "  Generated .agent-rules.md"
-else
-  echo "  Template not found at $RULES_TEMPLATE, skipping"
-fi
-
-# ── 5. Generate .env if missing ────────────────────────────────────
 
 echo ""
 echo "--- Environment setup ---"
@@ -257,60 +150,38 @@ if [ ! -f "$ENV_FILE" ]; then
   cat > "$ENV_FILE" <<EOF
 # Zapbot environment — generated by zapbot-team-init
 # Shared webhook secret used to verify GitHub webhook payloads.
-# All repos managed by this zapbot instance share this secret.
 ZAPBOT_API_KEY=${GENERATED_SECRET}
 
-# Bridge and AO ports (defaults shown)
-# ZAPBOT_BRIDGE_PORT=3000
-# ZAPBOT_AO_PORT=3001
-
-# Label that triggers plan approval (default: plan-approved)
-# ZAPBOT_APPROVE_LABEL=plan-approved
+# Bridge port (default: 3000)
+# ZAPBOT_PORT=3000
 
 # Per-repo webhook secrets (optional, overrides shared secret):
 # ZAPBOT_API_KEY_FRONTEND_APP=<secret>
 
-# Gateway mode (replaces ngrok): set these to register with the Railway gateway.
-# The gateway receives GitHub webhooks and forwards them to your bridge.
+# Gateway registration (if using the hosted gateway):
 # ZAPBOT_GATEWAY_URL=https://zapbot-gateway.up.railway.app
-#
-# Auth option 1 (recommended): Supabase JWT token
-# ZAPBOT_GATEWAY_TOKEN=<your Supabase JWT>
-#
-# Auth option 2 (legacy, deprecated): Shared secret
 # ZAPBOT_GATEWAY_SECRET=<must match GATEWAY_SECRET on the gateway>
-#
-# ZAPBOT_BRIDGE_URL=<public URL of this bridge, e.g. your tunnel URL>
+# ZAPBOT_BRIDGE_URL=<public URL of this bridge>
+
+# GitHub auth for state reads (pick one):
+# ZAPBOT_GITHUB_TOKEN=<PAT>
+# or GitHub App:
+# GITHUB_APP_ID=<app id>
+# GITHUB_APP_INSTALLATION_ID=<installation id>
+# GITHUB_APP_PRIVATE_KEY=<pem contents or path to pem>
 EOF
   echo "  Generated .env with webhook secret"
 else
   echo "  .env already exists, skipping"
 fi
 
-# ── 6. Configure webhook ────────────────────────────────────────────
-
 echo ""
 echo "--- Webhook setup ---"
-echo "  Option A (recommended): Use the gateway."
-echo "    1. Set ZAPBOT_GATEWAY_URL in .env"
-echo "    2. Set ZAPBOT_GATEWAY_TOKEN (Supabase JWT) or ZAPBOT_GATEWAY_SECRET (legacy) in .env"
-echo "    3. Set ZAPBOT_BRIDGE_URL to your bridge's public URL"
-echo "    4. Run ./start.sh — it registers with the gateway automatically"
-echo ""
-echo "  Option B (legacy): Use ngrok."
-echo "    Run ./start.sh — it starts ngrok and registers GitHub webhooks automatically."
-echo ""
-echo "  Option C: Manual webhook."
-echo "    https://github.com/$ZAPBOT_REPO/settings/hooks/new"
-echo "    Payload URL: <your-public-url>/api/webhooks/github"
-echo "    Content type: application/json"
-echo "    Events: Issues, Pull requests, Pull request reviews"
-
-# ── Done ─────────────────────────────────────────────────────────────
+echo "  Configure a GitHub App or repo webhook to deliver to:"
+echo "    <bridge or gateway URL>/api/webhooks/github"
+echo "  Use ZAPBOT_API_KEY as the webhook secret."
 
 echo ""
-
-# Reload bridge if running as systemd service
 if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
   echo "Reloading bridge config (systemd service detected)..."
   sudo systemctl reload zapbot-bridge 2>/dev/null && echo "  Bridge reloaded." || echo "  WARNING: Could not reload. Run: sudo systemctl reload zapbot-bridge"
@@ -324,30 +195,12 @@ echo ""
 echo "Next steps:"
 if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
   echo "  1. Bridge is running (systemd). Config was auto-reloaded."
-  echo "  2. Create an issue with the 'triage' label to kick off a workflow"
 else
   echo "  1. Run ./start.sh to start the bridge"
-  echo "  2. Create an issue with the 'triage' label to kick off a workflow"
 fi
+echo "  2. Mention @zapbot on an issue to kick off a plan or investigation"
 echo ""
 echo "To add another repo later:"
 echo "  cd ~/other-project"
 echo "  $REPO_DIR/bin/zapbot-team-init --add-repo <owner/other-repo>"
-echo ""
-
-# ── Teammate config snippet ──────────────────────────────────────────
-BRIDGE_URL="${ZAPBOT_BRIDGE_URL:-http://localhost:3000}"
-WEBHOOK_SECRET=$(grep '^ZAPBOT_API_KEY=' .env 2>/dev/null | cut -d= -f2 || echo "YOUR_SECRET_HERE")
-echo "================================================"
-echo "  Share this with your teammates:"
-echo "================================================"
-echo ""
-echo "  Teammates: run /zapbot-publish in Claude Code."
-echo "  When asked for config, paste this:"
-echo ""
-echo "  {\"bridges\":{\"$ZAPBOT_REPO\":{\"url\":\"$BRIDGE_URL\",\"secret\":\"$WEBHOOK_SECRET\"}}}"
-echo ""
-echo "  Or share the URL and secret separately:"
-echo "    Bridge URL: $BRIDGE_URL"
-echo "    Secret:     $WEBHOOK_SECRET"
 echo ""

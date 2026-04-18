@@ -1,20 +1,27 @@
 /**
  * v2/gateway — the bridge's view of the gateway service.
  *
- * The gateway itself (the static-URL Bun HTTP proxy under `gateway/`) is
- * unchanged in v2 and stays out of this module. This file defines the
- * bridge-side client surface: register on boot, deregister on shutdown,
- * heartbeat while alive. It also exports the webhook intake contract that
- * the bridge uses when the gateway forwards an event.
- *
- * Principle 3 (typed errors): every call returns `Result<T, GatewayError>`.
- * No raw `throw`. Callers pattern-match on `_tag`.
+ * Two responsibilities:
+ *   1. Register/deregister/heartbeat with the gateway service.
+ *   2. Verify HMAC on a forwarded webhook envelope and classify it
+ *      into a `ClassifiedWebhook` the bridge can act on.
  */
 
+import { verifySignature } from "../src/http/verify-signature.ts";
+import { parseMention } from "./mention-parser.ts";
+import {
+  asCommentId,
+  asIssueNumber,
+  err,
+  ok,
+} from "./types.ts";
 import type {
   BotUsername,
+  CommentId,
   DeliveryId,
   GatewayError,
+  IssueNumber,
+  MentionCommand,
   RepoFullName,
   Result,
   WebhookIntakeError,
@@ -28,47 +35,79 @@ export interface GatewayClientConfig {
   readonly token: string | null;
 }
 
+function authToken(config: GatewayClientConfig): string | null {
+  return config.token ?? config.secret ?? null;
+}
+
+async function postRegistration(
+  config: GatewayClientConfig,
+  method: "POST" | "DELETE",
+  body: Record<string, unknown>
+): Promise<Result<void, GatewayError>> {
+  const token = authToken(config);
+  if (!token) return err({ _tag: "GatewayAuthMissing" });
+  const url = `${config.gatewayUrl}/api/bridges/register`;
+  try {
+    const resp = await fetch(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      return err({ _tag: "GatewayRejected", status: resp.status, body: text });
+    }
+    return ok(undefined);
+  } catch (e) {
+    return err({ _tag: "GatewayUnreachable", cause: String(e) });
+  }
+}
+
 /**
  * Register this bridge with the gateway for the given repo. Idempotent:
  * re-registering overwrites the previous `bridgeUrl` mapping.
  */
 export function registerBridge(
-  _config: GatewayClientConfig,
-  _repo: RepoFullName,
-  _bridgeUrl: string
+  config: GatewayClientConfig,
+  repo: RepoFullName,
+  bridgeUrl: string
 ): Promise<Result<void, GatewayError>> {
-  throw new Error("not implemented");
+  return postRegistration(config, "POST", { repo, bridgeUrl });
 }
 
 export function deregisterBridge(
-  _config: GatewayClientConfig,
-  _repo: RepoFullName,
+  config: GatewayClientConfig,
+  repo: RepoFullName,
   _bridgeUrl: string
 ): Promise<Result<void, GatewayError>> {
-  throw new Error("not implemented");
+  return postRegistration(config, "DELETE", { repo });
 }
 
 /**
  * Start a periodic re-registration loop. Returns a disposer that stops the
- * loop. Exactly-once semantics are not guaranteed across restarts; the
- * gateway is expected to tolerate duplicate registrations.
+ * loop.
  */
 export function startHeartbeat(
-  _config: GatewayClientConfig,
-  _repos: ReadonlyArray<RepoFullName>,
-  _bridgeUrl: string,
-  _intervalMs: number
+  config: GatewayClientConfig,
+  repos: ReadonlyArray<RepoFullName>,
+  bridgeUrl: string,
+  intervalMs: number
 ): () => void {
-  throw new Error("not implemented");
+  const timer = setInterval(() => {
+    for (const repo of repos) {
+      // Fire-and-forget; gateway tolerates duplicate registrations.
+      void registerBridge(config, repo, bridgeUrl);
+    }
+  }, intervalMs);
+  return () => clearInterval(timer);
 }
 
 // ── Webhook intake contract ─────────────────────────────────────────
 
-/**
- * Shape handed to the bridge once the gateway has forwarded a GitHub webhook.
- * The body is the raw string used for HMAC; the parsed payload is the
- * decoded JSON the bridge reads for routing.
- */
 export interface GatewayWebhookEnvelope {
   readonly rawBody: string;
   readonly signature: string | null;
@@ -78,33 +117,70 @@ export interface GatewayWebhookEnvelope {
   readonly payload: unknown;
 }
 
-/**
- * Verify HMAC against the per-repo secret, decode the bot-relevant command
- * (if any), and return the bridge's next-action intent. Pure over the
- * envelope plus a secret resolver; no I/O beyond crypto.
- *
- * Downstream dispatch is not this module's concern — `v2/bridge.ts` owns
- * that. This function's job is to make the webhook safe to act on.
- */
-export function verifyAndClassify(
-  _envelope: GatewayWebhookEnvelope,
-  _resolveSecret: (repo: RepoFullName) => string | null,
-  _botUsername: BotUsername
-): Promise<Result<ClassifiedWebhook, WebhookIntakeError>> {
-  throw new Error("not implemented");
-}
-
-/**
- * What the bridge does next, named at the interface so each variant is
- * exhaustive in the bridge's switch.
- */
 export type ClassifiedWebhook =
   | { readonly kind: "ignore"; readonly reason: string }
   | {
       readonly kind: "mention_command";
       readonly repo: RepoFullName;
-      readonly issue: import("./types.ts").IssueNumber;
-      readonly commentId: import("./types.ts").CommentId;
-      readonly command: import("./types.ts").MentionCommand;
+      readonly issue: IssueNumber;
+      readonly commentId: CommentId;
+      readonly command: MentionCommand;
       readonly triggeredBy: string;
     };
+
+/**
+ * Verify HMAC, then classify the envelope into either `ignore` or a
+ * `mention_command`. Only `issue_comment.created` events whose body mentions
+ * the bot can become `mention_command`; everything else resolves to `ignore`.
+ */
+export async function verifyAndClassify(
+  envelope: GatewayWebhookEnvelope,
+  resolveSecret: (repo: RepoFullName) => string | null,
+  botUsername: BotUsername
+): Promise<Result<ClassifiedWebhook, WebhookIntakeError>> {
+  const secret = resolveSecret(envelope.repo);
+  if (secret === null) return err({ _tag: "SecretMissing", repo: envelope.repo });
+  const verified = await verifySignature(envelope.rawBody, envelope.signature, secret);
+  if (!verified) return err({ _tag: "SignatureMismatch" });
+
+  const p = envelope.payload as {
+    action?: string;
+    comment?: { id?: number; body?: string };
+    issue?: { number?: number; pull_request?: unknown };
+    sender?: { login?: string };
+  } | null;
+
+  if (!p || typeof p !== "object") {
+    return ok({ kind: "ignore", reason: "payload not an object" });
+  }
+
+  if (envelope.eventType !== "issue_comment" || p.action !== "created") {
+    return ok({ kind: "ignore", reason: `event ${envelope.eventType}.${p.action ?? "?"}` });
+  }
+
+  const actor = p.sender?.login ?? "";
+  if (actor === (botUsername as unknown as string)) {
+    return ok({ kind: "ignore", reason: "self-mention" });
+  }
+
+  const issueNum = p.issue?.number;
+  const commentId = p.comment?.id;
+  const commentBody = p.comment?.body ?? "";
+  if (typeof issueNum !== "number" || typeof commentId !== "number") {
+    return ok({ kind: "ignore", reason: "missing issue/comment id" });
+  }
+
+  const command = parseMention(commentBody, botUsername);
+  if (command === null) {
+    return ok({ kind: "ignore", reason: "no bot mention" });
+  }
+
+  return ok({
+    kind: "mention_command",
+    repo: envelope.repo,
+    issue: asIssueNumber(issueNum),
+    commentId: asCommentId(commentId),
+    command,
+    triggeredBy: actor,
+  });
+}
