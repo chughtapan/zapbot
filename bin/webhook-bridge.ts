@@ -28,7 +28,11 @@ import type { WorkflowTable } from "../src/store/database.js";
 import { createLogger } from "../src/logger.js";
 import { loadConfig, resolveWebhookSecret, type RepoMap } from "../src/config/loader.js";
 import { reloadConfigFromDisk } from "../src/config/reload.js";
-import { createGitHubClient } from "../src/github/client.js";
+import { createGitHubClient, getInstallationToken } from "../src/github/client.js";
+import {
+  handleInstallationTokenRequest,
+  type InstallationTokenStatus,
+} from "../src/http/routes/installation-token.js";
 import { makeWorkflowId } from "../src/workflow-id.js";
 import { errorResponse } from "../src/http/error-response.js";
 import { verifySignature } from "../src/http/verify-signature.js";
@@ -1634,6 +1638,20 @@ async function main() {
         const resp = new Response("ok", { status: 200 });
         for (const [k, v] of Object.entries(CORS_HEADERS)) resp.headers.set(k, v);
         return resp;
+      }
+
+      // Installation token broker for safer-publish (bot attribution).
+      // Thin wrapper around getInstallationToken() — the existing singleton
+      // at src/github/client.ts:200-218. No new mint path.
+      if (pathname === "/api/tokens/installation" && req.method === "GET") {
+        const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
+          mintToken: getInstallationToken,
+          apiKey: WEBHOOK_SECRET!,
+          now: () => new Date(),
+        });
+        const clientIp = req.headers.get("x-forwarded-for") ?? "local";
+        log.info("installation_token.request", { status: result.status, client_ip: clientIp });
+        return Response.json(result.body, { status: result.status });
       }
 
       // Token registration for plannotator callbacks (requires API key)
