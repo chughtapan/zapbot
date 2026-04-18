@@ -105,8 +105,10 @@ export async function handleInstallationTokenRequest(
   let minted: string | null;
   try {
     minted = await deps.mintToken();
-  } catch {
-    // Exception body omitted on purpose — may include PEM fragments on misconfig.
+  } catch (err) {
+    // Log only the error type (not full body) — full error may include PEM fragments on misconfig.
+    const errType = err instanceof Error ? err.constructor.name : typeof err;
+    console.error(`mintToken failed: ${errType}`);
     return {
       status: 500,
       body: { error: "internal_error", message: "Failed to mint installation token." },

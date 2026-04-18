@@ -293,7 +293,7 @@ async function executeSideEffects(
         "",
         "Check the bridge logs for details.",
       ].join("\n");
-      try { await gh.postComment(repo, issueNum, msg); } catch { /* best effort */ }
+      try { await gh.postComment(repo, issueNum, msg); } catch (err) { log.debug(`postComment best-effort failed: ${err}`); }
     }
   }
 }
@@ -1376,7 +1376,8 @@ async function main() {
         let payload: any;
         try {
           payload = JSON.parse(body);
-        } catch {
+        } catch (err) {
+          log.debug(`webhook JSON parse failed: ${err}`);
           return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
         }
 

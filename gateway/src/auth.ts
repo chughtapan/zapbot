@@ -132,7 +132,8 @@ export async function verifyGitHubToken(
     });
 
     return { ok: true, result };
-  } catch {
+  } catch (err) {
+    console.error(`GitHub API token verification failed: ${err}`);
     return authError(
       "github_api_error",
       "Failed to reach GitHub API for token verification.",

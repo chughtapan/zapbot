@@ -33,7 +33,10 @@ export function serializeDeps(deps: number[]): string | null {
 export function deserializeDeps(raw: string | null): number[] {
   if (!raw) return [];
   try { return JSON.parse(raw) as number[]; }
-  catch { return []; }
+  catch (err) {
+    console.warn(`deserializeDeps: invalid JSON in deps column: ${err}`);
+    return [];
+  }
 }
 
 export interface AgentSessionTable {

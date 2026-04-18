@@ -36,7 +36,8 @@ async function isProcessAlive(sessionName: string): Promise<boolean> {
     });
     const pgrepExit = await pgrepProc.exited;
     return pgrepExit === 0;
-  } catch {
+  } catch (err) {
+    log.debug(`hasChildProcesses probe failed: ${err}`);
     return false;
   }
 }

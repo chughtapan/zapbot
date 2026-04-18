@@ -90,7 +90,8 @@ async function resolveClaudeSessionId(worktreePath: string): Promise<string | nu
     jsonlFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
     if (jsonlFiles.length === 0) return null;
     return jsonlFiles[0].name.replace(".jsonl", "");
-  } catch {
+  } catch (err) {
+    log.debug(`latest jsonl lookup failed: ${err}`);
     return null;
   }
 }

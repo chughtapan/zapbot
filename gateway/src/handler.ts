@@ -103,7 +103,8 @@ async function handleWebhookForward(req: Request, timeoutMs: number): Promise<Re
   let payload: any;
   try {
     payload = JSON.parse(body);
-  } catch {
+  } catch (err) {
+    console.debug(`webhook payload JSON parse failed: ${err}`);
     return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
   }
 
@@ -137,7 +138,8 @@ async function handleWebhookForward(req: Request, timeoutMs: number): Promise<Re
       status: upstream.status,
       headers: { "content-type": upstream.headers.get("content-type") || "text/plain" },
     });
-  } catch {
+  } catch (err) {
+    console.warn(`Bridge forward failed for ${repo}: ${err}`);
     // Don't leak internal bridge URLs in error responses
     return errorResponse(502, "bridge_error", `Bridge for '${repo}' is unavailable.`);
   }
@@ -150,7 +152,8 @@ async function handleBridgeRegister(req: Request, authConfig: AuthConfig): Promi
   let body: any;
   try {
     body = await req.json();
-  } catch {
+  } catch (err) {
+    console.debug(`bridge register JSON parse failed: ${err}`);
     return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
   }
 
@@ -181,7 +184,8 @@ async function handleBridgeDeregister(req: Request, authConfig: AuthConfig): Pro
   let body: any;
   try {
     body = await req.json();
-  } catch {
+  } catch (err) {
+    console.debug(`bridge deregister JSON parse failed: ${err}`);
     return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
   }
 

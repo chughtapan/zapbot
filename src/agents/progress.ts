@@ -45,7 +45,8 @@ export async function readAgentTasks(sessionUUID: string): Promise<AgentTask[]> 
   let entries: fs.Dirent[];
   try {
     entries = await fs.promises.readdir(taskDir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    log.debug(`readAgentTasks readdir failed: ${err}`);
     return [];
   }
 
@@ -99,7 +100,8 @@ export async function resolveClaudeSessionFromWorktree(worktreePath: string): Pr
     jsonlFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
     if (jsonlFiles.length === 0) return null;
     return jsonlFiles[0].name.replace(".jsonl", "");
-  } catch {
+  } catch (err) {
+    log.debug(`latest jsonl lookup failed: ${err}`);
     return null;
   }
 }
