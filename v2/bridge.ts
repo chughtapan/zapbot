@@ -32,6 +32,10 @@ import type {
 } from "./types.ts";
 import { createGitHubClient, getInstallationToken } from "../src/github/client.ts";
 import { errorResponse } from "../src/http/error-response.ts";
+import {
+  handleInstallationTokenRequest,
+  type InstallationTokenStatus,
+} from "../src/http/routes/installation-token.ts";
 
 const WRITE_PERMISSIONS = new Set(["write", "maintain", "admin"]);
 
@@ -250,6 +254,21 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
 
       if (pathname === "/healthz") {
         return new Response("ok", { status: 200 });
+      }
+
+      // Installation token broker (paired with safer-by-default#50).
+      // Thin wrapper around getInstallationToken() — no new mint path.
+      if (pathname === "/api/tokens/installation" && req.method === "GET") {
+        const apiKey = process.env.ZAPBOT_API_KEY;
+        if (!apiKey) {
+          return errorResponse(500, "configuration_error", "ZAPBOT_API_KEY not set.");
+        }
+        const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
+          mintToken: getInstallationToken,
+          apiKey,
+          now: () => new Date(),
+        });
+        return Response.json(result.body, { status: result.status });
       }
 
       if (pathname === "/api/webhooks/github" && req.method === "POST") {
