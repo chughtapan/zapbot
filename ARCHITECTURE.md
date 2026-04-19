@@ -1,77 +1,64 @@
-# Zapbot v2 Architecture
+# Zapbot Architecture
 
-v2 is a thin HTTP bridge. All durable workflow state lives in GitHub (issue
-labels, assignees, comments). The bridge does three things:
+zapbot is a thin bridge around `ao`.
 
-1. Receive + verify webhooks.
-2. Classify webhooks into `ignore` or a `mention_command`.
-3. Dispatch `ao spawn <issue>` for commands.
+It does not own durable workflow state, task retries, agent teams, or an
+internal state machine. Those older surfaces have been removed from the shipped
+runtime. The live path is GitHub webhook intake plus direct `ao spawn`.
 
-Everything else — plan review, agent state machines, retries, progress polling —
-has been moved out of zapbot or dropped. If you need it, read it from GitHub.
+## Runtime shape
 
-## Modules
+```text
+GitHub issue_comment webhook
+  -> HMAC verify
+  -> mention classification
+  -> permission check
+  -> GitHub installation token mint
+  -> optional MoltZap session provisioning
+  -> Bun.spawn(["ao", "spawn", issue], env)
+```
 
-All v2 code lives under `v2/`. `src/` holds only shared KEEP modules (GitHub
-client, HMAC verify, config loader, logger).
+## Key modules
 
 | Path | Purpose |
-|------|---------|
-| `v2/types.ts` | Branded IDs, tagged errors, `Result<T,E>`, `MentionCommand` union |
-| `v2/mention-parser.ts` | Parse `@zapbot <command>` from a comment body |
-| `v2/gateway.ts` | Gateway registration/heartbeat + HMAC verify + envelope classification |
-| `v2/bridge.ts` | HTTP server, webhook handler, dispatch orchestration |
-| `v2/ao/dispatcher.ts` | Shell out to `ao spawn <issue>` with env context |
-| `v2/github-state.ts` | Read durable state from GitHub via Octokit |
-| `bin/webhook-bridge.ts` | CLI shim: load config, boot `startBridge`, install signal handlers |
+|---|---|
+| `v2/gateway.ts` | gateway registration + webhook verification/classification |
+| `v2/mention-parser.ts` | parse `@zapbot ...` commands from issue comments |
+| `v2/bridge.ts` | HTTP request handling and command dispatch |
+| `v2/ao/dispatcher.ts` | direct `ao spawn <issue>` execution |
+| `v2/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
+| `v2/moltzap/supervisor.ts` | pure reconnect/backoff policy for MoltZap runtimes |
+| `v2/moltzap/identity-allowlist.ts` | pure sender allowlist gate |
+| `v2/github-state.ts` | GitHub-native issue state reads |
+| `bin/webhook-bridge.ts` | entrypoint: load config, boot bridge, install reload/shutdown hooks |
 
-## Data flow
+## Error model
 
-```
-GitHub → (gateway, optional) → bridge.ts /api/webhooks/github
-  ├── gateway.verifyAndClassify(envelope, resolveSecret, botUsername)
-  │     ├── verifySignature (src/http/verify-signature.ts)
-  │     └── mention-parser.parseMention
-  ├── bridge.handleClassifiedWebhook
-  │     ├── createGitHubClient.addReaction / getUserPermission / postComment
-  │     └── dispatch({ repo, issue, projectName, configPath, installationToken })
-  │           └── Bun.spawn ["ao", "spawn", issue]
-  └── errorResponse on any tagged error (401/403/500/502/503)
-```
+The live modules use tagged errors and `Result<T, E>` across module boundaries.
 
-## Error channels
+Current bridge-visible dispatch failures:
 
-Every public function in v2 declares its error channel as `Result<T, E>` with
-a tagged union `E`. Nothing in v2 throws across a module boundary.
+| Tag | Meaning |
+|---|---|
+| `TokenMintFailed` | GitHub installation token could not be minted |
+| `AoSpawnFailed` | the `ao spawn` subprocess failed |
+| `MoltzapProvisionFailed` | zapbot could not provision MoltZap env for the child session |
+| `ProjectNotConfigured` | the repo is not routed in zapbot config |
 
-| Module | Error tags |
-|--------|-----------|
-| `gateway` | `GatewayUnreachable`, `GatewayRejected`, `GatewayAuthMissing`, `SignatureMismatch`, `InvalidJson`, `UnconfiguredRepo`, `SecretMissing` |
-| `dispatcher` | `TokenMintFailed`, `AoSpawnFailed`, `ProjectNotConfigured` |
-| `github-state` | `GhCliMissing`, `GhCliFailed`, `IssueNotFound`, `ParseFailed` |
+## MoltZap boundary
 
-HTTP status mapping (in `bridge.ts`):
+zapbot does not implement a MoltZap server and does not become the agent
+runtime. Its responsibility is narrower:
 
-| Tag | Status |
-|-----|--------|
-| `SignatureMismatch` | 401 |
-| `InvalidJson` | 400 |
-| `UnconfiguredRepo` / `SecretMissing` / `ProjectNotConfigured` | 403 |
-| `AoSpawnFailed` | 502 |
-| `TokenMintFailed` | 503 |
+1. Decode `ZAPBOT_MOLTZAP_*` env at boot.
+2. If configured, build `MOLTZAP_*` env for a spawned `ao` session.
+3. Optionally register a fresh MoltZap agent per dispatch when a registration
+   secret is available.
 
-## Reload
+The spawned session is responsible for actually using those credentials.
 
-`SIGHUP` re-reads `.env` and `agent-orchestrator.yaml` from disk, builds a new
-`BridgeConfig`, and calls `runningBridge.reload(next)`. Registration with the
-gateway is redone; in-flight requests continue under the old config.
+## Reload and shutdown
 
-## What got deleted in the v2 migration
-
-- `src/state-machine/*`, `src/store/*`, `src/effects/*` — no SQLite, no engine.
-- `src/agents/*` (except the `getInstallationToken` helper) — no progress
-  poller, heartbeat, cleanup sweep, or spawner wrapper.
-- `src/gateway/client.ts`, `src/webhook/mapper.ts`, `src/workflow-id.ts` —
-  functionality moved into `v2/gateway.ts` and `v2/mention-parser.ts`.
-- `templates/agent-rules-*`, `bin/zapbot-update-check`, `bin/share-link.ts`,
-  plannotator callbacks — dropped entirely.
+- `SIGHUP` re-reads `.env` and `agent-orchestrator.yaml`, rebuilds `BridgeConfig`,
+  and re-registers bridge routes with the gateway.
+- `SIGINT` / `SIGTERM` stop the HTTP server and deregister bridge routes.

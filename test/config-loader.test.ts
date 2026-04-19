@@ -100,6 +100,28 @@ projects:
   it("throws on invalid config file path", () => {
     expect(() => loadConfig("/nonexistent/path.yaml")).toThrow("Cannot load config");
   });
+
+  it("rejects configs that still use ZAPBOT_API_KEY as the webhook secret env var", () => {
+    const yaml = `
+port: 3000
+projects:
+  zapbot:
+    repo: chughtapan/zapbot
+    path: /home/user/zapbot
+    defaultBranch: main
+    scm:
+      plugin: github
+      webhook:
+        path: /api/webhooks/github
+        secretEnvVar: ZAPBOT_API_KEY
+        signatureHeader: x-hub-signature-256
+        eventHeader: x-github-event
+`;
+    const configPath = join(tmpDir, "agent-orchestrator.yaml");
+    writeFileSync(configPath, yaml);
+
+    expect(() => loadConfig(configPath)).toThrow("deprecated webhook.secretEnvVar=ZAPBOT_API_KEY");
+  });
 });
 
 // ── resolveWebhookSecret ───────────────────────────────────────────

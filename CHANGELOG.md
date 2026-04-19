@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1 (2026-04-19)
+
+Finish the ao-native bridge path and make MoltZap session provisioning real.
+
+### Added
+
+- **MoltZap runtime provisioning** — zapbot now decodes `ZAPBOT_MOLTZAP_*` env at boot and forwards real `MOLTZAP_*` credentials to spawned `ao` sessions.
+- **Per-session MoltZap registration mode** — when `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` is configured, zapbot registers a fresh MoltZap agent for each dispatch and passes that key to the child session.
+- **Supervisor and allowlist implementations** — `v2/moltzap/supervisor.ts` and `v2/moltzap/identity-allowlist.ts` are now fully implemented and covered by tests.
+- **Dispatcher env coverage** — tests now verify that `MOLTZAP_*` values actually reach the spawned `ao` process.
+
+### Changed
+
+- **Bridge docs and onboarding** — README, architecture notes, contributing guide, and Claude instructions now describe the shipped `ao`-native runtime instead of the removed team/state-machine flow.
+- **Bridge config** — `BridgeConfig` now carries typed MoltZap runtime config and surfaces `MoltzapProvisionFailed` as a dispatch-visible error.
+
+### Removed
+
+- **Stale planning artifact** — deleted the old `plan.md` that described an unrelated Supabase plan.
+- **Dead smoke script** — removed the old `test/e2e-smoke.sh` script that still referenced deleted workflow/history APIs.
+
 ## 0.5.0 (2026-04-16)
 
 Talk to zapbot in comments. @mention the bot in any issue or PR to trigger workflows, check status, or forward messages to running agents.

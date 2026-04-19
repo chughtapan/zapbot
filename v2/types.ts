@@ -64,6 +64,7 @@ export type WebhookIntakeError =
 export type DispatchError =
   | { readonly _tag: "TokenMintFailed"; readonly cause: string }
   | { readonly _tag: "AoSpawnFailed"; readonly exitCode: number; readonly stderr: string }
+  | { readonly _tag: "MoltzapProvisionFailed"; readonly cause: string }
   | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName };
 
 export type GithubStateError =

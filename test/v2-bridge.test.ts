@@ -77,6 +77,7 @@ function makeConfig(withRoute = true): BridgeConfig {
     aoConfigPath: "",
     apiKey: "test-broker-key",
     webhookSecret: "test-webhook-secret",
+    moltzap: { _tag: "MoltzapDisabled" },
     repos,
   };
 }

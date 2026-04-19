@@ -10,6 +10,7 @@
 import { loadConfig, type RepoMap } from "../src/config/loader.js";
 import { reloadConfigFromDisk } from "../src/config/reload.js";
 import { createLogger } from "../src/logger.js";
+import { loadMoltzapRuntimeConfig } from "../v2/moltzap/runtime.ts";
 import { startBridge, type BridgeConfig, type RepoRoute } from "../v2/bridge.ts";
 import {
   asBotUsername,
@@ -54,6 +55,11 @@ function buildBridgeConfig(): BridgeConfig {
 
   const { repoMap } = loadConfig(process.env.ZAPBOT_CONFIG || undefined);
   const repos = buildRepos(repoMap);
+  const moltzap = loadMoltzapRuntimeConfig(process.env);
+  if (moltzap._tag === "Err") {
+    console.error(`[bridge] ${moltzap.error.reason}`);
+    process.exit(1);
+  }
   return {
     port,
     publicUrl,
@@ -63,6 +69,7 @@ function buildBridgeConfig(): BridgeConfig {
     aoConfigPath,
     apiKey,
     webhookSecret,
+    moltzap: moltzap.value,
     repos,
   };
 }

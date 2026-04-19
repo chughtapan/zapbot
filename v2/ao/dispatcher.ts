@@ -5,11 +5,13 @@
  * spawned `ao` process with the right env. No DB, no role-rules copy.
  */
 
+import { spawn } from "node:child_process";
 import {
   asAoSessionName,
   err,
   ok,
 } from "../types.ts";
+import { buildMoltzapSpawnEnv, type MoltzapRuntimeConfig } from "../moltzap/runtime.ts";
 import type {
   AoSessionName,
   DispatchError,
@@ -26,6 +28,7 @@ export interface DispatchContext {
   readonly projectName: ProjectName;
   readonly configPath: string;
   readonly installationToken: InstallationToken;
+  readonly moltzap: MoltzapRuntimeConfig;
 }
 
 /**
@@ -50,14 +53,20 @@ const AO_ENV_ALLOWLIST: ReadonlyArray<string> = [
 ] as const;
 
 function buildSpawnEnv(ctx: DispatchContext): Record<string, string> {
+  return {
+    ...buildBaseSpawnEnv(ctx),
+    AO_CONFIG_PATH: ctx.configPath,
+    AO_PROJECT_ID: ctx.projectName as unknown as string,
+    GH_TOKEN: ctx.installationToken as unknown as string,
+  };
+}
+
+function buildBaseSpawnEnv(ctx: DispatchContext): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of AO_ENV_ALLOWLIST) {
     const v = process.env[key];
     if (typeof v === "string") env[key] = v;
   }
-  env.AO_CONFIG_PATH = ctx.configPath;
-  env.AO_PROJECT_ID = ctx.projectName as unknown as string;
-  env.GH_TOKEN = ctx.installationToken as unknown as string;
   return env;
 }
 
@@ -77,23 +86,72 @@ function buildSpawnEnv(ctx: DispatchContext): Record<string, string> {
 export async function dispatch(
   ctx: DispatchContext
 ): Promise<Result<AoSessionName, DispatchError>> {
+  const session = asAoSessionName(`${ctx.projectName as unknown as string}-${ctx.issue}`);
   const spawnEnv = buildSpawnEnv(ctx);
-
-  try {
-    const proc = Bun.spawn(["ao", "spawn", String(ctx.issue)], {
-      env: spawnEnv,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) {
-      const stderr = await new Response(proc.stderr).text().catch(() => "");
-      return err({ _tag: "AoSpawnFailed", exitCode, stderr });
-    }
-    // Session name convention: `<projectName>-<issue>`. `ao` itself assigns it;
-    // we reconstruct it here rather than parsing stdout for testability.
-    return ok(asAoSessionName(`${ctx.projectName as unknown as string}-${ctx.issue}`));
-  } catch (e) {
-    return err({ _tag: "AoSpawnFailed", exitCode: -1, stderr: String(e) });
+  const moltzapEnv = await buildMoltzapSpawnEnv(ctx.moltzap, {
+    repo: ctx.repo,
+    issue: ctx.issue,
+    projectName: ctx.projectName,
+    session,
+  });
+  if (moltzapEnv._tag === "Err") {
+    return err({ _tag: "MoltzapProvisionFailed", cause: moltzapEnv.error.cause });
   }
+
+  const spawnResult = await runAoSpawn(ctx.issue, { ...spawnEnv, ...moltzapEnv.value });
+  if (spawnResult._tag === "Err") {
+    return spawnResult;
+  }
+
+  // Session name convention: `<projectName>-<issue>`. `ao` itself assigns it;
+  // we reconstruct it here rather than parsing stdout for testability.
+  return ok(session);
+}
+
+function runAoSpawn(
+  issue: IssueNumber,
+  env: Record<string, string>,
+): Promise<Result<void, DispatchError>> {
+  return new Promise((resolve) => {
+    let stderr = "";
+    let settled = false;
+    try {
+      const proc = spawn("ao", ["spawn", String(issue)], {
+        env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      proc.stderr?.setEncoding("utf8");
+      proc.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      proc.once("error", (cause) => {
+        if (settled) return;
+        settled = true;
+        resolve(err({
+          _tag: "AoSpawnFailed",
+          exitCode: -1,
+          stderr: cause instanceof Error ? cause.message : String(cause),
+        }));
+      });
+      proc.once("close", (exitCode) => {
+        if (settled) return;
+        settled = true;
+        if (exitCode === 0) {
+          resolve(ok(undefined));
+          return;
+        }
+        resolve(err({
+          _tag: "AoSpawnFailed",
+          exitCode: exitCode ?? -1,
+          stderr,
+        }));
+      });
+    } catch (cause) {
+      resolve(err({
+        _tag: "AoSpawnFailed",
+        exitCode: -1,
+        stderr: cause instanceof Error ? cause.message : String(cause),
+      }));
+    }
+  });
 }

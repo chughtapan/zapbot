@@ -15,6 +15,7 @@ import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } f
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
 import { dispatch } from "./ao/dispatcher.ts";
 import { getIssue } from "./github-state.ts";
+import type { MoltzapRuntimeConfig } from "./moltzap/runtime.ts";
 import {
   absurd,
   asAoSessionName,
@@ -78,6 +79,7 @@ export interface BridgeConfig {
   readonly apiKey: string;
   /** HMAC-SHA256 secret for GitHub webhooks. Must differ from `apiKey`. */
   readonly webhookSecret: string;
+  readonly moltzap: MoltzapRuntimeConfig;
   readonly repos: ReadonlyMap<RepoFullName, RepoRoute>;
 }
 
@@ -168,6 +170,7 @@ async function handleMention(
         projectName: route.projectName,
         configPath: ctx.config.aoConfigPath,
         installationToken: tokenResult.value,
+        moltzap: ctx.config.moltzap,
       });
       if (dispatched._tag === "Err") return dispatched;
       const session = asAoSessionName(dispatched.value as unknown as string);
@@ -341,6 +344,8 @@ export function buildFetchHandler(
         switch (e._tag) {
           case "AoSpawnFailed":
             return errorResponse(502, "dispatch_failed", `ao spawn failed (exit ${e.exitCode}).`);
+          case "MoltzapProvisionFailed":
+            return errorResponse(503, "dispatch_unavailable", "MoltZap session provisioning failed.");
           case "TokenMintFailed":
             return errorResponse(503, "auth_unavailable", "Installation token unavailable.");
           case "ProjectNotConfigured":

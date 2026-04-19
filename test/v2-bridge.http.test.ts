@@ -55,6 +55,7 @@ function makeConfig(
     aoConfigPath: "",
     apiKey: overrides.apiKey ?? API_KEY,
     webhookSecret: overrides.webhookSecret ?? WEBHOOK_SECRET,
+    moltzap: { _tag: "MoltzapDisabled" },
     repos: overrides.repos ?? defaultRepos,
   };
 }

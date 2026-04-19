@@ -1,218 +1,108 @@
-# Zapbot v2
+# Zapbot
 
-A thin GitHub webhook bridge that dispatches [agent-orchestrator](https://github.com/anthropics/agent-orchestrator)
-agents in response to `@zapbot` mentions on issues. v2 is an HTTP shim — no
-state machine, no SQLite, no plan-review flow. Durable state lives in GitHub.
+Zapbot is a thin GitHub webhook bridge for `ao`.
 
-> **`ao` (agent-orchestrator):** Zapbot shells out to the `ao` CLI (from [agent-orchestrator](https://github.com/anthropics/agent-orchestrator)), which receives the issue context and spins up an AI agent to handle the dispatch. The bridge is a thin HTTP webhook listener; `ao` owns the agent lifecycle.
+It verifies GitHub webhooks, checks repo permissions, and dispatches direct
+`ao spawn <issue>` sessions from `@zapbot` issue comments. Durable task state
+lives in GitHub, not inside zapbot.
 
-## How It Works
+## Current runtime
 
-1. GitHub delivers a webhook to the bridge (directly or via a gateway).
-2. The bridge verifies the HMAC, extracts the `@zapbot <command>` mention from
-   the comment body, and checks the commenter has write access.
-3. The bridge shells out to `ao spawn <issue>` with the GitHub App's
-   installation token (or PAT if configured); `ao` picks up from there and
-   fetches the issue context to dispatch an agent.
+1. GitHub sends `issue_comment` webhooks to `/api/webhooks/github`.
+2. zapbot verifies the HMAC and parses the `@zapbot ...` command.
+3. zapbot checks that the commenter has write access.
+4. zapbot shells out to `ao spawn <issue>` with:
+   - `AO_CONFIG_PATH`
+   - `AO_PROJECT_ID`
+   - `GH_TOKEN`
+   - optional `MOLTZAP_*` env for session-to-session communication
 
 Supported commands:
 
-| Mention | Action |
-|---------|--------|
-| `@zapbot plan this` | Dispatch an agent on the issue |
-| `@zapbot investigate this` | Dispatch an investigator |
-| `@zapbot status` | Post a summary of the issue's current state |
+| Comment | Effect |
+|---|---|
+| `@zapbot plan this` | spawn an `ao` session on the issue |
+| `@zapbot investigate this` | spawn an `ao` session on the issue |
+| `@zapbot status` | post a GitHub-native issue summary |
 
-Any other `@zapbot …` text is acknowledged with a "didn't recognize" comment.
+## MoltZap
 
-## Quick Start (Eng Lead)
+zapbot can provision MoltZap credentials for spawned `ao` sessions.
 
-Three steps: deploy the gateway (optional), create a GitHub App, start the bridge.
+Configure one of these modes:
 
-### 1. Gateway (optional)
+| Env | Meaning |
+|---|---|
+| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_API_KEY` | pass through a pre-provisioned MoltZap agent key to every spawned session |
+| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for each spawned session and pass its key to that session |
+| `ZAPBOT_MOLTZAP_ALLOWED_SENDERS` | optional comma-separated sender allowlist forwarded to the session runtime |
 
-The [gateway](./gateway) gives you a stable HTTPS URL that forwards GitHub
-webhooks to a bridge on any network. If your bridge is already reachable from
-GitHub, skip this step and point the GitHub App webhook directly at it.
+If no `ZAPBOT_MOLTZAP_*` env is set, zapbot still works as a plain GitHub-to-`ao`
+bridge.
 
-### 2. GitHub App
+## Setup
 
-Create an app at https://github.com/settings/apps/new with:
+### Bridge host
 
-| Field | Value |
-|-------|-------|
-| Webhook URL | `https://<gateway-or-bridge-host>/api/webhooks/github` |
-| Webhook secret | `openssl rand -hex 32` (store as `ZAPBOT_WEBHOOK_SECRET`) |
-| Permissions | Issues R/W, Pull requests R/W, Contents R/W, Checks R |
-| Events | Issue comment |
-
-**Webhook URL:** The bridge listens on `0.0.0.0:3000` by default (configurable via `PORT` env var). Use the gateway URL if you set one up; otherwise, point directly to your bridge's public HTTPS endpoint.
-
-**Private key:** Download the private key (.pem file) from GitHub App settings. You'll reference it as `GITHUB_APP_PRIVATE_KEY` in your `.env` (see step 3).
-
-**Installation ID:** After creating the app, install it on your target repos and note the installation ID from the installation URL (`https://github.com/settings/installations/<id>`).
-
-### 3. Bridge
-
-Clone the zapbot repo and create the required directories:
+Create a `.env` with the required bridge settings:
 
 ```bash
-mkdir -p ~/.claude/skills
-git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot
-```
+ZAPBOT_WEBHOOK_SECRET=<github webhook secret>
+ZAPBOT_API_KEY=<local broker bearer>
 
-> **Integrity note:** If you require git signature verification or want to pin to a specific release, use: `git clone --branch v<version> https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot`
-
-Create `.env` **before running setup** (the setup script expects it):
-
-```bash
-# Two distinct secrets — webhook HMAC vs. bridge Bearer.
-# Generate with: openssl rand -hex 32
-ZAPBOT_WEBHOOK_SECRET=<same value as GitHub App webhook secret>
-ZAPBOT_API_KEY=<random 32-byte hex, used internally by the bridge to authenticate requests>
-
-# GitHub App (preferred authentication method)
-GITHUB_APP_ID=<app-id-from-github-app-settings>
+GITHUB_APP_ID=<app id>
 GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
-GITHUB_APP_INSTALLATION_ID=<installation-id-from-github-app-install>
+GITHUB_APP_INSTALLATION_ID=<installation id>
 ZAPBOT_BOT_USERNAME=<app-slug>[bot]
 
-# Alternative: Personal Access Token (less preferred; requires repo-level secrets management)
-# ZAPBOT_GITHUB_TOKEN=<ghp_... token with repo & issue:write scopes>
+ZAPBOT_CONFIG=/path/to/agent-orchestrator.yaml
+ZAPBOT_BRIDGE_URL=https://bridge.example.com
 
-# Gateway (only if using one):
-# ZAPBOT_GATEWAY_URL=https://your-app.onrender.com
-# ZAPBOT_GATEWAY_SECRET=<matches gateway config>
-# ZAPBOT_BRIDGE_URL=<public URL of this bridge>
+# Optional gateway
+# ZAPBOT_GATEWAY_URL=https://gateway.example.com
+# ZAPBOT_GATEWAY_SECRET=<gateway secret>
+
+# Optional MoltZap
+# ZAPBOT_MOLTZAP_SERVER_URL=wss://moltzap.example/ws
+# ZAPBOT_MOLTZAP_API_KEY=<static key>
+# ZAPBOT_MOLTZAP_REGISTRATION_SECRET=<invite code>
+# ZAPBOT_MOLTZAP_ALLOWED_SENDERS=agent-a,agent-b
 ```
 
-**Important:** Add `.env` to `.gitignore` immediately to prevent secrets from being committed.
+Install and start:
 
 ```bash
-echo ".env" >> .gitignore
-git add .gitignore && git commit -m "chore: ignore .env"
-```
-
-Now run setup:
-
-```bash
+bun install
 ./setup --server
-```
-
-This initializes the project and prepares the bridge. Then:
-
-```bash
 bin/zapbot-team-init <owner/repo>
 ./start.sh
 ```
 
-**`bin/zapbot-team-init`:** Initializes zapbot for a specific repo (owner/repo format, e.g., `anthropics/agent-orchestrator`). This script configures the bridge to listen for webhooks from that repo and sets up any required local state.
+### GitHub App
 
-**`./start.sh`:** Starts the bridge as a foreground process. For production, consider using a process manager (e.g., `systemd`, `supervisor`) to daemonize and restart on failure.
+Minimum GitHub App setup:
 
-## For Teammates
-
-Install zapbot as a Claude Code skill:
-
-```bash
-git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot
-bun install
-```
-
-> **Integrity note:** If you require git signature verification or want to pin to a specific release, use: `git clone --branch v<version> https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot`
-
-In Claude Code:
-
-- `/zapbot-publish` — turn your plan into a `zapbot-plan`-labelled GitHub issue.
-- On any issue, mention `@zapbot plan this` or `@zapbot investigate this` to
-  dispatch an agent.
-
-> **Note:** You do not need to run `./setup --server` or `./start.sh` as a teammate. The bridge is typically run centrally by your team lead. You only need the skill installed for the `/zapbot-publish` command and the `@zapbot` mention handlers in Claude Code to recognize your issues.
-
-## Multi-Repo
-
-Define multiple projects in `agent-orchestrator.yaml`:
-
-```yaml
-projects:
-  zapbot:
-    repo: chughtapan/zapbot
-    path: /home/user/zapbot
-    defaultBranch: main
-    scm:
-      plugin: github
-      webhook:
-        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
-  frontend:
-    repo: chughtapan/frontend-app
-    path: /home/user/frontend
-    defaultBranch: main
-    scm:
-      plugin: github
-      webhook:
-        secretEnvVar: ZAPBOT_WEBHOOK_SECRET_FRONTEND
-```
-
-The bridge routes by `repository.full_name` and verifies HMAC with the
-per-repo secret resolved from `secretEnvVar`.
-
-## Secret Management
-
-### `.env` Safety
-
-- **Never commit `.env`:** Always add `.env` to `.gitignore`.
-- **Keep secrets out of the repo:** The `.env` file is local-only and should not be shared via Git. Use a secrets manager (e.g., 1Password, Vault) for team distribution.
-- **Private key storage:** Store `GITHUB_APP_PRIVATE_KEY` as a file path on disk (not inline in `.env`). Restrict file permissions: `chmod 600 app.pem`.
-
-### Secret Rotation
-
-If a secret is compromised:
-
-1. **Webhook secret (`ZAPBOT_WEBHOOK_SECRET`):**
-   - Generate a new value with `openssl rand -hex 32`.
-   - Update it in `.env`.
-   - Update it on the GitHub App settings page.
-
-2. **API key (`ZAPBOT_API_KEY`):**
-   - Generate a new value with `openssl rand -hex 32`.
-   - Update it in `.env`.
-   - Restart the bridge (`./start.sh`).
-
-3. **GitHub App private key:**
-   - Regenerate a new private key from the GitHub App settings page.
-   - Download and save it to disk.
-   - Update `GITHUB_APP_PRIVATE_KEY` in `.env` to point to the new file.
-   - Restart the bridge.
-
-4. **Personal Access Token (if used):**
-   - Revoke it immediately from your GitHub settings.
-   - Generate a new token with the minimum required scopes.
-   - Update `ZAPBOT_GITHUB_TOKEN` in `.env`.
-   - Restart the bridge.
+- Webhook URL: `https://<bridge-or-gateway>/api/webhooks/github`
+- Webhook secret: same value as `ZAPBOT_WEBHOOK_SECRET`
+- Permissions: Issues read/write, Pull requests read/write, Contents read/write, Checks read
+- Event: `Issue comment`
 
 ## Development
 
 ```bash
-bun install
-bun x vitest run       # unit tests
-bun run bridge         # start webhook bridge directly
-./test/e2e-smoke.sh    # end-to-end smoke test
+bun run test
+bun run lint
+bun run build
+bun run bridge
 ```
 
-## Testing
+## Repo map
 
-Unit and property tests run under [vitest](https://vitest.dev).
-[fast-check](https://fast-check.dev) drives property-based coverage of the
-HMAC webhook verifier (`test/verify-signature.property.test.ts`, ~200 runs per
-property): valid signatures accepted, and mutations of the signature, body, or
-secret rejected.
+- `v2/` — current runtime: webhook intake, `ao` dispatch, MoltZap session provisioning
+- `src/config/` — YAML and `.env` reload support
+- `src/github/` — GitHub auth + API wrapper
+- `src/http/` — HMAC verification and HTTP helpers
+- `gateway/` — optional bridge registry / webhook proxy
+- `bin/webhook-bridge.ts` — bridge entrypoint
 
-testcontainers and Playwright are deferred — v2 has no database layer and no
-browser-facing surface, so they have no target yet. Reintroduce when a DB or
-UI subsystem lands.
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the v2 module layout.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the current module layout.

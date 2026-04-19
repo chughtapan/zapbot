@@ -18,7 +18,7 @@ gh auth status >/dev/null 2>&1 && echo "GH: ok" || echo "GH: missing"
 
 # /zapbot
 
-Single entry point for the zapbot plan-to-code workflow.
+Single entry point for the current zapbot workflow.
 
 ## Routing
 
@@ -33,12 +33,12 @@ Parse the user's arguments to determine what they want:
 Show:
 ```
 Zapbot commands:
-  /zapbot publish     Publish a plan to GitHub as a zapbot-plan issue
+  /zapbot publish     Publish a plan to GitHub as a dispatchable issue
   /zapbot help        Show this help
 
-Team workflow (on any issue):
-  @zapbot plan this         Dispatch an agent to plan the work
-  @zapbot investigate this  Dispatch an investigator
+Issue workflow:
+  @zapbot plan this         Dispatch a direct ao session
+  @zapbot investigate this  Dispatch a direct ao session
   @zapbot status            Ask the bot to summarize issue state
 
 Current repo: {REPO}
