@@ -142,6 +142,24 @@ testcontainers and Playwright are deferred — v2 has no database layer and no
 browser-facing surface, so they have no target yet. Reintroduce when a DB or
 UI subsystem lands.
 
+## Mutation Testing
+
+Stryker runs across all source modules (`src/`, `v2/`, `gateway/src/`, `bin/`).
+
+```bash
+bun run mutation      # full run (incremental on re-runs)
+```
+
+Thresholds: high 80 / low 60. CI runs on every PR in non-gating mode
+(`continue-on-error: true`) — scores are reported but never block the build.
+Incremental state is cached in `.stryker-tmp/incremental.json` for fast
+PR-diff feedback.
+
+> **Note:** `gateway/src/` mutants are scored against the root vitest suite.
+> Gateway-specific tests in `gateway/test/` use `bun test` and are not
+> included in the vitest run, so gateway mutant kill-rates may under-report
+> true coverage.
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the v2 module layout.
