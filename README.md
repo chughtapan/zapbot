@@ -4,13 +4,16 @@ A thin GitHub webhook bridge that dispatches [agent-orchestrator](https://github
 agents in response to `@zapbot` mentions on issues. v2 is an HTTP shim — no
 state machine, no SQLite, no plan-review flow. Durable state lives in GitHub.
 
+> **`ao` (agent-orchestrator):** Zapbot shells out to the `ao` CLI (from [agent-orchestrator](https://github.com/anthropics/agent-orchestrator)), which receives the issue context and spins up an AI agent to handle the dispatch. The bridge is a thin HTTP webhook listener; `ao` owns the agent lifecycle.
+
 ## How It Works
 
 1. GitHub delivers a webhook to the bridge (directly or via a gateway).
 2. The bridge verifies the HMAC, extracts the `@zapbot <command>` mention from
    the comment body, and checks the commenter has write access.
-3. The bridge shells out to `ao spawn <issue>` with the project's
-   installation token; `ao` picks up from there.
+3. The bridge shells out to `ao spawn <issue>` with the GitHub App's
+   installation token (or PAT if configured); `ao` picks up from there and
+   fetches the issue context to dispatch an agent.
 
 Supported commands:
 
@@ -43,31 +46,40 @@ Create an app at https://github.com/settings/apps/new with:
 | Permissions | Issues R/W, Pull requests R/W, Contents R/W, Checks R |
 | Events | Issue comment |
 
-Note the App ID, generate a private key, install the app on your repos, note
-the installation ID.
+**Webhook URL:** The bridge listens on `0.0.0.0:3000` by default (configurable via `PORT` env var). Use the gateway URL if you set one up; otherwise, point directly to your bridge's public HTTPS endpoint.
+
+**Private key:** Download the private key (.pem file) from GitHub App settings. You'll reference it as `GITHUB_APP_PRIVATE_KEY` in your `.env` (see step 3).
+
+**Installation ID:** After creating the app, install it on your target repos and note the installation ID from the installation URL (`https://github.com/settings/installations/<id>`).
 
 ### 3. Bridge
 
+Clone the zapbot repo and create the required directories:
+
 ```bash
+mkdir -p ~/.claude/skills
 git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
-cd ~/.claude/skills/zapbot && ./setup --server
+cd ~/.claude/skills/zapbot
 ```
 
-Create `.env` in your project:
+> **Integrity note:** If you require git signature verification or want to pin to a specific release, use: `git clone --branch v<version> https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot`
+
+Create `.env` **before running setup** (the setup script expects it):
 
 ```bash
-# Two distinct secrets — webhook HMAC vs. broker Bearer.
-ZAPBOT_WEBHOOK_SECRET=<openssl rand -hex 32, also configured on the GitHub App>
-ZAPBOT_API_KEY=<openssl rand -hex 32, bearer for the local broker>
+# Two distinct secrets — webhook HMAC vs. bridge Bearer.
+# Generate with: openssl rand -hex 32
+ZAPBOT_WEBHOOK_SECRET=<same value as GitHub App webhook secret>
+ZAPBOT_API_KEY=<random 32-byte hex, used internally by the bridge to authenticate requests>
 
-# GitHub App (preferred)
-GITHUB_APP_ID=<app-id>
+# GitHub App (preferred authentication method)
+GITHUB_APP_ID=<app-id-from-github-app-settings>
 GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
-GITHUB_APP_INSTALLATION_ID=<installation-id>
+GITHUB_APP_INSTALLATION_ID=<installation-id-from-github-app-install>
 ZAPBOT_BOT_USERNAME=<app-slug>[bot]
 
-# Or a personal access token instead of the App:
-# ZAPBOT_GITHUB_TOKEN=<pat>
+# Alternative: Personal Access Token (less preferred; requires repo-level secrets management)
+# ZAPBOT_GITHUB_TOKEN=<ghp_... token with repo & issue:write scopes>
 
 # Gateway (only if using one):
 # ZAPBOT_GATEWAY_URL=https://your-app.onrender.com
@@ -75,24 +87,49 @@ ZAPBOT_BOT_USERNAME=<app-slug>[bot]
 # ZAPBOT_BRIDGE_URL=<public URL of this bridge>
 ```
 
-Then:
+**Important:** Add `.env` to `.gitignore` immediately to prevent secrets from being committed.
+
+```bash
+echo ".env" >> .gitignore
+git add .gitignore && git commit -m "chore: ignore .env"
+```
+
+Now run setup:
+
+```bash
+./setup --server
+```
+
+This initializes the project and prepares the bridge. Then:
 
 ```bash
 bin/zapbot-team-init <owner/repo>
 ./start.sh
 ```
 
+**`bin/zapbot-team-init`:** Initializes zapbot for a specific repo (owner/repo format, e.g., `anthropics/agent-orchestrator`). This script configures the bridge to listen for webhooks from that repo and sets up any required local state.
+
+**`./start.sh`:** Starts the bridge as a foreground process. For production, consider using a process manager (e.g., `systemd`, `supervisor`) to daemonize and restart on failure.
+
 ## For Teammates
 
+Install zapbot as a Claude Code skill:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chughtapan/zapbot/main/install.sh | bash
+git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
+cd ~/.claude/skills/zapbot
+bun install
 ```
+
+> **Integrity note:** If you require git signature verification or want to pin to a specific release, use: `git clone --branch v<version> https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot`
 
 In Claude Code:
 
 - `/zapbot-publish` — turn your plan into a `zapbot-plan`-labelled GitHub issue.
 - On any issue, mention `@zapbot plan this` or `@zapbot investigate this` to
   dispatch an agent.
+
+> **Note:** You do not need to run `./setup --server` or `./start.sh` as a teammate. The bridge is typically run centrally by your team lead. You only need the skill installed for the `/zapbot-publish` command and the `@zapbot` mention handlers in Claude Code to recognize your issues.
 
 ## Multi-Repo
 
@@ -120,6 +157,40 @@ projects:
 
 The bridge routes by `repository.full_name` and verifies HMAC with the
 per-repo secret resolved from `secretEnvVar`.
+
+## Secret Management
+
+### `.env` Safety
+
+- **Never commit `.env`:** Always add `.env` to `.gitignore`.
+- **Keep secrets out of the repo:** The `.env` file is local-only and should not be shared via Git. Use a secrets manager (e.g., 1Password, Vault) for team distribution.
+- **Private key storage:** Store `GITHUB_APP_PRIVATE_KEY` as a file path on disk (not inline in `.env`). Restrict file permissions: `chmod 600 app.pem`.
+
+### Secret Rotation
+
+If a secret is compromised:
+
+1. **Webhook secret (`ZAPBOT_WEBHOOK_SECRET`):**
+   - Generate a new value with `openssl rand -hex 32`.
+   - Update it in `.env`.
+   - Update it on the GitHub App settings page.
+
+2. **API key (`ZAPBOT_API_KEY`):**
+   - Generate a new value with `openssl rand -hex 32`.
+   - Update it in `.env`.
+   - Restart the bridge (`./start.sh`).
+
+3. **GitHub App private key:**
+   - Regenerate a new private key from the GitHub App settings page.
+   - Download and save it to disk.
+   - Update `GITHUB_APP_PRIVATE_KEY` in `.env` to point to the new file.
+   - Restart the bridge.
+
+4. **Personal Access Token (if used):**
+   - Revoke it immediately from your GitHub settings.
+   - Generate a new token with the minimum required scopes.
+   - Update `ZAPBOT_GITHUB_TOKEN` in `.env`.
+   - Restart the bridge.
 
 ## Development
 
