@@ -17,6 +17,7 @@
  */
 
 import type { Result } from "../types.ts";
+import { err, ok } from "../types.ts";
 import type {
   MoltzapInbound,
   MoltzapInboundMeta,
@@ -35,9 +36,17 @@ export interface SenderAllowlist {
   readonly __brand: "SenderAllowlist";
 }
 
+const ALLOWLIST = Symbol("SenderAllowlist.values");
+type SenderAllowlistInternal = SenderAllowlist & {
+  readonly [ALLOWLIST]: ReadonlySet<string>;
+};
+
 /** Construct a frozen allowlist from a configured set of sender IDs. */
 export function fromSenderIds(ids: readonly MoltzapSenderId[]): SenderAllowlist {
-  throw new Error("not implemented");
+  return Object.freeze({
+    __brand: "SenderAllowlist",
+    [ALLOWLIST]: new Set(ids),
+  }) as SenderAllowlist;
 }
 
 // ── Error channel ───────────────────────────────────────────────────
@@ -64,5 +73,18 @@ export function gateInbound(
   allowlist: SenderAllowlist,
   event: MoltzapInbound,
 ): Result<MoltzapInbound, AllowlistError> {
-  throw new Error("not implemented");
+  const values = (allowlist as SenderAllowlistInternal)[ALLOWLIST];
+  if (values.has(event.senderId)) {
+    return ok(event);
+  }
+  return err({
+    _tag: "SenderNotAllowed",
+    senderId: event.senderId,
+    event: {
+      messageId: event.messageId,
+      conversationId: event.conversationId,
+      senderId: event.senderId,
+      receivedAtMs: event.receivedAtMs,
+    },
+  });
 }

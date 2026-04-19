@@ -207,6 +207,7 @@ else
   echo "  1. Run ./start.sh to start the bridge"
 fi
 echo "  2. Mention @zapbot on an issue to kick off a plan or investigation"
+echo "     zapbot will dispatch a direct ao session; optional MoltZap env is forwarded if configured"
 echo ""
 echo "To add another repo later:"
 echo "  cd ~/other-project"

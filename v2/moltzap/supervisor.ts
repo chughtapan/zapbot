@@ -159,7 +159,10 @@ export function computeBackoff(
   policy: BackoffPolicy,
   clock: Clock,
 ): DelayMs {
-  throw new Error("not implemented");
+  const exponentialCap = Number(policy.initialMs) * 2 ** Number(attempt);
+  const maxDelay = Math.min(Number(policy.capMs), exponentialCap);
+  const jitter = Number(clock.randomJitter(asDelayMs(maxDelay)));
+  return asDelayMs(Math.min(Math.max(jitter, 0), maxDelay));
 }
 
 /**
@@ -183,7 +186,34 @@ export function step(
   policy: BackoffPolicy,
   clock: Clock,
 ): StepResult {
-  throw new Error("not implemented");
+  if (from._tag !== "GaveUp" && event._tag === "DrainRequested") {
+    return next({ _tag: "Draining", reason: event.reason }, { _tag: "None" });
+  }
+
+  switch (from._tag) {
+    case "Active":
+      if (event._tag !== "LifecycleProgressed") {
+        return illegal(from, event);
+      }
+      return stepActive(from, event.state, policy, clock);
+    case "Backoff":
+      if (event._tag !== "BackoffElapsed") {
+        return illegal(from, event);
+      }
+      return startFreshAttempt(from.attempts);
+    case "Draining":
+      if (event._tag !== "Stopped") {
+        return illegal(from, event);
+      }
+      return gaveUp({
+        _tag: "DrainCompleted",
+        reason: from.reason,
+      });
+    case "GaveUp":
+      return illegal(from, event);
+    default:
+      return absurd(from);
+  }
 }
 
 /**
@@ -191,14 +221,14 @@ export function step(
  * checks. True only when the inner lifecycle is `LISTENING`.
  */
 export function supervisorIsListening(state: SupervisorState): boolean {
-  throw new Error("not implemented");
+  return state._tag === "Active" && state.lifecycle._tag === "LISTENING";
 }
 
 /**
  * Terminal probe. True for `GaveUp`; the driver should exit the process.
  */
 export function supervisorIsTerminal(state: SupervisorState): boolean {
-  throw new Error("not implemented");
+  return state._tag === "GaveUp";
 }
 
 /**
@@ -212,5 +242,109 @@ export function supervisorIsTerminal(state: SupervisorState): boolean {
 export function freshAttempt(
   prevAttempts: AttemptCount,
 ): Result<{ readonly attempts: AttemptCount; readonly lifecycle: LifecycleState }, never> {
-  throw new Error("not implemented");
+  return {
+    _tag: "Ok",
+    value: {
+      attempts: asAttemptCount(Number(prevAttempts) + 1),
+      lifecycle: { _tag: "INIT" },
+    },
+  };
+}
+
+function stepActive(
+  from: Extract<SupervisorState, { readonly _tag: "Active" }>,
+  lifecycle: LifecycleState,
+  policy: BackoffPolicy,
+  clock: Clock,
+): StepResult {
+  if (lifecycle._tag === "LISTENING") {
+    return next(
+      {
+        _tag: "Active",
+        attempts: asAttemptCount(0),
+        lifecycle,
+      },
+      { _tag: "None" },
+    );
+  }
+
+  if (lifecycle._tag !== "FAILED") {
+    return next(
+      {
+        _tag: "Active",
+        attempts: from.attempts,
+        lifecycle,
+      },
+      { _tag: "None" },
+    );
+  }
+
+  if (Number(from.attempts) >= Number(policy.maxAttempts) - 1) {
+    return gaveUp({
+      _tag: "MaxAttemptsExhausted",
+      attempts: from.attempts,
+      lastCause: lifecycle.cause,
+    });
+  }
+
+  const delayMs = computeBackoff(from.attempts, policy, clock);
+  const firesAtMs = asWallClockMs(Number(clock.now()) + Number(delayMs));
+  return next(
+    {
+      _tag: "Backoff",
+      attempts: from.attempts,
+      waitUntilMs: firesAtMs,
+      lastCause: lifecycle.cause,
+    },
+    {
+      _tag: "ScheduleRetry",
+      delayMs,
+      firesAtMs,
+    },
+  );
+}
+
+function startFreshAttempt(
+  prevAttempts: AttemptCount,
+): StepResult {
+  const nextAttempt = freshAttempt(prevAttempts);
+  if (nextAttempt._tag !== "Ok") {
+    return absurd(nextAttempt.error);
+  }
+  return next(
+    {
+      _tag: "Active",
+      attempts: nextAttempt.value.attempts,
+      lifecycle: nextAttempt.value.lifecycle,
+    },
+    {
+      _tag: "StartAttempt",
+      attempts: nextAttempt.value.attempts,
+    },
+  );
+}
+
+function next(state: SupervisorState, action: SupervisorAction): StepResult {
+  return { _tag: "Next", state, action };
+}
+
+function illegal(from: SupervisorState, event: SupervisorEvent): StepResult {
+  return { _tag: "Illegal", from, event };
+}
+
+function gaveUp(cause: SupervisorGaveUp): StepResult {
+  return next(
+    {
+      _tag: "GaveUp",
+      cause,
+    },
+    {
+      _tag: "ReportGaveUp",
+      cause,
+    },
+  );
+}
+
+function absurd(x: never): never {
+  throw new Error(`unreachable: ${JSON.stringify(x)}`);
 }

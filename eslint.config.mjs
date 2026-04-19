@@ -18,7 +18,9 @@ export default [
       parser: tsparser,
       parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
     },
-    plugins: { 'agent-code-guard': guard },
+    plugins: {
+      'agent-code-guard': guard,
+    },
     rules: {
       ...guard.configs.recommended.rules,
       // Pre-existing violations tracked for follow-up. See issue links.

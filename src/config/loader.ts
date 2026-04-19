@@ -55,6 +55,7 @@ export function loadConfig(configPath?: string): {
     try {
       const raw = readFileSync(configPath, "utf-8");
       const parsed = parseYaml(raw) as ZapbotConfig;
+      validateConfig(parsed);
       const repoMap = buildRepoMap(parsed);
       log.info(`Loaded config from ${configPath}`, { repos: repoMap.size });
       return { config: parsed, repoMap };
@@ -108,12 +109,26 @@ function buildRepoMap(config: ZapbotConfig): RepoMap {
   return map;
 }
 
+function validateConfig(config: ZapbotConfig): void {
+  if (!config.projects) return;
+
+  for (const [projectName, project] of Object.entries(config.projects)) {
+    const secretEnvVar = project?.scm?.webhook?.secretEnvVar;
+    if (secretEnvVar === "ZAPBOT_API_KEY") {
+      throw new Error(
+        `Project ${projectName} uses deprecated webhook.secretEnvVar=ZAPBOT_API_KEY. ` +
+          `Use ZAPBOT_WEBHOOK_SECRET or a dedicated ZAPBOT_WEBHOOK_SECRET_<REPO>.`,
+      );
+    }
+  }
+}
+
 /**
  * Resolve the webhook secret for a given repo.
  *
  * Priority:
  * 1. Per-repo secret from the config's secretEnvVar (if different from shared)
- * 2. Shared ZAPBOT_API_KEY
+ * 2. Shared ZAPBOT_WEBHOOK_SECRET
  */
 export function resolveWebhookSecret(
   repoFullName: string,

@@ -1,7 +1,7 @@
 {
   "name": "zapbot",
   "version": "0.3.0",
-  "description": "Plan-to-code workflow for teams with SDS-inspired collaborative state machine",
+  "description": "Thin GitHub webhook bridge that dispatches direct ao sessions, with optional MoltZap session provisioning",
   "main": "dist/index.js",
   "scripts": {
     "test": "vitest run",

@@ -1,6 +1,6 @@
 ---
 name: zapbot-publish
-description: Publish the current plan to a GitHub issue labelled 'zapbot-plan' for team review.
+description: Publish the current plan to a GitHub issue that can be dispatched through zapbot.
 allowed-tools:
   - Bash
   - Read
@@ -21,7 +21,7 @@ gh auth status >/dev/null 2>&1 && echo "GH: ok" || echo "GH: missing"
 
 # /zapbot-publish
 
-Publish the current plan to a GitHub issue for team review. The issue carries the `zapbot-plan` label; team members can mention `@zapbot plan this` or `@zapbot investigate this` on it to dispatch an agent.
+Publish the current plan to a GitHub issue for zapbot dispatch. The issue carries the `zapbot-plan` label so teammates can mention `@zapbot plan this` or `@zapbot investigate this` to spawn a direct `ao` session on it.
 
 ## Steps
 
@@ -56,4 +56,4 @@ bash ~/.claude/skills/zapbot/bin/zapbot-publish.sh "$PLAN_FILE"
 
 Tell the user:
 - The GitHub issue URL printed by the script.
-- Remind them: "Comment `@zapbot plan this` on the issue to dispatch an agent, or `@zapbot investigate this` to spawn an investigator."
+- Remind them: "Comment `@zapbot plan this` or `@zapbot investigate this` on the issue to spawn a direct `ao` session."
