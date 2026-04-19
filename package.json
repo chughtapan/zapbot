@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "description": "Plan-to-code workflow for teams with SDS-inspired collaborative state machine",
   "main": "dist/index.js",
+  "packageManager": "bun@1.3.12",
   "scripts": {
     "test": "vitest run",
     "lint": "eslint 'src/**/*.ts' 'v2/**/*.ts' 'gateway/src/**/*.ts' 'bin/**/*.ts'",
