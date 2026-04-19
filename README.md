@@ -62,6 +62,8 @@ git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
 cd ~/.claude/skills/zapbot
 ```
 
+> **Integrity note:** If you require git signature verification or want to pin to a specific release, use: `git clone --branch v<version> https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot`
+
 Create `.env` **before running setup** (the setup script expects it):
 
 ```bash
@@ -118,6 +120,8 @@ git clone https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot
 cd ~/.claude/skills/zapbot
 bun install
 ```
+
+> **Integrity note:** If you require git signature verification or want to pin to a specific release, use: `git clone --branch v<version> https://github.com/chughtapan/zapbot.git ~/.claude/skills/zapbot`
 
 In Claude Code:
 
