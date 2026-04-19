@@ -18,7 +18,6 @@ STATE_DIR="$HOME/.zapbot"
 SKILLS=(
   "zap:skills/zap/SKILL.md"
   "zapbot-publish:skills/zapbot-publish/SKILL.md"
-  "zapbot-status:skills/zapbot-status/SKILL.md"
 )
 
 echo "=== Zapbot Skill Install ==="
@@ -57,12 +56,6 @@ echo "$GITHUB_RAW" > "$STATE_DIR/github-raw-url"
 # Set upgrade marker if version changed
 if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$REMOTE_VERSION" ]; then
   echo "$OLD_VERSION" > "$STATE_DIR/just-upgraded-from"
-fi
-
-# Install plannotator if missing
-if ! command -v plannotator >/dev/null 2>&1; then
-  echo "  Installing plannotator..."
-  curl -fsSL https://plannotator.ai/install.sh | bash 2>/dev/null || echo "  Warning: plannotator install failed (optional)"
 fi
 
 echo ""
