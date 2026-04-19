@@ -1,6 +1,6 @@
 // agent-code-guard wiring (issue #117). Published as
 // `eslint-plugin-agent-code-guard`; the plugin registers itself under the
-// legacy `safer-by-default/*` rule prefix.
+// `agent-code-guard/*` rule prefix.
 //
 // Triage policy: day-one violations are downgraded to `warn` with a written
 // reference to a tracking issue. Promote back to `error` and delete the
@@ -18,15 +18,15 @@ export default [
       parser: tsparser,
       parserOptions: { ecmaVersion: 2024, sourceType: 'module' },
     },
-    plugins: { 'safer-by-default': guard },
+    plugins: { 'agent-code-guard': guard },
     rules: {
       ...guard.configs.recommended.rules,
       // Pre-existing violations tracked for follow-up. See issue links.
-      'safer-by-default/promise-type': 'warn',          // #119 — 62 sites, Effect migration
-      'safer-by-default/async-keyword': 'warn',         // #120 — 55 sites, Effect migration
-      'safer-by-default/bare-catch': 'warn',            // #121 — 9 sites
-      'safer-by-default/no-raw-throw-new-error': 'warn', // #122 — 5 sites
-      'safer-by-default/record-cast': 'warn',           // #123 — 4 sites
+      'agent-code-guard/promise-type': 'warn',          // #119 — 62 sites, Effect migration
+      'agent-code-guard/async-keyword': 'warn',         // #120 — 55 sites, Effect migration
+      'agent-code-guard/bare-catch': 'warn',            // #121 — 9 sites
+      'agent-code-guard/no-raw-throw-new-error': 'warn', // #122 — 5 sites
+      'agent-code-guard/record-cast': 'warn',           // #123 — 4 sites
     },
   },
 ];
