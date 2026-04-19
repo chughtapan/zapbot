@@ -21,13 +21,14 @@ import type {
   MoltzapInbound,
   MoltzapInboundMeta,
   MoltzapSdkContext,
+  MoltzapSenderId,
 } from "./types.ts";
 
 // ── Errors ──────────────────────────────────────────────────────────
 
 export type BridgeError =
   | { readonly _tag: "NotListening"; readonly state: LifecycleState }
-  | { readonly _tag: "OutboundFailed"; readonly cause: string }
+  | { readonly _tag: "OutboundFailed"; readonly cause: unknown }
   | { readonly _tag: "PreReadyEventDropped"; readonly event: MoltzapInboundMeta };
 
 // ── Reply shape ─────────────────────────────────────────────────────
@@ -53,12 +54,12 @@ export interface ReplyReceipt {
 export type McpNotifier = (
   ctx: McpContext,
   notification: ChannelNotification,
-) => Promise<Result<void, { readonly cause: string }>>;
+) => Promise<Result<void, { readonly cause: unknown }>>;
 
 export type MoltzapSender = (
   ctx: MoltzapSdkContext,
   args: ReplyArgs,
-) => Promise<Result<void, { readonly cause: string }>>;
+) => Promise<Result<void, { readonly cause: unknown }>>;
 
 /** Shape written to MCP when routing an inbound moltzap event. */
 export interface ChannelNotification {
@@ -66,7 +67,7 @@ export interface ChannelNotification {
   readonly params: {
     readonly channelTag: string;
     readonly conversationId: MoltzapConversationId;
-    readonly senderId: string;
+    readonly senderId: MoltzapSenderId;
     readonly messageId: string;
     readonly body: string;
     readonly receivedAtMs: number;

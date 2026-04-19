@@ -34,23 +34,23 @@ export type DrainReason =
 // ── Errors ──────────────────────────────────────────────────────────
 
 export type LifecycleError =
-  | { readonly _tag: "TransportConnectError"; readonly cause: string }
-  | { readonly _tag: "MoltzapHandshakeError"; readonly cause: string }
+  | { readonly _tag: "TransportConnectError"; readonly cause: unknown }
+  | { readonly _tag: "MoltzapHandshakeError"; readonly cause: unknown }
   | { readonly _tag: "ListenerRegistrationError"; readonly cause: ListenerRegistrationError };
 
 export type ListenerRegistrationError =
   | { readonly _tag: "NotReady"; readonly state: LifecycleState }
-  | { readonly _tag: "SDKRejected"; readonly cause: string };
+  | { readonly _tag: "SDKRejected"; readonly cause: unknown };
 
 // ── Events ──────────────────────────────────────────────────────────
 
 export type LifecycleEvent =
   | { readonly _tag: "StdioConnectStarted" }
   | { readonly _tag: "StdioConnected" }
-  | { readonly _tag: "StdioFailed"; readonly cause: string }
+  | { readonly _tag: "StdioFailed"; readonly cause: unknown }
   | { readonly _tag: "MoltzapConnectStarted" }
   | { readonly _tag: "MoltzapReady" }
-  | { readonly _tag: "MoltzapFailed"; readonly cause: string }
+  | { readonly _tag: "MoltzapFailed"; readonly cause: unknown }
   | { readonly _tag: "ListenerRegistered"; readonly handle: ListenerHandle }
   | { readonly _tag: "ListenerFailed"; readonly cause: ListenerRegistrationError }
   | { readonly _tag: "DrainRequested"; readonly reason: DrainReason }
@@ -92,59 +92,147 @@ export function transition(
 
   switch (from._tag) {
     case "INIT":
-      if (event._tag === "StdioConnectStarted") return next({ _tag: "STDIO_CONNECTING" });
-      return illegal(from, event);
+      switch (event._tag) {
+        case "StdioConnectStarted":
+          return next({ _tag: "STDIO_CONNECTING" });
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapConnectStarted":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
+      }
 
     case "STDIO_CONNECTING":
-      if (event._tag === "StdioConnected") return next({ _tag: "STDIO_READY" });
-      if (event._tag === "StdioFailed") {
-        return next({
-          _tag: "FAILED",
-          cause: { _tag: "TransportConnectError", cause: event.cause },
-        });
+      switch (event._tag) {
+        case "StdioConnected":
+          return next({ _tag: "STDIO_READY" });
+        case "StdioFailed":
+          return next({
+            _tag: "FAILED",
+            cause: { _tag: "TransportConnectError", cause: event.cause },
+          });
+        case "StdioConnectStarted":
+        case "MoltzapConnectStarted":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
       }
-      return illegal(from, event);
 
     case "STDIO_READY":
-      if (event._tag === "MoltzapConnectStarted") return next({ _tag: "MOLTZAP_CONNECTING" });
-      return illegal(from, event);
+      switch (event._tag) {
+        case "MoltzapConnectStarted":
+          return next({ _tag: "MOLTZAP_CONNECTING" });
+        case "StdioConnectStarted":
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
+      }
 
     case "MOLTZAP_CONNECTING":
-      if (event._tag === "MoltzapReady") return next({ _tag: "MOLTZAP_READY" });
-      if (event._tag === "MoltzapFailed") {
-        return next({
-          _tag: "FAILED",
-          cause: { _tag: "MoltzapHandshakeError", cause: event.cause },
-        });
+      switch (event._tag) {
+        case "MoltzapReady":
+          return next({ _tag: "MOLTZAP_READY" });
+        case "MoltzapFailed":
+          return next({
+            _tag: "FAILED",
+            cause: { _tag: "MoltzapHandshakeError", cause: event.cause },
+          });
+        case "StdioConnectStarted":
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapConnectStarted":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
       }
-      return illegal(from, event);
 
     case "MOLTZAP_READY":
-      if (event._tag === "ListenerRegistered") {
-        return next({ _tag: "LISTENING", listener: event.handle });
+      switch (event._tag) {
+        case "ListenerRegistered":
+          return next({ _tag: "LISTENING", listener: event.handle });
+        case "ListenerFailed":
+          return next({
+            _tag: "FAILED",
+            cause: { _tag: "ListenerRegistrationError", cause: event.cause },
+          });
+        case "StdioConnectStarted":
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapConnectStarted":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
       }
-      if (event._tag === "ListenerFailed") {
-        return next({
-          _tag: "FAILED",
-          cause: { _tag: "ListenerRegistrationError", cause: event.cause },
-        });
-      }
-      return illegal(from, event);
 
     case "LISTENING":
       // Terminal event types (DrainRequested, Stopped) handled above.
       // All other events in LISTENING are bugs from the driver: events that
       // belong to earlier states cannot legally re-fire here.
-      return illegal(from, event);
+      switch (event._tag) {
+        case "StdioConnectStarted":
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapConnectStarted":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
+      }
 
     case "DRAINING":
       // Only Stopped (handled above) transitions out. All other events are
       // suppressed — the plugin is shutting down.
-      return illegal(from, event);
+      switch (event._tag) {
+        case "StdioConnectStarted":
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapConnectStarted":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
+      }
 
     case "STOPPED":
     case "FAILED":
-      return illegal(from, event);
+      switch (event._tag) {
+        case "StdioConnectStarted":
+        case "StdioConnected":
+        case "StdioFailed":
+        case "MoltzapConnectStarted":
+        case "MoltzapReady":
+        case "MoltzapFailed":
+        case "ListenerRegistered":
+        case "ListenerFailed":
+          return illegal(from, event);
+        default:
+          return absurd(event);
+      }
 
     default:
       return absurd(from);
@@ -168,9 +256,37 @@ function absurd(x: never): never {
 // ── Ready probe ─────────────────────────────────────────────────────
 
 export function isListening(state: LifecycleState): boolean {
-  return state._tag === "LISTENING";
+  switch (state._tag) {
+    case "LISTENING":
+      return true;
+    case "INIT":
+    case "STDIO_CONNECTING":
+    case "STDIO_READY":
+    case "MOLTZAP_CONNECTING":
+    case "MOLTZAP_READY":
+    case "DRAINING":
+    case "STOPPED":
+    case "FAILED":
+      return false;
+    default:
+      return absurd(state);
+  }
 }
 
 export function isMoltzapReady(state: LifecycleState): boolean {
-  return state._tag === "MOLTZAP_READY" || state._tag === "LISTENING";
+  switch (state._tag) {
+    case "MOLTZAP_READY":
+    case "LISTENING":
+      return true;
+    case "INIT":
+    case "STDIO_CONNECTING":
+    case "STDIO_READY":
+    case "MOLTZAP_CONNECTING":
+    case "DRAINING":
+    case "STOPPED":
+    case "FAILED":
+      return false;
+    default:
+      return absurd(state);
+  }
 }

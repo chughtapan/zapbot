@@ -11,7 +11,7 @@
  */
 
 import type { Result } from "../types.ts";
-import { err, ok } from "../types.ts";
+import { err } from "../types.ts";
 import type { LifecycleState, ListenerRegistrationError } from "./lifecycle.ts";
 import type {
   ListenerHandle,
@@ -29,7 +29,7 @@ import type {
 export type MoltzapRegistrar = (
   sdk: MoltzapSdkHandle,
   cb: (event: MoltzapInbound) => void,
-) => Promise<Result<ListenerHandle, { readonly _tag: "SDKRejected"; readonly cause: string }>>;
+) => Promise<Result<ListenerHandle, { readonly _tag: "SDKRejected"; readonly cause: unknown }>>;
 
 /**
  * Register the inbound callback against the moltzap SDK.
@@ -52,9 +52,5 @@ export async function register(
   if (state._tag !== "MOLTZAP_READY") {
     return err({ _tag: "NotReady", state });
   }
-  const result = await registrar(sdk, cb);
-  if (result._tag === "Ok") {
-    return ok(result.value);
-  }
-  return err(result.error);
+  return registrar(sdk, cb);
 }
