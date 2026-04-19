@@ -122,7 +122,7 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
 
   it("registers a fresh agent when a registration secret is configured", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ apiKey: "registered-key" }), {
+      new Response(JSON.stringify({ apiKey: "registered-key", agentId: "agent-123" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
       }),
@@ -141,6 +141,7 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
       value: {
         MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
         MOLTZAP_API_KEY: "registered-key",
+        MOLTZAP_LOCAL_SENDER_ID: "agent-123",
         MOLTZAP_ALLOWED_SENDERS: "agent-a",
       },
     });
