@@ -103,17 +103,25 @@ export async function onInbound(
     diag(dropped);
     return err(dropped);
   }
-  const result = await notify(mcp, {
-    method: "notifications/claude/channel",
-    params: {
-      channelTag: "moltzap",
-      conversationId: event.conversationId,
-      senderId: event.senderId,
-      messageId: event.messageId,
-      body: event.bodyText,
-      receivedAtMs: event.receivedAtMs,
-    },
-  });
+  // Defend against injected notifiers that throw/reject instead of returning
+  // `Err` — a closed stdio transport in the real SDK can surface that way.
+  // Principle 3: errors are typed, not thrown — re-pack into `OutboundFailed`.
+  let result: Result<void, { readonly cause: unknown }>;
+  try {
+    result = await notify(mcp, {
+      method: "notifications/claude/channel",
+      params: {
+        channelTag: "moltzap",
+        conversationId: event.conversationId,
+        senderId: event.senderId,
+        messageId: event.messageId,
+        body: event.bodyText,
+        receivedAtMs: event.receivedAtMs,
+      },
+    });
+  } catch (cause) {
+    return err({ _tag: "OutboundFailed", cause });
+  }
   if (result._tag === "Err") {
     return err({ _tag: "OutboundFailed", cause: result.error.cause });
   }
@@ -132,7 +140,15 @@ export async function reply(
   if (state._tag !== "LISTENING") {
     return err({ _tag: "NotListening", state });
   }
-  const result = await sender(sdkCtx, args);
+  // Defend against injected senders that throw/reject instead of returning
+  // `Err` — a closed websocket in the real SDK can surface that way.
+  // Principle 3: errors are typed, not thrown — re-pack into `OutboundFailed`.
+  let result: Result<void, { readonly cause: unknown }>;
+  try {
+    result = await sender(sdkCtx, args);
+  } catch (cause) {
+    return err({ _tag: "OutboundFailed", cause });
+  }
   if (result._tag === "Err") {
     return err({ _tag: "OutboundFailed", cause: result.error.cause });
   }

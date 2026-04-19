@@ -79,6 +79,19 @@ describe("bridge.onInbound — LISTENING gate", () => {
     if (result._tag !== "Err") return;
     expect(result.error._tag).toBe("OutboundFailed");
   });
+
+  it("surfaces OutboundFailed when notify throws", async () => {
+    const boom = new Error("transport already closed");
+    const notify: McpNotifier = async () => {
+      throw boom;
+    };
+    const result = await onInbound(LISTENING, makeEvent(), mcpCtx, notify, () => {});
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("OutboundFailed");
+    if (result.error._tag !== "OutboundFailed") return;
+    expect(result.error.cause).toBe(boom);
+  });
 });
 
 describe("bridge.reply — LISTENING gate", () => {
@@ -148,6 +161,24 @@ describe("bridge.reply — LISTENING gate", () => {
     expect(result._tag).toBe("Err");
     if (result._tag !== "Err") return;
     expect(result.error._tag).toBe("OutboundFailed");
+  });
+
+  it("surfaces OutboundFailed when sender throws", async () => {
+    const boom = new Error("socket closed mid-send");
+    const sender: MoltzapSender = async () => {
+      throw boom;
+    };
+    const result = await reply(
+      LISTENING,
+      { conversationId: asMoltzapConversationId("conv-A"), text: "ack" },
+      sdkCtx,
+      sender,
+    );
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("OutboundFailed");
+    if (result.error._tag !== "OutboundFailed") return;
+    expect(result.error.cause).toBe(boom);
   });
 });
 

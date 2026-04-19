@@ -52,5 +52,12 @@ export async function register(
   if (state._tag !== "MOLTZAP_READY") {
     return err({ _tag: "NotReady", state });
   }
-  return registrar(sdk, cb);
+  // Defend against injected registrars that throw/reject before building a
+  // `Result` — a closed session or duplicate listener wiring in the real SDK
+  // can surface that way. Principle 3: errors are typed, not thrown.
+  try {
+    return await registrar(sdk, cb);
+  } catch (cause) {
+    return err({ _tag: "SDKRejected", cause });
+  }
 }

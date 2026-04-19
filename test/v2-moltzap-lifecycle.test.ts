@@ -137,6 +137,19 @@ describe("lifecycle.transition — shutdown", () => {
     if (r2._tag !== "Next") return;
     expect(r2.state._tag).toBe("STOPPED");
   });
+
+  it("Stopped from FAILED → Illegal (preserve failure cause)", () => {
+    // Drive to FAILED via StdioFailed, then check a late Stopped is rejected
+    // and does not overwrite the LifecycleError.
+    const r1 = transition(INITIAL, { _tag: "StdioConnectStarted" });
+    if (r1._tag !== "Next") throw new Error("setup broke");
+    const r2 = transition(r1.state, { _tag: "StdioFailed", cause: "boom" });
+    expect(r2._tag).toBe("Next");
+    if (r2._tag !== "Next") return;
+    expect(r2.state._tag).toBe("FAILED");
+    const r3 = transition(r2.state, { _tag: "Stopped" });
+    expect(r3._tag).toBe("Illegal");
+  });
 });
 
 describe("lifecycle.transition — illegal events", () => {

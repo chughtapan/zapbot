@@ -89,6 +89,20 @@ describe("listener.register — SDK rejection", () => {
     if (result._tag !== "Err") return;
     expect(result.error._tag).toBe("SDKRejected");
   });
+
+  it("registrar throws → Err(SDKRejected) with thrown cause", async () => {
+    const state = driveTo(READY_PATH);
+    const boom = new Error("duplicate listener wiring");
+    const registrar: MoltzapRegistrar = async () => {
+      throw boom;
+    };
+    const result = await register(state, sdk, noopCb, registrar);
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("SDKRejected");
+    if (result.error._tag !== "SDKRejected") return;
+    expect(result.error.cause).toBe(boom);
+  });
 });
 
 describe("listener.register — re-registration guard", () => {

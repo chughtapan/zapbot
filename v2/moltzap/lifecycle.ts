@@ -86,7 +86,10 @@ export function transition(
     return next({ _tag: "DRAINING", reason: event.reason });
   }
   if (event._tag === "Stopped") {
-    if (from._tag === "STOPPED") return illegal(from, event);
+    // STOPPED is already stopped; FAILED is terminal and must preserve its
+    // cause — a late Stopped from the driver must not overwrite the
+    // LifecycleError that led to FAILED.
+    if (from._tag === "STOPPED" || from._tag === "FAILED") return illegal(from, event);
     return next({ _tag: "STOPPED" });
   }
 
