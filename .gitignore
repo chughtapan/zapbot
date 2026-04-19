@@ -7,3 +7,5 @@ dist/
 *.pem
 agent-orchestrator.yaml
 .agent-rules.md
+.stryker-tmp/
+reports/mutation/

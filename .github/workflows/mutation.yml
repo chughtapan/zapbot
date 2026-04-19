@@ -1,0 +1,26 @@
+name: mutation
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Restore Stryker incremental cache
+        uses: actions/cache@v4
+        with:
+          path: .stryker-tmp/incremental.json
+          key: stryker-incremental-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            stryker-incremental-${{ github.ref }}-
+            stryker-incremental-
+      - run: bun run mutation
