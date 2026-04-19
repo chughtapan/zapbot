@@ -103,6 +103,31 @@ function generateAgentId(): string {
   return `agent-${crypto.randomUUID()}`;
 }
 
+// If an ao session for this issue reports a non-terminal status, its worktree
+// is still the legitimate home of in-progress work — the recovery path is
+// `ao session restore`, not `git worktree remove --force`. See
+// safer-by-default#65 (tier-1 reentrance spike).
+const RESTORABLE_AO_STATUSES = new Set(["active", "ready", "stuck", "terminated", "idle"]);
+
+async function hasRestorableAoSession(issueNumber: number): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["ao", "session", "ls", "--json"], { stdout: "pipe", stderr: "pipe" });
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return false;
+    const sessions = JSON.parse(stdout) as Array<{ issueId?: number | string | null; status?: string }>;
+    for (const s of sessions) {
+      if (s?.issueId == null) continue;
+      const sid = typeof s.issueId === "string" ? Number(s.issueId) : s.issueId;
+      if (sid !== issueNumber) continue;
+      if (s.status && RESTORABLE_AO_STATUSES.has(s.status)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 async function cleanStaleWorktree(issueNumber: number): Promise<void> {
   const branch = `feat/issue-${issueNumber}`;
   try {
@@ -111,6 +136,15 @@ async function cleanStaleWorktree(issueNumber: number): Promise<void> {
     await proc.exited;
 
     if (!stdout.includes(`refs/heads/${branch}`)) return;
+
+    if (await hasRestorableAoSession(issueNumber)) {
+      log.warn(
+        `Skipping cleanStaleWorktree for ${branch}: restorable ao session present. ` +
+        `Use 'ao session restore' to resume; see safer-by-default#65.`,
+        { issueNumber, branch },
+      );
+      return;
+    }
 
     // Porcelain output is block-structured, separated by blank lines
     for (const block of stdout.split("\n\n")) {
