@@ -12,6 +12,11 @@
 import type { Result } from "../types.ts";
 import { err, ok } from "../types.ts";
 import type { LifecycleState, ListenerRegistrationError } from "./lifecycle.ts";
+import {
+  asMoltzapConversationId,
+  asMoltzapMessageId,
+  asMoltzapSenderId,
+} from "./types.ts";
 import type {
   ListenerHandle,
   MoltzapConversationId,
@@ -30,7 +35,7 @@ import type {
 export type DecodeError = {
   readonly _tag: "DecodeError";
   /** The field path that failed validation ("." for non-object input). */
-  readonly field: string;
+  readonly field: "." | "messageId" | "conversationId" | "senderId" | "bodyText" | "receivedAtMs";
   /** The raw value that failed. */
   readonly raw: unknown;
 };
@@ -99,6 +104,7 @@ function decodeMoltzapInbound(raw: unknown): Result<MoltzapInbound, DecodeError>
     return err({ _tag: "DecodeError", field: ".", raw });
   }
   const r = raw as Record<string, unknown>;
+  // ?? short-circuits: returns the first field error encountered, at most one per event.
   const fieldErr =
     checkField(r, "messageId", "string") ??
     checkField(r, "conversationId", "string") ??
@@ -107,9 +113,9 @@ function decodeMoltzapInbound(raw: unknown): Result<MoltzapInbound, DecodeError>
     checkField(r, "receivedAtMs", "number");
   if (fieldErr) return err(fieldErr);
   return ok({
-    messageId: r["messageId"] as MoltzapMessageId,
-    conversationId: r["conversationId"] as MoltzapConversationId,
-    senderId: r["senderId"] as MoltzapSenderId,
+    messageId: asMoltzapMessageId(r["messageId"] as string),
+    conversationId: asMoltzapConversationId(r["conversationId"] as string),
+    senderId: asMoltzapSenderId(r["senderId"] as string),
     bodyText: r["bodyText"] as string,
     receivedAtMs: r["receivedAtMs"] as number,
   });
@@ -117,8 +123,8 @@ function decodeMoltzapInbound(raw: unknown): Result<MoltzapInbound, DecodeError>
 
 function checkField(
   r: Record<string, unknown>,
-  field: string,
-  type: string,
+  field: "messageId" | "conversationId" | "senderId" | "bodyText" | "receivedAtMs",
+  type: "string" | "number",
 ): DecodeError | null {
   return typeof r[field] !== type ? { _tag: "DecodeError", field, raw: r[field] } : null;
 }
