@@ -360,6 +360,105 @@ exit 0
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
   });
+
+  it("rejects a dead explicit bridge url even without a gateway configured", () => {
+    const repoRoot = path.join(__dirname, "..");
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-explicit-"));
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-home-"));
+    const projectDir = path.join(tempRoot, "project");
+    const fakeBinDir = path.join(tempRoot, "bin");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
+
+    try {
+      writeFile(
+        path.join(projectDir, "agent-orchestrator.yaml"),
+        [
+          "projects:",
+          "  demo:",
+          "    repo: owner/repo",
+          "    path: " + projectDir,
+          "    defaultBranch: main",
+          "    scm:",
+          "      plugin: github",
+          "      webhook:",
+          "        path: /api/webhooks/github",
+          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
+          "        signatureHeader: x-hub-signature-256",
+          "        eventHeader: x-github-event",
+          "",
+        ].join("\n"),
+      );
+      writeFile(
+        path.join(projectDir, ".env"),
+        [
+          "ZAPBOT_API_KEY=project-api-key",
+          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
+          "ZAPBOT_BRIDGE_URL=http://dead.example:3000",
+          "",
+        ].join("\n"),
+      );
+
+      writeExecutable(
+        path.join(fakeBinDir, "gh"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  echo "fake-user"
+  exit 0
+fi
+echo "unexpected gh args: $@" >&2
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "systemctl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "curl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+url="\${!#}"
+case "$url" in
+  http://dead.example:3000/healthz)
+    exit 7
+    ;;
+  *)
+    echo "unexpected curl url: $url" >&2
+    exit 1
+    ;;
+esac
+`,
+      );
+
+      let output = "";
+      try {
+        execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
+          cwd: projectDir,
+          env: {
+            ...process.env,
+            HOME: tempHome,
+            PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+          },
+          encoding: "utf8",
+        });
+      } catch (error) {
+        output = String((error as { stdout?: unknown; stderr?: unknown }).stdout ?? "") +
+          String((error as { stdout?: unknown; stderr?: unknown }).stderr ?? "");
+      }
+
+      expect(output).toContain("ERROR: ZAPBOT_BRIDGE_URL is unreachable: http://dead.example:3000");
+      expect(output).toContain("FIX: Do not rely on host-derived fallback; set ZAPBOT_BRIDGE_URL to a live public URL.");
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("systemd integration: team-init reload", () => {

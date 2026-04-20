@@ -136,7 +136,7 @@ fi
 
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 
-if [ -n "${ZAPBOT_GATEWAY_URL:-}" ]; then
+if [ -n "${ZAPBOT_BRIDGE_URL:-}" ]; then
   validate_bridge_url || exit 1
   export ZAPBOT_BRIDGE_URL
 fi
