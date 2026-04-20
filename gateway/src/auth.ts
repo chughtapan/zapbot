@@ -30,12 +30,85 @@ export type AuthOutcome =
   | { ok: true; result: AuthResult }
   | { ok: false; error: AuthError };
 
+export interface PatAuthResult {
+  user: string;
+  permission: string;
+  repo: string;
+}
+
+export type PatAuthOutcome =
+  | { ok: true; result: PatAuthResult }
+  | { ok: false; error: AuthError };
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 const encoder = new TextEncoder();
 
 function authError(type: string, message: string, fix: string): AuthOutcome {
   return { ok: false, error: { type, message, fix } };
+}
+
+function patAuthError(
+  type: string,
+  message: string,
+  fix: string,
+): PatAuthOutcome {
+  return { ok: false, error: { type, message, fix } };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function decodeGitHubUserLogin(body: unknown): { ok: true; login: string } | PatAuthOutcome {
+  if (!isRecord(body) || typeof body.login !== "string" || body.login.length === 0) {
+    return patAuthError(
+      "github_api_error",
+      "GitHub API returned a user response without a login.",
+      "Check GitHub API status and try again.",
+    );
+  }
+
+  return { ok: true, login: body.login };
+}
+
+function decodeGitHubPermission(
+  body: unknown,
+): { ok: true; permission: string } | PatAuthOutcome {
+  if (
+    !isRecord(body) ||
+    typeof body.permission !== "string" ||
+    body.permission.length === 0
+  ) {
+    return patAuthError(
+      "github_api_error",
+      "GitHub API returned a permission response without a permission value.",
+      "Check GitHub API status and try again.",
+    );
+  }
+
+  return { ok: true, permission: body.permission };
+}
+
+function extractBearerToken(authHeader: string | null): { ok: true; token: string } | AuthOutcome {
+  if (!authHeader) {
+    return authError(
+      "missing_token",
+      "No Authorization header provided.",
+      "Include `Authorization: Bearer <token>` header.",
+    );
+  }
+
+  const parts = authHeader.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer" || !parts[1]) {
+    return authError(
+      "invalid_token_format",
+      "Authorization header must be `Bearer <token>`.",
+      "Check header format.",
+    );
+  }
+
+  return { ok: true, token: parts[1] };
 }
 
 // ── GitHub token cache ─────────────────────────────────────────────
@@ -48,9 +121,18 @@ interface CacheEntry {
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const tokenCache = new Map<string, CacheEntry>();
 
+interface PatCacheEntry {
+  result: PatAuthResult;
+  expiresAt: number;
+}
+
+const patCache = new Map<string, PatCacheEntry>();
+const WRITE_PERMISSIONS = new Set(["write", "admin", "maintain"]);
+
 /** Clear the token cache — exposed for tests. */
 export function clearTokenCache(): void {
   tokenCache.clear();
+  patCache.clear();
 }
 
 /** Get current cache size — exposed for tests. */
@@ -141,6 +223,130 @@ export async function verifyGitHubToken(
   }
 }
 
+/**
+ * Verify a teammate GitHub PAT against repo collaborator permissions.
+ *
+ * Flow:
+ * 1. GET /user to identify the PAT holder
+ * 2. GET /repos/{owner}/{repo}/collaborators/{user}/permission
+ * 3. Require write/admin/maintain
+ *
+ * Successful user+permission pairs are cached per token+repo for 5 minutes.
+ */
+export async function verifyGitHubPAT(
+  token: string,
+  repo: string,
+): Promise<PatAuthOutcome> {
+  const cacheKey = `${token}:${repo}`;
+  const cached = patCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { ok: true, result: cached.result };
+  }
+
+  if (cached) {
+    patCache.delete(cacheKey);
+  }
+
+  try {
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+      "user-agent": "zapbot-gateway",
+    };
+
+    const userResp = await globalThis.fetch("https://api.github.com/user", {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (userResp.status === 401) {
+      return patAuthError(
+        "invalid_token",
+        "GitHub PAT is invalid or expired.",
+        "Ensure you are sending a valid GitHub personal access token.",
+      );
+    }
+
+    if (!userResp.ok) {
+      return patAuthError(
+        "github_api_error",
+        `GitHub API returned ${userResp.status} while identifying the user.`,
+        "Check GitHub API status and try again.",
+      );
+    }
+
+    const userBody = decodeGitHubUserLogin(await userResp.json());
+    if (!userBody.ok) {
+      return userBody;
+    }
+
+    const permissionResp = await globalThis.fetch(
+      `https://api.github.com/repos/${repo}/collaborators/${userBody.login}/permission`,
+      {
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+
+    if (permissionResp.status === 401) {
+      return patAuthError(
+        "invalid_token",
+        "GitHub PAT is invalid or expired.",
+        "Ensure you are sending a valid GitHub personal access token.",
+      );
+    }
+
+    if (permissionResp.status === 404) {
+      return patAuthError(
+        "repo_not_authorized",
+        `Not authorized for repo ${repo}.`,
+        "Ensure your GitHub user has write access to this repository.",
+      );
+    }
+
+    if (!permissionResp.ok) {
+      return patAuthError(
+        "github_api_error",
+        `GitHub API returned ${permissionResp.status} while checking repo permissions.`,
+        "Check GitHub API status and try again.",
+      );
+    }
+
+    const permissionBody = decodeGitHubPermission(await permissionResp.json());
+    if (!permissionBody.ok) {
+      return permissionBody;
+    }
+
+    if (!WRITE_PERMISSIONS.has(permissionBody.permission)) {
+      return patAuthError(
+        "repo_not_authorized",
+        `Not authorized for repo ${repo}.`,
+        "Ensure your GitHub user has write access to this repository.",
+      );
+    }
+
+    const result: PatAuthResult = {
+      user: userBody.login,
+      permission: permissionBody.permission,
+      repo,
+    };
+
+    patCache.set(cacheKey, {
+      result,
+      expiresAt: Date.now() + TOKEN_CACHE_TTL_MS,
+    });
+
+    return { ok: true, result };
+  } catch {
+    return patAuthError(
+      "github_api_error",
+      "Failed to reach GitHub API for PAT verification.",
+      "Check network connectivity and try again.",
+    );
+  }
+}
+
 // ── Shared-secret verification ─────────────────────────────────────
 
 /**
@@ -190,25 +396,12 @@ export async function verifyRequest(
   req: Request,
   config: AuthConfig,
 ): Promise<AuthOutcome> {
-  const authHeader = req.headers.get("authorization");
-  if (!authHeader) {
-    return authError(
-      "missing_token",
-      "No Authorization header provided.",
-      "Include `Authorization: Bearer <token>` header.",
-    );
+  const tokenResult = extractBearerToken(req.headers.get("authorization"));
+  if (!tokenResult.ok) {
+    return tokenResult;
   }
 
-  const parts = authHeader.split(" ");
-  if (parts.length !== 2 || parts[0] !== "Bearer" || !parts[1]) {
-    return authError(
-      "invalid_token_format",
-      "Authorization header must be `Bearer <token>`.",
-      "Check header format.",
-    );
-  }
-
-  const token = parts[1];
+  const { token } = tokenResult;
 
   // Try shared-secret first (fast, no network call)
   if (config.gatewaySecret) {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   verifyGitHubToken,
+  verifyGitHubPAT,
   verifySharedSecret,
   verifyRequest,
   requireRepoAccess,
@@ -19,6 +20,14 @@ const MOCK_REPOS_RESPONSE = {
     { full_name: "acme/app" },
     { full_name: "acme/lib" },
   ],
+};
+
+const MOCK_USER_RESPONSE = {
+  login: "tapanc",
+};
+
+const MOCK_PERMISSION_RESPONSE = {
+  permission: "write",
 };
 
 function defaultConfig(overrides?: Partial<AuthConfig>): AuthConfig {
@@ -175,6 +184,92 @@ describe("verifyGitHubToken", () => {
     if (result.ok) {
       expect(result.result.repos).toEqual([]);
     }
+  });
+});
+
+// ── verifyGitHubPAT ───────────────────────────────────────────────
+
+describe("verifyGitHubPAT", () => {
+  it("accepts a PAT for a teammate with write access", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(MOCK_USER_RESPONSE, { status: 200 }))
+      .mockResolvedValueOnce(Response.json(MOCK_PERMISSION_RESPONSE, { status: 200 }));
+
+    const result = await verifyGitHubPAT("ghp_writer", "acme/app");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.result.user).toBe("tapanc");
+      expect(result.result.permission).toBe("write");
+      expect(result.result.repo).toBe("acme/app");
+    }
+  });
+
+  it("rejects an invalid PAT", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 }),
+    );
+
+    const result = await verifyGitHubPAT("ghp_invalid", "acme/app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("invalid_token");
+    }
+  });
+
+  it("rejects a teammate without write access", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(MOCK_USER_RESPONSE, { status: 200 }))
+      .mockResolvedValueOnce(Response.json({ permission: "read" }, { status: 200 }));
+
+    const result = await verifyGitHubPAT("ghp_reader", "acme/app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("repo_not_authorized");
+    }
+  });
+
+  it("rejects a malformed GitHub user payload", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      Response.json({ login: 91 }, { status: 200 }),
+    );
+
+    const result = await verifyGitHubPAT("ghp_malformed_user", "acme/app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("github_api_error");
+      expect(result.error.message).toContain("without a login");
+    }
+  });
+
+  it("rejects a malformed GitHub permission payload", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(MOCK_USER_RESPONSE, { status: 200 }))
+      .mockResolvedValueOnce(Response.json({ permission: 123 }, { status: 200 }));
+
+    const result = await verifyGitHubPAT("ghp_malformed_permission", "acme/app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("github_api_error");
+      expect(result.error.message).toContain("without a permission value");
+    }
+  });
+
+  it("caches valid PAT checks per repo", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(MOCK_USER_RESPONSE, { status: 200 }))
+      .mockResolvedValueOnce(Response.json(MOCK_PERMISSION_RESPONSE, { status: 200 }));
+    globalThis.fetch = mockFetch;
+
+    const first = await verifyGitHubPAT("ghp_writer", "acme/app");
+    const second = await verifyGitHubPAT("ghp_writer", "acme/app");
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 
