@@ -32,7 +32,7 @@ export interface IngressPolicyInputs {
   readonly isPublicUrlReachable: (publicUrl: string) => Promise<boolean>;
 }
 
-export function resolveIngressPolicy(
+export async function resolveIngressPolicy(
   inputs: IngressPolicyInputs,
 ): Promise<Result<IngressPolicy, IngressResolutionError>> {
   if (inputs.mode === "local-only") {
@@ -57,17 +57,16 @@ export function resolveIngressPolicy(
     return Promise.resolve(err({ _tag: "MissingPublicBridgeUrl" }));
   }
 
-  return inputs.isPublicUrlReachable(publicUrl).then((reachable) => {
-    if (!reachable) {
-      return err({ _tag: "UnreachablePublicBridgeUrl", publicUrl });
-    }
+  const reachable = await inputs.isPublicUrlReachable(publicUrl);
+  if (!reachable) {
+    return err({ _tag: "UnreachablePublicBridgeUrl", publicUrl });
+  }
 
-    return ok({
-      _tag: "GitHubDemo",
-      mode: "github-demo",
-      gatewayUrl,
-      publicUrl,
-      requiresReachablePublicUrl: true,
-    });
+  return ok({
+    _tag: "GitHubDemo",
+    mode: "github-demo",
+    gatewayUrl,
+    publicUrl,
+    requiresReachablePublicUrl: true,
   });
 }
