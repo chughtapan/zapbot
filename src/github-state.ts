@@ -41,6 +41,38 @@ export interface CommentSnapshot {
   readonly createdAt: string;
 }
 
+interface IssueEventSourcePullRequest {
+  readonly number?: number | null;
+}
+
+interface IssueEventSource {
+  readonly type?: string | null;
+  readonly pull_request?: IssueEventSourcePullRequest | null;
+  readonly issue?: { readonly number?: number | null } | null;
+}
+
+interface IssueEventSnapshot {
+  readonly event?: string | null;
+  readonly created_at?: string | null;
+  readonly source?: IssueEventSource | null;
+}
+
+interface JsonObject {
+  readonly [key: string]: unknown;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object";
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === "number";
+}
+
 export type Claim =
   | { readonly kind: "unclaimed" }
   | { readonly kind: "claimed"; readonly by: BotUsername };
@@ -159,6 +191,158 @@ export async function postComment(
   } catch (e) {
     return err(toError(repo, issue, e));
   }
+}
+
+export async function getLinkedPullRequest(
+  repo: RepoFullName,
+  issue: IssueNumber
+): Promise<Result<IssueNumber | null, GithubStateError>> {
+  const client = getOctokit();
+  if (client === null) return err({ _tag: "GitHubAuthMissing" });
+  const r = splitRepo(repo);
+  try {
+    const events = await listAllIssueEvents(client, r.owner, r.repo, issue as unknown as number);
+    if (events._tag === "Err") return err(events.error);
+    return ok(findLinkedPullRequest(events.value));
+  } catch (e) {
+    return err(toError(repo, issue, e));
+  }
+}
+
+async function listAllIssueEvents(
+  client: Octokit,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+): Promise<Result<ReadonlyArray<IssueEventSnapshot>, GithubStateError>> {
+  const collected: IssueEventSnapshot[] = [];
+  for (let page = 1; ; page += 1) {
+    const response = await client.rest.issues.listEvents({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      per_page: 100,
+      page,
+    });
+    const decoded = decodeIssueEventPage(response.data);
+    if (decoded._tag === "Err") return err(decoded.error);
+    collected.push(...decoded.value);
+    if (response.data.length < 100) break;
+  }
+  return ok(collected);
+}
+
+function decodeIssueEventPage(data: unknown): Result<ReadonlyArray<IssueEventSnapshot>, GithubStateError> {
+  if (!Array.isArray(data)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: "issue events payload was not an array" });
+  }
+  const events: IssueEventSnapshot[] = [];
+  for (const entry of data) {
+    const decoded = decodeIssueEvent(entry);
+    if (decoded._tag === "Err") return decoded;
+    events.push(decoded.value);
+  }
+  return ok(events);
+}
+
+function decodeIssueEvent(entry: unknown): Result<IssueEventSnapshot, GithubStateError> {
+  if (!isJsonObject(entry)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: "issue event entry was not an object" });
+  }
+  const event = decodeOptionalString(entry.event, "issue event entry had invalid event");
+  if (event._tag === "Err") return event;
+  const createdAt = decodeOptionalString(entry.created_at, "issue event entry had invalid created_at");
+  if (createdAt._tag === "Err") return createdAt;
+  const source = decodeIssueEventSource(entry.source);
+  if (source._tag === "Err") return source;
+  return ok({
+    event: event.value,
+    created_at: createdAt.value,
+    source: source.value,
+  });
+}
+
+function decodeIssueEventSource(value: unknown): Result<IssueEventSource | null, GithubStateError> {
+  if (value === undefined || value === null) {
+    return ok(null);
+  }
+  if (!isJsonObject(value)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: "issue event entry had invalid source" });
+  }
+
+  const type = decodeOptionalString(value.type, "issue event source had invalid type");
+  if (type._tag === "Err") return type;
+
+  let issue: { readonly number?: number | null } | undefined = undefined;
+  if (value.issue !== undefined && value.issue !== null) {
+    if (!isJsonObject(value.issue)) {
+      return err({ _tag: "GitHubApiFailed", status: -1, message: "issue event source had invalid issue" });
+    }
+    const number = decodeOptionalNumber(value.issue.number, "issue event source issue had invalid number");
+    if (number._tag === "Err") return number;
+    issue = { number: number.value };
+  }
+
+  let pullRequest: IssueEventSourcePullRequest | undefined = undefined;
+  if (value.pull_request !== undefined && value.pull_request !== null) {
+    if (!isJsonObject(value.pull_request)) {
+      return err({ _tag: "GitHubApiFailed", status: -1, message: "issue event source had invalid pull_request" });
+    }
+    const number = decodeOptionalNumber(value.pull_request.number, "issue event source pull_request had invalid number");
+    if (number._tag === "Err") return number;
+    pullRequest = { number: number.value };
+  }
+
+  return ok({
+    type: type.value,
+    issue,
+    pull_request: pullRequest,
+  });
+}
+
+function decodeOptionalString(
+  value: unknown,
+  message: string,
+): Result<string | null | undefined, GithubStateError> {
+  if (value === undefined || value === null) return ok(value);
+  if (isString(value)) return ok(value);
+  return err({ _tag: "GitHubApiFailed", status: -1, message });
+}
+
+function decodeOptionalNumber(
+  value: unknown,
+  message: string,
+): Result<number | null | undefined, GithubStateError> {
+  if (value === undefined || value === null) return ok(value);
+  if (isNumber(value)) return ok(value);
+  return err({ _tag: "GitHubApiFailed", status: -1, message });
+}
+
+function findLinkedPullRequest(events: ReadonlyArray<IssueEventSnapshot>): IssueNumber | null {
+  let latestAt = Number.NEGATIVE_INFINITY;
+  let linked: IssueNumber | null = null;
+  for (const event of events) {
+    if (event.event !== "cross-referenced") continue;
+    const pullRequest = extractPullRequestNumber(event.source);
+    if (pullRequest === null) continue;
+    const createdAt = event.created_at ? Date.parse(event.created_at) : Number.NaN;
+    if (Number.isNaN(createdAt)) continue;
+    if (createdAt >= latestAt) {
+      latestAt = createdAt;
+      linked = pullRequest;
+    }
+  }
+  return linked;
+}
+
+function extractPullRequestNumber(source: IssueEventSource | null | undefined): IssueNumber | null {
+  if (!source) return null;
+  if (source.type !== undefined && source.type !== null && source.type !== "pull_request") {
+    return null;
+  }
+  const number = source.pull_request?.number ?? source.issue?.number ?? null;
+  if (typeof number !== "number") return null;
+  return asIssueNumber(number);
 }
 
 // ── Octokit wiring ──────────────────────────────────────────────────

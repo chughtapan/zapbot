@@ -218,6 +218,28 @@ describe("bridge fetch handler — webhook route", () => {
     expect(((await r.json()) as { error: { type: string } }).error.type).toBe("invalid_request");
   });
 
+  it("well-signed issue_comment on a PR thread returns 200 with ignored outcome", async () => {
+    const h = makeHandler();
+    const body = JSON.stringify({
+      action: "created",
+      repository: { full_name: "acme/app" },
+      sender: { login: "alice" },
+      issue: { number: 1, pull_request: { url: "https://api.github.com/repos/acme/app/pulls/1" } },
+      comment: { id: 1, body: "@zapbot status" },
+    });
+    const sig = await signPayload(body, WEBHOOK_SECRET);
+    const r = await post(h, "/api/webhooks/github", body, {
+      "x-hub-signature-256": sig,
+      "x-github-event": "issue_comment",
+      "x-github-delivery": "d-1",
+    });
+    expect(r.status).toBe(200);
+    const parsed = (await r.json()) as { ok: boolean; outcome: { kind: string; reason: string } };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.outcome.kind).toBe("ignored");
+    expect(parsed.outcome.reason).toBe("pull_request_thread");
+  });
+
   it("well-signed pull_request event returns 200 with ignored outcome", async () => {
     const h = makeHandler();
     const body = JSON.stringify({

@@ -76,6 +76,22 @@ describe("verifyAndClassify", () => {
     if (r._tag === "Ok") expect(r.value.kind).toBe("ignore");
   });
 
+  it("ignores issue_comment events opened on pull request threads", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      sender: { login: "alice" },
+      issue: { number: 7, pull_request: { url: "https://api.github.com/repos/acme/app/pulls/7" } },
+      comment: { id: 99, body: "@zapbot status" },
+    });
+    const env = await buildEnvelope(body, secret);
+    const r = await verifyAndClassify(env, () => secret, bot);
+    expect(r._tag).toBe("Ok");
+    if (r._tag === "Ok") {
+      expect(r.value.kind).toBe("ignore");
+      if (r.value.kind === "ignore") expect(r.value.reason).toBe("pull_request_thread");
+    }
+  });
+
   it("ignores self-mentions from the bot", async () => {
     const body = JSON.stringify({
       action: "created",
