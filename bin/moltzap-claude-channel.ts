@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import process from "node:process";
 import type { EventFrame, Message as MoltzapMessage } from "@moltzap/protocol";
 import { EventNames } from "@moltzap/protocol";
-import { MoltZapChannelCore, MoltZapService, MoltZapWsClient } from "@moltzap/client";
+import { MoltZapService, MoltZapWsClient } from "@moltzap/client";
 import { toClaudeChannelNotification } from "../v2/claude-channel/event.ts";
 import {
   bootClaudeChannelServer,
@@ -33,6 +33,16 @@ interface SessionBootstrap {
 interface RegistrationPayload {
   readonly apiKey: string;
   readonly agentId: string;
+}
+
+interface MoltzapMessageLike {
+  readonly id: string;
+  readonly conversationId: string;
+  readonly createdAt: string;
+  readonly sender?: { readonly id: string };
+  readonly senderId?: string;
+  readonly text?: string;
+  readonly parts?: ReadonlyArray<{ readonly type?: string; readonly text?: string }>;
 }
 
 const debugLogPath = resolveDebugLogPath(process.env);
@@ -140,9 +150,9 @@ try {
         return;
       }
       void emitClaudeNotification({
-        service,
         channel: channel.value,
         message,
+        localSenderId,
         deliveredMessageIds,
       });
     },
@@ -467,9 +477,9 @@ async function sweepUnreadConversations(options: {
         continue;
       }
       await emitClaudeNotification({
-        service: options.service,
         channel: options.channel,
         message,
+        localSenderId: options.localSenderId,
         deliveredMessageIds: options.deliveredMessageIds,
       });
     }
@@ -477,28 +487,33 @@ async function sweepUnreadConversations(options: {
 }
 
 async function emitClaudeNotification(options: {
-  readonly service: MoltZapService;
   readonly channel: ClaudeChannelServerHandle;
-  readonly message: MoltzapMessage;
+  readonly message: MoltzapMessageLike;
+  readonly localSenderId: MoltzapSenderId;
   readonly deliveredMessageIds: Set<string>;
 }): Promise<void> {
   if (options.deliveredMessageIds.has(options.message.id)) {
     return;
   }
 
-  const { enriched } = await MoltZapChannelCore.enrichMessage(
-    options.service,
-    options.message,
-  );
-  if (enriched.isFromMe || enriched.text.trim().length === 0) {
+  const senderId = extractSenderId(options.message);
+  if (senderId === null) {
+    logDebug(`skip message ${options.message.id}: sender missing`);
+    return;
+  }
+  if (senderId === (options.localSenderId as string)) {
+    return;
+  }
+  const bodyText = extractBodyText(options.message);
+  if (bodyText.length === 0) {
     return;
   }
   const notification = toClaudeChannelNotification({
-    conversationId: asMoltzapConversationId(enriched.conversationId),
-    messageId: asMoltzapMessageId(enriched.id),
-    senderId: asMoltzapSenderId(enriched.sender.id),
-    bodyText: enriched.text,
-    receivedAtMs: Date.parse(enriched.createdAt),
+    conversationId: asMoltzapConversationId(options.message.conversationId),
+    messageId: asMoltzapMessageId(options.message.id),
+    senderId: asMoltzapSenderId(senderId),
+    bodyText,
+    receivedAtMs: Date.parse(options.message.createdAt),
   });
   if (notification._tag === "Err") {
     console.error(`[moltzap-channel] skipped inbound message: ${notification.error._tag}`);
@@ -511,7 +526,7 @@ async function emitClaudeNotification(options: {
   }
   options.deliveredMessageIds.add(options.message.id);
   console.error(
-    `[moltzap-channel] delivered message ${options.message.id} from ${enriched.sender.id} into Claude conversation ${enriched.conversationId}`,
+    `[moltzap-channel] delivered message ${options.message.id} from ${senderId} into Claude conversation ${options.message.conversationId}`,
   );
 }
 
@@ -523,18 +538,18 @@ function trimEnv(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function messageFromEventFrame(frame: EventFrame): MoltzapMessage | null {
+function messageFromEventFrame(frame: EventFrame): MoltzapMessageLike | null {
   if (frame.event !== EventNames.MessageReceived) {
     return null;
   }
   if (typeof frame.data !== "object" || frame.data === null) {
     return null;
   }
-  const candidate = (frame.data as { readonly message?: unknown }).message;
-  if (typeof candidate !== "object" || candidate === null) {
-    return null;
+  const nested = asMessageLike((frame.data as { readonly message?: unknown }).message);
+  if (nested !== null) {
+    return nested;
   }
-  return candidate as MoltzapMessage;
+  return asMessageLike(frame.data);
 }
 
 function stringifyCause(cause: unknown): string {
@@ -564,4 +579,44 @@ function logDebug(message: string): void {
   } catch {
     // Best-effort debug logging only.
   }
+}
+
+function asMessageLike(candidate: unknown): MoltzapMessageLike | null {
+  if (typeof candidate !== "object" || candidate === null) {
+    return null;
+  }
+  const message = candidate as Partial<MoltzapMessageLike>;
+  if (
+    typeof message.id !== "string" ||
+    typeof message.conversationId !== "string" ||
+    typeof message.createdAt !== "string"
+  ) {
+    return null;
+  }
+  return message as MoltzapMessageLike;
+}
+
+function extractSenderId(message: MoltzapMessageLike): string | null {
+  if (typeof message.sender?.id === "string" && message.sender.id.length > 0) {
+    return message.sender.id;
+  }
+  if (typeof message.senderId === "string" && message.senderId.length > 0) {
+    return message.senderId;
+  }
+  return null;
+}
+
+function extractBodyText(message: MoltzapMessageLike): string {
+  if (typeof message.text === "string") {
+    return message.text.trim();
+  }
+  if (!Array.isArray(message.parts)) {
+    return "";
+  }
+  return message.parts
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text!.trim())
+    .filter((part) => part.length > 0)
+    .join("\n")
+    .trim();
 }
