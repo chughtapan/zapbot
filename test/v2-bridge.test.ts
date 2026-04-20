@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   handleClassifiedWebhook,
+  startBridge,
   type BridgeConfig,
   type BridgeHandlerContext,
   type GhAdapter,
@@ -27,10 +28,24 @@ import type {
 } from "../v2/types.ts";
 
 const dispatchMock = vi.hoisted(() => vi.fn());
+const registerBridgeMock = vi.hoisted(() => vi.fn());
+const deregisterBridgeMock = vi.hoisted(() => vi.fn());
+const startHeartbeatMock = vi.hoisted(() => vi.fn());
+const serverStopMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../v2/ao/dispatcher.ts", () => ({
   dispatch: dispatchMock,
 }));
+
+vi.mock("../v2/gateway.ts", async () => {
+  const actual = await vi.importActual<typeof import("../v2/gateway.ts")>("../v2/gateway.ts");
+  return {
+    ...actual,
+    registerBridge: registerBridgeMock,
+    deregisterBridge: deregisterBridgeMock,
+    startHeartbeat: startHeartbeatMock,
+  };
+});
 
 const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
@@ -177,6 +192,14 @@ describe("handleClassifiedWebhook — plan_this / investigate_this", () => {
   beforeEach(() => {
     dispatchMock.mockReset();
     dispatchMock.mockResolvedValue(ok(asAoSessionName("app-42")));
+    registerBridgeMock.mockReset();
+    registerBridgeMock.mockResolvedValue(ok(undefined));
+    deregisterBridgeMock.mockReset();
+    deregisterBridgeMock.mockResolvedValue(ok(undefined));
+    startHeartbeatMock.mockReset();
+    startHeartbeatMock.mockReturnValue(serverStopMock);
+    serverStopMock.mockReset();
+    vi.unstubAllGlobals();
   });
 
   it("project not configured → ProjectNotConfigured error", async () => {
@@ -267,3 +290,45 @@ describe("handleClassifiedWebhook — eyes reaction", () => {
 // Satisfy the unused-import lint for asAoSessionName in case of future
 // type-narrowing use.
 void asAoSessionName;
+
+describe("startBridge.reload — repo deregistration", () => {
+  it("deregisters repos removed by config reload and replaces the heartbeat set", async () => {
+    const heartbeatStop = vi.fn();
+    const serverStop = vi.fn();
+    startHeartbeatMock.mockReturnValue(heartbeatStop);
+    vi.stubGlobal("Bun", {
+      serve: vi.fn(() => ({ stop: serverStop })),
+    });
+
+    const initial = makeConfig(true);
+    const removedRepo = asRepoFullName("acme/old");
+    const initialRepos = new Map(initial.repos);
+    initialRepos.set(removedRepo, {
+      projectName: asProjectName("old"),
+      webhookSecretEnvVar: "ZAPBOT_WEBHOOK_SECRET",
+      defaultBranch: "main",
+    });
+    const running = await startBridge({ ...initial, repos: initialRepos });
+
+    const nextRepos = new Map(initial.repos);
+    const nextConfig = { ...initial, repos: nextRepos };
+
+    await running.reload(nextConfig);
+
+    expect(heartbeatStop).toHaveBeenCalledTimes(1);
+    expect(deregisterBridgeMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      removedRepo,
+      initial.publicUrl
+    );
+    expect(deregisterBridgeMock).toHaveBeenCalledTimes(1);
+    expect(registerBridgeMock.mock.calls.map(([, repo]) => repo)).toEqual([
+      repo,
+      removedRepo,
+      repo,
+    ]);
+
+    await running.stop();
+    expect(serverStop).toHaveBeenCalledTimes(1);
+  });
+});

@@ -387,6 +387,10 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
 
   async function registerAll(cfg: BridgeConfig): Promise<void> {
     const repos = Array.from(cfg.repos.keys());
+    if (stopHeartbeat) {
+      stopHeartbeat();
+      stopHeartbeat = null;
+    }
     if (repos.length === 0) return;
     const client: GatewayClientConfig = {
       gatewayUrl: cfg.gatewayUrl,
@@ -401,8 +405,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     stopHeartbeat = startHeartbeat(client, repos, cfg.publicUrl, intervalMs);
   }
 
-  async function deregisterAll(cfg: BridgeConfig): Promise<void> {
-    const repos = Array.from(cfg.repos.keys());
+  async function deregisterRepos(cfg: BridgeConfig, repos: ReadonlyArray<RepoFullName>): Promise<void> {
     const client: GatewayClientConfig = {
       gatewayUrl: cfg.gatewayUrl,
       secret: cfg.gatewaySecret,
@@ -411,6 +414,10 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     await Promise.allSettled(
       repos.map((repo) => deregisterBridge(client, repo, cfg.publicUrl))
     );
+  }
+
+  async function deregisterAll(cfg: BridgeConfig): Promise<void> {
+    await deregisterRepos(cfg, Array.from(cfg.repos.keys()));
   }
 
   const ghAdapter = buildDefaultGhAdapter();
@@ -434,6 +441,14 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       server.stop();
     },
     async reload(nextConfig: BridgeConfig): Promise<void> {
+      const removedRepos = Array.from(current.repos.keys()).filter(
+        (repo) => !nextConfig.repos.has(repo)
+      );
+      if (stopHeartbeat) {
+        stopHeartbeat();
+        stopHeartbeat = null;
+      }
+      await deregisterRepos(current, removedRepos);
       current = nextConfig;
       await registerAll(current);
     },
