@@ -149,7 +149,8 @@ describe("postComment", () => {
 describe("getLinkedPullRequest", () => {
   it("returns the latest linked pull request number from cross-reference events", async () => {
     installFetchStub((url) => {
-      if (url.includes("/issues/42/events") && new URL(url).searchParams.get("page") === "1") {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.pathname.includes("/issues/42/events") && parsedUrl.searchParams.get("page") === "1") {
         return Response.json([
           {
             event: "cross-referenced",
@@ -163,7 +164,7 @@ describe("getLinkedPullRequest", () => {
           })),
         ]);
       }
-      if (url.includes("/issues/42/events") && url.includes("page=2")) {
+      if (parsedUrl.pathname.includes("/issues/42/events") && parsedUrl.searchParams.get("page") === "2") {
         return Response.json([
           {
             event: "cross-referenced",
