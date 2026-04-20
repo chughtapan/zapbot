@@ -185,6 +185,20 @@ describe("systemd integration: start.sh guard", () => {
     expect(startSh).toContain("2>&1");
     expect(startSh).toMatch(/systemctl is-active zapbot-bridge.*\n[\s\S]*?exit 1/);
   });
+
+  it("loads shared env before project env so checkout-local secrets win", () => {
+    const startSh = fs.readFileSync(
+      path.join(__dirname, "../start.sh"),
+      "utf-8"
+    );
+
+    const sharedIndex = startSh.indexOf('source "$HOME/.zapbot/.env"');
+    const projectIndex = startSh.indexOf('source "$PROJECT_DIR/.env"');
+
+    expect(sharedIndex).toBeGreaterThanOrEqual(0);
+    expect(projectIndex).toBeGreaterThanOrEqual(0);
+    expect(sharedIndex).toBeLessThan(projectIndex);
+  });
 });
 
 describe("systemd integration: team-init reload", () => {

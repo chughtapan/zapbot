@@ -27,8 +27,10 @@ if [ ! -f "$PROJECT_DIR/agent-orchestrator.yaml" ]; then
   exit 1
 fi
 
-[ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
+# Load shared bootstrap defaults first, then let the project checkout override them.
+# Fresh repos must keep their generated webhook secret even if ~/.zapbot/.env still exists.
 [ -f "$HOME/.zapbot/.env" ] && set -a && source "$HOME/.zapbot/.env" && set +a
+[ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
 
 BRIDGE_PORT="${ZAPBOT_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
