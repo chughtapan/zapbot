@@ -167,11 +167,11 @@ if $SERVER_MODE; then
   echo ""
   echo "To onboard a repo:"
   echo "  cd ~/your-project"
-  echo "  ~/.claude/skills/zapbot/bin/zapbot-team-init"
+  echo "  ~/.claude/skills/zapbot/bin/zapbot-team-init <owner/repo>"
   echo ""
   echo "To start the server:"
   echo "  cd ~/your-project"
-  echo "  ~/.claude/skills/zapbot/start.sh"
+  echo "  ~/.claude/skills/zapbot/start.sh ."
 else
   echo "  Zapbot skill v$(cat "$ZAPBOT_DIR/VERSION") installed!"
   echo "================================================"

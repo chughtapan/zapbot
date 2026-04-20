@@ -8,7 +8,7 @@ set -euo pipefail
 #   zapbot-team-init <owner/repo>              — full init (first repo)
 #   zapbot-team-init --add-repo <owner/repo>   — add a repo to existing config
 
-REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ZAPBOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 GITHUB_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
 
 # ── Parse args ──────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ if [ -z "$GITHUB_USER" ]; then
 fi
 
 REPO_NAME=$(basename "$ZAPBOT_REPO")
-REPO_PATH=$(pwd)
+PROJECT_DIR=$(pwd)
 
 LABELS=(
   "zapbot-plan:0E8A16:Plan published via zapbot"
@@ -69,9 +69,10 @@ create_labels() {
 # ── Add-repo mode: append project to existing config ────────────────
 
 if [ "$ADD_REPO_MODE" = true ]; then
-  CONFIG_FILE="$REPO_DIR/agent-orchestrator.yaml"
+  CONFIG_FILE="$PROJECT_DIR/agent-orchestrator.yaml"
   if [ ! -f "$CONFIG_FILE" ]; then
-    echo "ERROR: No agent-orchestrator.yaml found. Run zapbot-team-init <owner/repo> first."
+    echo "ERROR: No agent-orchestrator.yaml found in $PROJECT_DIR"
+    echo "Run zapbot-team-init <owner/repo> in this project first."
     exit 1
   fi
 
@@ -91,7 +92,7 @@ if [ "$ADD_REPO_MODE" = true ]; then
   PROJECT_BLOCK="
   ${REPO_NAME}:
     repo: ${ZAPBOT_REPO}
-    path: ${REPO_PATH}
+    path: ${PROJECT_DIR}
     defaultBranch: main
     scm:
       plugin: github
@@ -130,21 +131,21 @@ create_labels "$ZAPBOT_REPO"
 
 echo ""
 echo "--- Generating agent-orchestrator.yaml ---"
-TEMPLATE="$REPO_DIR/templates/agent-orchestrator.yaml.tmpl"
+TEMPLATE="$ZAPBOT_DIR/templates/agent-orchestrator.yaml.tmpl"
 if [ -f "$TEMPLATE" ]; then
   sed \
     -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
-    -e "s|{{REPO_PATH}}|$REPO_PATH|g" \
+    -e "s|{{REPO_PATH}}|$PROJECT_DIR|g" \
     -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
-    "$TEMPLATE" > "$REPO_DIR/agent-orchestrator.yaml"
-  echo "  Generated agent-orchestrator.yaml"
+    "$TEMPLATE" > "$PROJECT_DIR/agent-orchestrator.yaml"
+  echo "  Generated $PROJECT_DIR/agent-orchestrator.yaml"
 else
   echo "  Template not found at $TEMPLATE, skipping"
 fi
 
 echo ""
 echo "--- Environment setup ---"
-ENV_FILE="$REPO_DIR/.env"
+ENV_FILE="$PROJECT_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
   GENERATED_API_KEY=$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n')
   GENERATED_WEBHOOK_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n')
@@ -179,7 +180,7 @@ ZAPBOT_API_KEY=${GENERATED_API_KEY}
 EOF
   echo "  Generated .env with webhook secret + broker API key"
 else
-  echo "  .env already exists, skipping"
+  echo "  $ENV_FILE already exists, skipping"
 fi
 
 echo ""
@@ -204,12 +205,12 @@ echo "Next steps:"
 if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
   echo "  1. Bridge is running (systemd). Config was auto-reloaded."
 else
-  echo "  1. Run ./start.sh to start the bridge"
+  echo "  1. Run $ZAPBOT_DIR/start.sh . to start the bridge"
 fi
 echo "  2. Mention @zapbot on an issue to kick off a plan or investigation"
 echo "     zapbot will dispatch a direct ao session; optional MoltZap env is forwarded if configured"
 echo ""
 echo "To add another repo later:"
 echo "  cd ~/other-project"
-echo "  $REPO_DIR/bin/zapbot-team-init --add-repo <owner/other-repo>"
+echo "  $ZAPBOT_DIR/bin/zapbot-team-init --add-repo <owner/other-repo>"
 echo ""
