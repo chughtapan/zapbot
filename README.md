@@ -2,36 +2,97 @@
 
 Zapbot is a thin GitHub webhook control bridge for `ao`.
 
-Durable task state lives in GitHub. zapbot verifies GitHub webhooks, checks
-repo permissions, and forwards raw control events into a persistent AO
-orchestrator session for each configured project.
+GitHub keeps the durable task record. Zapbot verifies webhooks, checks repo
+permissions, and forwards control events into a persistent AO orchestrator
+session for each configured project.
 
-## Current runtime
+## Plain-language terms
+
+- `ao` is the CLI/runtime zapbot uses to start and keep agent sessions alive.
+- An orchestrator session is the always-on AO session for one project. It reads
+  GitHub events, chooses what to do next, and delegates work.
+- Worker sessions are short-lived AO sessions spawned for one issue or task.
+- MoltZap is the live messaging layer attached to an AO session. Zapbot uses
+  it so the orchestrator and workers can coordinate in real time.
+
+## Runtime flow
 
 1. GitHub sends `issue_comment` webhooks to `/api/webhooks/github`.
-2. zapbot verifies the HMAC and parses a literal `@zapbot ...` command.
-3. zapbot checks that the commenter has write access.
-4. zapbot ensures the project's AO orchestrator session is running.
-5. zapbot forwards the GitHub control event into that orchestrator session.
+2. Zapbot verifies the HMAC and parses a literal `@zapbot ...` command.
+3. Zapbot checks that the commenter has write access.
+4. Zapbot ensures the project's AO orchestrator session is running.
+5. Zapbot forwards the GitHub control event into that orchestrator session.
 6. The orchestrator decides whether to spawn worker sessions with
    `bun run bin/ao-spawn-with-moltzap.ts <issue-number>`.
 
-Supported comment commands:
+## Canonical commands
 
-| Comment | Effect |
+### `setup --server`
+
+Run this from the zapbot checkout on the bridge host:
+
+```bash
+./setup --server
+```
+
+This installs zapbot's repo dependencies and the AO runtime needed on the
+server side. If Bun is missing, setup installs it too.
+
+### `zapbot-team-init`
+
+Use this from the project checkout zapbot should operate on:
+
+```bash
+/path/to/zapbot/bin/zapbot-team-init owner/repo
+```
+
+That creates `agent-orchestrator.yaml` and `.env` in the current project
+directory. To add another repo later, use:
+
+```bash
+/path/to/zapbot/bin/zapbot-team-init --add-repo owner/other-repo
+```
+
+### `start.sh .`
+
+Run this from the project checkout after `zapbot-team-init` has created the
+local config:
+
+```bash
+/path/to/zapbot/start.sh .
+```
+
+`start.sh` expects `agent-orchestrator.yaml` and `.env` in the project
+directory. It starts AO on `ZAPBOT_AO_PORT` or `3001`, then the webhook bridge
+on `ZAPBOT_PORT` or `3000`.
+
+`start.sh` treats ingress as an explicit mode:
+
+- `local-only` runs the stack without public GitHub ingress.
+- `github-demo` requires a reachable public bridge URL and fails closed if the
+  bridge URL is missing or unreachable.
+
+If `ZAPBOT_GATEWAY_URL` is unset or only whitespace, `start.sh` stays
+`local-only`. In demo mode, set `ZAPBOT_GATEWAY_URL` and `ZAPBOT_BRIDGE_URL`
+before startup.
+
+### Supported GitHub comment commands
+
+Zapbot only reacts to comments that start with the literal `@zapbot` prefix.
+
+| Comment | Meaning |
 |---|---|
-| `@zapbot plan this` | forward a planning request to the orchestrator |
+| `@zapbot plan this` | ask the orchestrator to plan work for the issue |
 | `@zapbot triage this` | alias for `plan this` |
-| `@zapbot investigate this` | forward an investigation request to the orchestrator |
+| `@zapbot investigate this` | ask the orchestrator to investigate the issue |
 | `@zapbot investigate` | alias for `investigate this` |
 | `@zapbot status` | post a GitHub-native issue summary |
 
-`<issue-number>` is the numeric GitHub issue number from the webhook payload.
-zapbot does not splice raw comment text into a shell command.
+Zapbot does not splice raw comment text into a shell command.
 
 ## MoltZap
 
-zapbot can provision MoltZap credentials for orchestrator and worker sessions.
+Zapbot can provision MoltZap credentials for orchestrator and worker sessions.
 
 Supported modes:
 
@@ -45,10 +106,13 @@ If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap.
 
 Worker env posture:
 
-- zapbot forwards the GitHub installation token (`GH_TOKEN`) to AO sessions
-  so spawned agents can work on the repo.
-- zapbot forwards `MOLTZAP_*` only when MoltZap is configured.
-- zapbot does **not** forward `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`, or
+- Zapbot forwards the GitHub installation token (`GH_TOKEN`) into AO sessions so
+  spawned workers can use GitHub on behalf of the repo. That token stays inside
+  the local trust boundary: the bridge process and its AO child processes on the
+  operator machine. It is not meant to cross into GitHub, MoltZap messages, or
+  published artifacts.
+- Zapbot forwards `MOLTZAP_*` only when MoltZap is configured.
+- Zapbot does **not** forward `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`, or
   `GITHUB_APP_PRIVATE_KEY` into AO child processes.
 
 ## Bridge host setup
@@ -61,12 +125,10 @@ Bridge operators need:
 - `gh` authenticated via `gh auth login`
 - `node`, `tmux`, and `jq`
 
-`./setup --server` installs repo dependencies and AO itself if `ao` is missing.
-It also installs Bun automatically if Bun is not present.
-
 ### Bootstrap one repo
 
-1. Clone this repo on the bridge host and run server setup from the zapbot checkout:
+1. Clone this repo on the bridge host and run server setup from the zapbot
+   checkout:
 
 ```bash
 cd /path/to/zapbot
@@ -83,8 +145,8 @@ cd /path/to/your-project
 
 This creates these files in the current project directory:
 
-- `agent-orchestrator.yaml` — repo routing + AO project config
-- `.env` — generated webhook secret and local broker bearer, plus commented
+- `agent-orchestrator.yaml` - repo routing + AO project config
+- `.env` - generated webhook secret and local broker bearer, plus commented
   placeholders for the remaining operator-managed settings
 
 3. Edit the generated `.env` and add GitHub auth plus any optional gateway or
@@ -124,12 +186,103 @@ cd /path/to/your-project
 /path/to/zapbot/start.sh .
 ```
 
-This starts:
+## Startup receipt
 
-- AO on `ZAPBOT_AO_PORT` or `3001`
-- the webhook bridge on `ZAPBOT_PORT` or `3000`
+When startup succeeds, you should see output like this:
 
-### Add another repo later
+```text
+=== Starting Zapbot ===
+Mode:      github-demo
+Project: /path/to/your-project
+Repos:   owner/repo
+AO ready on port 3001
+Bridge ready on port 3000
+
+================================================
+  Zapbot is running!
+================================================
+  Mode:      github-demo
+  Bridge:    http://localhost:3000
+  Dashboard: http://localhost:3001
+  Gateway:   https://gateway.example.com
+  Public:    https://bridge.example.com
+  Publish:   bash /path/to/zapbot/bin/zapbot-publish.sh <plan-file>
+  Logs: /tmp/zapbot-{ao,bridge}.log
+  Press Ctrl+C to stop everything.
+================================================
+```
+
+If `ZAPBOT_GATEWAY_URL` is unset or blank, the receipt switches to
+`local-only` mode and the `Gateway:` / `Public:` lines show local-only
+markers. If the readiness lines do not appear earlier in the shell output,
+check `/tmp/zapbot-ao.log` and `/tmp/zapbot-bridge.log`.
+
+## Dummy-project demo
+
+This demo assumes you want `github-demo` mode with a reachable public bridge
+URL and a reachable MoltZap server. It fails closed if the bridge URL is
+missing or unreachable.
+
+1. Create a dummy project checkout, initialize zapbot, and start the stack:
+
+```bash
+mkdir -p /tmp/zapbot-demo
+cd /tmp/zapbot-demo
+git init -b main
+git commit --allow-empty -m 'chore: bootstrap demo repo'
+gh repo create owner/zapbot-demo --private --source=. --remote=origin --push
+/path/to/zapbot/bin/zapbot-team-init owner/zapbot-demo
+```
+
+2. Before `start.sh .`, make sure the generated `.env` is ready for the
+runtime:
+
+- Choose one GitHub auth env path for the demo:
+  - `ZAPBOT_GITHUB_TOKEN`
+  - or `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY`
+- `gh auth status` should show you are logged in, because the demo creates the
+  repo and issues with the GitHub CLI.
+- `ZAPBOT_WEBHOOK_SECRET` is already generated by `zapbot-team-init`.
+- Set `ZAPBOT_GATEWAY_URL` and `ZAPBOT_BRIDGE_URL` to reachable public URLs.
+- Set `ZAPBOT_MOLTZAP_SERVER_URL` and either `ZAPBOT_MOLTZAP_API_KEY` or
+  `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` in the project `.env`.
+- If `ZAPBOT_GATEWAY_URL` trims to empty, `start.sh` stays `local-only` and
+  will not run the GitHub-backed demo path.
+
+```bash
+/path/to/zapbot/start.sh .
+```
+
+3. Open two issues in that repo, then comment on each one:
+
+```bash
+ISSUE_A_URL="$(gh issue create --repo owner/zapbot-demo --title 'agent A' --body 'dummy')"
+ISSUE_B_URL="$(gh issue create --repo owner/zapbot-demo --title 'agent B' --body 'dummy')"
+ISSUE_A="${ISSUE_A_URL##*/issues/}"
+ISSUE_B="${ISSUE_B_URL##*/issues/}"
+gh issue comment "$ISSUE_A" --repo owner/zapbot-demo --body '@zapbot plan this'
+gh issue comment "$ISSUE_B" --repo owner/zapbot-demo --body '@zapbot investigate this'
+```
+
+4. What you should see:
+
+- one persistent orchestrator session handling both GitHub events
+- one MoltZap-linked worker session for `ISSUE_A`
+- one MoltZap-linked worker session for `ISSUE_B`
+- the orchestrator talking to each worker over MoltZap, then writing durable
+  output back to GitHub
+
+5. A simple communication sketch:
+
+```text
+orchestrator -> worker #1: inspect src/ and report the risky path
+orchestrator -> worker #2: inspect test/ and report missing coverage
+worker #1 -> orchestrator: findings for src/
+worker #2 -> orchestrator: findings for test/
+orchestrator -> GitHub: consolidated summary
+```
+
+## Add another repo later
 
 From the additional project checkout:
 
@@ -165,18 +318,18 @@ bun run build
 
 Useful entrypoints:
 
-- `bun run bridge` — run only the webhook bridge; expects config/env to already
+- `bun run bridge` - run only the webhook bridge; expects config/env to already
   be present
-- `./start.sh .` — run the bridge and AO together from a project checkout
+- `./start.sh .` - run the bridge and AO together from a project checkout
 
 ## Repo map
 
-- `src/` — current runtime: webhook intake, config load/reload, GitHub helpers,
+- `src/` - current runtime: webhook intake, config load/reload, GitHub helpers,
   orchestrator forwarding, MoltZap session support
-- `worker/` — repo-local AO plugin and Claude/MoltZap worker launcher
-- `gateway/` — optional bridge registry / webhook proxy
-- `bin/webhook-bridge.ts` — bridge entrypoint
-- `bin/ao-spawn-with-moltzap.ts` — worker spawn helper that preserves the
+- `worker/` - repo-local AO plugin and Claude/MoltZap worker launcher
+- `gateway/` - optional bridge registry / webhook proxy
+- `bin/webhook-bridge.ts` - bridge entrypoint
+- `bin/ao-spawn-with-moltzap.ts` - worker spawn helper that preserves the
   MoltZap control link
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the current module layout.
