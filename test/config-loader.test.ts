@@ -12,6 +12,7 @@ import {
   deriveConfigSourcePaths,
   loadBridgeRuntimeConfig,
 } from "../src/config/load.js";
+import type { IngressPolicy } from "../src/config/ingress.js";
 import type { ConfigDiskError } from "../src/config/types.js";
 import type { Result } from "../src/types.js";
 
@@ -21,6 +22,14 @@ function expectOk<T, E>(result: Result<T, E>): T {
   }
   return result.value;
 }
+
+const localOnlyIngress: IngressPolicy = {
+  _tag: "LocalOnly",
+  mode: "local-only",
+  gatewayUrl: null,
+  publicUrl: null,
+  requiresReachablePublicUrl: false,
+};
 
 const nodeDiskReader: ConfigDiskReader = {
   readText(path) {
@@ -75,7 +84,7 @@ projects:
       ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
       ZAPBOT_CONFIG: configPath,
     }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(1);
     expect(runtime.routes.has("chughtapan/zapbot")).toBe(true);
@@ -115,7 +124,7 @@ projects:
       ZAPBOT_API_KEY: "api-key-123",
       ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
     }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(2);
     expect(runtime.routes.get("chughtapan/zapbot")!.projectName).toBe("zapbot");
@@ -129,7 +138,7 @@ projects:
       ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
       ZAPBOT_REPO: "owner/my-repo",
     }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(1);
     expect(runtime.routes.has("owner/my-repo")).toBe(true);
@@ -141,7 +150,7 @@ projects:
       ZAPBOT_API_KEY: "api-key-123",
       ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
     }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(0);
   });

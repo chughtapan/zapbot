@@ -7,8 +7,8 @@ set -euo pipefail
 # Run from a project directory that has agent-orchestrator.yaml (created by
 # zapbot-team-init), or pass the path as the first argument.
 #
-# The bridge registers with the gateway at ZAPBOT_GATEWAY_URL. If no gateway
-# is configured, the bridge just listens on its local port.
+# `ZAPBOT_GATEWAY_URL` selects GitHub-backed demo mode. Without a gateway,
+# the launcher stays local-only and never advertises public ingress.
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -27,13 +27,55 @@ if [ ! -f "$PROJECT_DIR/agent-orchestrator.yaml" ]; then
   exit 1
 fi
 
-[ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
+# Load shared bootstrap defaults first, then let the project checkout override them.
+# Fresh repos must keep their generated webhook secret even if ~/.zapbot/.env still exists.
 [ -f "$HOME/.zapbot/.env" ] && set -a && source "$HOME/.zapbot/.env" && set +a
+[ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
 
 BRIDGE_PORT="${ZAPBOT_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
 AO_LOG_FILE="/tmp/zapbot-ao.log"
 AO_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX.yaml")"
+
+validate_bridge_url() {
+  local configured_url
+  configured_url="$(trim_env_value "${ZAPBOT_BRIDGE_URL:-}")"
+  local health_check_url=""
+
+  if [ -z "$configured_url" ]; then
+    echo "ERROR: ZAPBOT_GATEWAY_URL is set but ZAPBOT_BRIDGE_URL is missing."
+    echo "FIX: Set ZAPBOT_BRIDGE_URL to the live public bridge URL before starting."
+    return 1
+  fi
+
+  health_check_url="${configured_url%/}/healthz"
+  if curl -fsS --max-time 2 "$health_check_url" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "ERROR: ZAPBOT_BRIDGE_URL is unreachable: $configured_url"
+  echo "FIX: Do not rely on host-derived fallback; set ZAPBOT_BRIDGE_URL to a live public URL."
+  return 1
+}
+
+trim_env_value() {
+  printf '%s' "${1:-}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+INGRESS_MODE="local-only"
+if [ -n "$(trim_env_value "${ZAPBOT_GATEWAY_URL:-}")" ]; then
+  INGRESS_MODE="github-demo"
+fi
+
+start_ao_once() {
+  : > "$AO_LOG_FILE"
+  (cd "$PROJECT_DIR" && AO_CONFIG_PATH="$AO_CONFIG_FILE" ao start > "$AO_LOG_FILE" 2>&1) &
+  AO_PID=$!
+}
+
+extract_duplicate_session() {
+  grep -Eo 'duplicate session: [^[:space:]]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/^duplicate session: //'
+}
 
 node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" <<'NODE'
 const fs = require("node:fs");
@@ -78,6 +120,13 @@ if [ "${ZAPBOT_WEBHOOK_SECRET}" = "${ZAPBOT_API_KEY}" ]; then
   exit 1
 fi
 
+if [ "$INGRESS_MODE" = "github-demo" ]; then
+  ZAPBOT_GATEWAY_URL="$(trim_env_value "${ZAPBOT_GATEWAY_URL:-}")"
+  ZAPBOT_BRIDGE_URL="$(trim_env_value "${ZAPBOT_BRIDGE_URL:-}")"
+  validate_bridge_url || exit 1
+  export ZAPBOT_BRIDGE_URL
+fi
+
 ZAPBOT_REPOS=()
 while IFS= read -r line; do
   repo=$(echo "$line" | awk '{print $2}')
@@ -104,29 +153,45 @@ fi
 
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 
-echo "Starting agent-orchestrator with explicit port ${AO_PORT}..."
-(cd "$PROJECT_DIR" && AO_CONFIG_PATH="$AO_CONFIG_FILE" ao start > "$AO_LOG_FILE" 2>&1) &
-AO_PID=$!
-
 AO_DASHBOARD_PORT=""
-for i in $(seq 1 20); do
-  AO_DASHBOARD_PORT="$(grep -Eo 'Dashboard starting on http://localhost:[0-9]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+for attempt in 1 2; do
+  echo "Starting agent-orchestrator with explicit port ${AO_PORT}..."
+  AO_DASHBOARD_PORT=""
+  DUPLICATE_SESSION=""
+  start_ao_once
+
+  for i in $(seq 1 20); do
+    AO_DASHBOARD_PORT="$(grep -Eo 'Dashboard starting on http://localhost:[0-9]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+    if [ -n "$AO_DASHBOARD_PORT" ]; then
+      break
+    fi
+    if ! kill -0 "$AO_PID" 2>/dev/null; then
+      DUPLICATE_SESSION="$(extract_duplicate_session)"
+      if [ "$attempt" -eq 1 ] && [ -n "$DUPLICATE_SESSION" ]; then
+        echo "Detected stale AO tmux session ${DUPLICATE_SESSION}; removing and retrying startup..."
+        tmux kill-session -t "$DUPLICATE_SESSION" 2>/dev/null || true
+        wait "$AO_PID" 2>/dev/null || true
+        break
+      fi
+      echo "ERROR: AO failed to start. Check $AO_LOG_FILE"
+      kill "$AO_PID" 2>/dev/null || true
+      exit 1
+    fi
+    sleep 1
+  done
+
   if [ -n "$AO_DASHBOARD_PORT" ]; then
     break
   fi
-  if ! kill -0 "$AO_PID" 2>/dev/null; then
-    echo "ERROR: AO failed to start. Check $AO_LOG_FILE"
-    kill "$AO_PID" 2>/dev/null || true
-    exit 1
-  fi
-  sleep 1
-done
 
-if [ -z "$AO_DASHBOARD_PORT" ]; then
+  if [ "$attempt" -eq 1 ] && [ -n "${DUPLICATE_SESSION:-}" ]; then
+    continue
+  fi
+
   echo "ERROR: AO failed to start. Check $AO_LOG_FILE"
   kill "$AO_PID" 2>/dev/null || true
   exit 1
-fi
+done
 
 for i in $(seq 1 20); do
   if curl -fsS "http://localhost:${AO_DASHBOARD_PORT}/api/observability" 2>/dev/null | grep -q '"overallStatus"'; then
@@ -177,14 +242,18 @@ echo "================================================"
 echo "  Zapbot is running!"
 echo "================================================"
 echo "  Project:   $PROJECT_DIR"
+echo "  Mode:      $INGRESS_MODE"
 for repo in "${ZAPBOT_REPOS[@]}"; do
 echo "  Repo:      https://github.com/${repo}"
 done
 echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
 echo "  Dashboard: http://localhost:${AO_DASHBOARD_PORT}"
-if [ -n "${ZAPBOT_GATEWAY_URL:-}" ]; then
+if [ "$INGRESS_MODE" = "github-demo" ]; then
   echo "  Gateway:   ${ZAPBOT_GATEWAY_URL}"
-  [ -n "${ZAPBOT_BRIDGE_URL:-}" ] && echo "  Public:    ${ZAPBOT_BRIDGE_URL}"
+  echo "  Public:    ${ZAPBOT_BRIDGE_URL}"
+else
+  echo "  Gateway:   (local-only)"
+  echo "  Public:    (local-only)"
 fi
 echo ""
 echo "  Publish:   bash $ZAPBOT_DIR/bin/zapbot-publish.sh <plan-file>"
