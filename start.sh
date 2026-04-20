@@ -38,7 +38,8 @@ AO_LOG_FILE="/tmp/zapbot-ao.log"
 AO_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX.yaml")"
 
 validate_bridge_url() {
-  local configured_url="${ZAPBOT_BRIDGE_URL:-}"
+  local configured_url
+  configured_url="$(trim_env_value "${ZAPBOT_BRIDGE_URL:-}")"
   local health_check_url=""
 
   if [ -z "$configured_url" ]; then
@@ -57,8 +58,12 @@ validate_bridge_url() {
   return 1
 }
 
+trim_env_value() {
+  printf '%s' "${1:-}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 INGRESS_MODE="local-only"
-if [ -n "${ZAPBOT_GATEWAY_URL:-}" ]; then
+if [ -n "$(trim_env_value "${ZAPBOT_GATEWAY_URL:-}")" ]; then
   INGRESS_MODE="github-demo"
 fi
 
@@ -116,6 +121,8 @@ if [ "${ZAPBOT_WEBHOOK_SECRET}" = "${ZAPBOT_API_KEY}" ]; then
 fi
 
 if [ "$INGRESS_MODE" = "github-demo" ]; then
+  ZAPBOT_GATEWAY_URL="$(trim_env_value "${ZAPBOT_GATEWAY_URL:-}")"
+  ZAPBOT_BRIDGE_URL="$(trim_env_value "${ZAPBOT_BRIDGE_URL:-}")"
   validate_bridge_url || exit 1
   export ZAPBOT_BRIDGE_URL
 fi

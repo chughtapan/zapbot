@@ -538,6 +538,7 @@ exit 0
         [
           "ZAPBOT_API_KEY=project-api-key",
           "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
+          "ZAPBOT_GATEWAY_URL=   ",
           "ZAPBOT_BRIDGE_URL=http://dead.example:3000",
           "",
         ].join("\n"),
