@@ -25,7 +25,7 @@ Publish the current plan to a GitHub issue for zapbot dispatch. The issue carrie
 
 ## Gateway-first teammate routing
 
-When teammates use zapbot's issue-status or plan-publish flow, prefer the gateway entrypoint recorded in `~/.zapbot/config.json` under `gateway`. Keep the legacy `bridges[repo]` shape only as a migration fallback. Teammate auth comes from `gh auth token`; do not ask for bridge URLs or shared secrets.
+When teammates use zapbot's issue-status or plan-publish flow, use the gateway entrypoint recorded in `~/.zapbot/config.json` under `gateway`. Teammate auth comes from `gh auth token`; do not ask for bridge URLs or shared secrets.
 
 ## Steps
 

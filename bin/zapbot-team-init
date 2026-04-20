@@ -164,8 +164,7 @@ ZAPBOT_API_KEY=${GENERATED_API_KEY}
 #   ~/.zapbot/config.json
 # with:
 #   { "gateway": "https://zapbot-gateway.up.railway.app" }
-# Legacy `bridges` entries still work during migration, but new teammates should
-# use `gateway` instead of wiring bridge URLs directly.
+# New teammates should use `gateway` instead of wiring bridge URLs directly.
 
 # Bridge port (default: 3000)
 # ZAPBOT_PORT=3000
