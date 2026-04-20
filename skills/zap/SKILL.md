@@ -27,6 +27,7 @@ Parse the user's arguments to determine what they want:
 - If args contain "publish" or "share" or "plan" → invoke the `zapbot-publish` skill.
 - If args contain "help" or nothing → show the help block below.
 - If args contain an issue number → tell the user to comment `@zapbot status` on that issue.
+- Teammate-facing status/publish flows should read `~/.zapbot/config.json`, prefer the top-level `gateway` key, and only fall back to legacy `bridges[repo]` during migration.
 
 ## Help
 
@@ -39,7 +40,7 @@ Zapbot commands:
 Issue workflow:
   @zapbot plan this         Dispatch a direct ao session
   @zapbot investigate this  Dispatch a direct ao session
-  @zapbot status            Ask the bot to summarize issue state
+  @zapbot status            Ask the bot to summarize issue state via the gateway
 
 Current repo: {REPO}
 ```

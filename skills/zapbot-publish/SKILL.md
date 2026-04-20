@@ -23,6 +23,10 @@ gh auth status >/dev/null 2>&1 && echo "GH: ok" || echo "GH: missing"
 
 Publish the current plan to a GitHub issue for zapbot dispatch. The issue carries the `zapbot-plan` label so teammates can mention `@zapbot plan this` or `@zapbot investigate this` to spawn a direct `ao` session on it.
 
+## Gateway-first teammate routing
+
+When teammates use zapbot's issue-status or plan-publish flow, prefer the gateway entrypoint recorded in `~/.zapbot/config.json` under `gateway`. Keep the legacy `bridges[repo]` shape only as a migration fallback. Teammate auth comes from `gh auth token`; do not ask for bridge URLs or shared secrets.
+
 ## Steps
 
 ### 1. Verify auth
