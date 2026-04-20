@@ -205,7 +205,7 @@ describe("systemd integration: team-init reload", () => {
     );
 
     expect(teamInit).toContain("Bridge is running (systemd)");
-    expect(teamInit).toContain("Run ./start.sh to start the bridge");
+    expect(teamInit).toContain("start.sh . to start the bridge");
   });
 });
 

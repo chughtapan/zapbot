@@ -4,7 +4,8 @@ zapbot is a thin bridge around `ao`.
 
 It does not own durable workflow state, task retries, agent teams, or an
 internal state machine. Those older surfaces have been removed from the shipped
-runtime. The live path is GitHub webhook intake plus direct `ao spawn`.
+runtime. The live path is GitHub webhook intake plus a persistent AO
+orchestrator control loop.
 
 ## Runtime shape
 
@@ -13,37 +14,50 @@ GitHub issue_comment webhook
   -> HMAC verify
   -> mention classification
   -> permission check
-  -> GitHub installation token mint
-  -> optional MoltZap session provisioning
-  -> Bun.spawn(["ao", "spawn", issue], env)
+  -> ensure orchestrator session exists (`ao start` / `ao status`)
+  -> ao send raw GitHub control prompt
+  -> orchestrator decides whether to spawn workers via
+     `bun run bin/ao-spawn-with-moltzap.ts <issue-number>`
+  -> worker plugin boots Claude + local MoltZap channel runtime
 ```
 
 ## Key modules
 
 | Path | Purpose |
 |---|---|
-| `v2/gateway.ts` | gateway registration + webhook verification/classification |
-| `v2/mention-parser.ts` | parse `@zapbot ...` commands from issue comments |
-| `v2/bridge.ts` | HTTP request handling and command dispatch |
-| `v2/ao/dispatcher.ts` | direct `ao spawn <issue>` execution |
-| `v2/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
-| `v2/moltzap/supervisor.ts` | pure reconnect/backoff policy for MoltZap runtimes |
-| `v2/moltzap/identity-allowlist.ts` | pure sender allowlist gate |
-| `v2/github-state.ts` | GitHub-native issue state reads |
+| `src/gateway.ts` | gateway registration + webhook verification/classification |
+| `src/mention-parser.ts` | parse literal `@zapbot ...` commands from issue comments |
+| `src/bridge.ts` | HTTP request handling and orchestrator forwarding |
+| `src/orchestrator/control-event.ts` | render GitHub control input into the orchestrator prompt |
+| `src/orchestrator/runtime.ts` | ensure the persistent orchestrator exists and forward prompts via `ao send` |
+| `bin/ao-spawn-with-moltzap.ts` | worker spawn helper that preserves MoltZap control linkage |
+| `worker/ao-plugin-agent-claude-moltzap/` | repo-local Claude/MoltZap AO agent plugin |
+| `src/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
+| `src/moltzap/session-client.ts` | load worker-side MoltZap env inside AO sessions |
+| `src/moltzap/channel-runtime.ts` | bind the MoltZap session client to the Claude channel runtime |
+| `src/github-state.ts` | GitHub-native issue state reads |
 | `bin/webhook-bridge.ts` | entrypoint: load config, boot bridge, install reload/shutdown hooks |
 
 ## Error model
 
 The live modules use tagged errors and `Result<T, E>` across module boundaries.
 
-Current bridge-visible dispatch failures:
+Current bridge-visible control-path failures:
 
 | Tag | Meaning |
 |---|---|
-| `TokenMintFailed` | GitHub installation token could not be minted |
-| `AoSpawnFailed` | the `ao spawn` subprocess failed |
-| `MoltzapProvisionFailed` | zapbot could not provision MoltZap env for the child session |
+| `AoStartFailed` | zapbot could not start the project orchestrator |
+| `OrchestratorNotFound` | no orchestrator session was visible for the configured project |
+| `OrchestratorNotReady` | the orchestrator session exists but has not published the required metadata yet |
+| `AoSendFailed` | forwarding the GitHub control prompt into the orchestrator failed |
 | `ProjectNotConfigured` | the repo is not routed in zapbot config |
+
+Worker-side spawn failures remain local to the orchestrator/worker lane:
+
+| Tag | Meaning |
+|---|---|
+| `AoSpawnFailed` | the helper could not spawn a worker session |
+| `MoltzapProvisionFailed` | zapbot could not provision MoltZap env for the child session |
 
 ## MoltZap boundary
 
@@ -51,11 +65,12 @@ zapbot does not implement a MoltZap server and does not become the agent
 runtime. Its responsibility is narrower:
 
 1. Decode `ZAPBOT_MOLTZAP_*` env at boot.
-2. If configured, build `MOLTZAP_*` env for a spawned `ao` session.
-3. Optionally register a fresh MoltZap agent per dispatch when a registration
-   secret is available.
+2. If configured, build `MOLTZAP_*` env for orchestrator and worker sessions.
+3. Optionally register a fresh MoltZap agent per worker dispatch when a
+   registration secret is available.
 
-The spawned session is responsible for actually using those credentials.
+The worker plugin and local Claude channel runtime are responsible for actually
+using those credentials.
 
 ## Reload and shutdown
 

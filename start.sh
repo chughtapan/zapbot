@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Start zapbot v2: webhook-bridge + agent-orchestrator, registered with a gateway.
+# Start zapbot: webhook bridge + agent-orchestrator for one project checkout.
 # Usage: start.sh [project-dir]
 #
 # Run from a project directory that has agent-orchestrator.yaml (created by
