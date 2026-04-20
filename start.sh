@@ -37,39 +37,24 @@ AO_PORT="${ZAPBOT_AO_PORT:-3001}"
 AO_LOG_FILE="/tmp/zapbot-ao.log"
 AO_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX.yaml")"
 
-resolve_bridge_url() {
+validate_bridge_url() {
   local configured_url="${ZAPBOT_BRIDGE_URL:-}"
   local health_check_url=""
-  local metadata_ip=""
-  local host_ip=""
 
-  if [ -n "$configured_url" ]; then
-    health_check_url="${configured_url%/}/healthz"
-    if curl -fsS --max-time 2 "$health_check_url" >/dev/null 2>&1; then
-      echo "$configured_url"
-      return 0
-    fi
-  fi
-
-  metadata_ip="$(curl -fsS --max-time 2 -H "Metadata-Flavor: Google" \
-    "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null || true)"
-  if [ -n "$metadata_ip" ]; then
-    echo "http://${metadata_ip}:${BRIDGE_PORT}"
-    return 0
-  fi
-
-  host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  if [ -n "$host_ip" ]; then
-    echo "http://${host_ip}:${BRIDGE_PORT}"
-    return 0
-  fi
-
-  if [ -n "$configured_url" ]; then
-    echo "ERROR: ZAPBOT_BRIDGE_URL is set but unreachable: $configured_url" >&2
+  if [ -z "$configured_url" ]; then
+    echo "ERROR: ZAPBOT_GATEWAY_URL is set but ZAPBOT_BRIDGE_URL is missing."
+    echo "FIX: Set ZAPBOT_BRIDGE_URL to the live public bridge URL before starting."
     return 1
   fi
 
-  return 0
+  health_check_url="${configured_url%/}/healthz"
+  if curl -fsS --max-time 2 "$health_check_url" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "ERROR: ZAPBOT_BRIDGE_URL is unreachable: $configured_url"
+  echo "FIX: Do not rely on host-derived fallback; set ZAPBOT_BRIDGE_URL to a live public URL."
+  return 1
 }
 
 start_ao_once() {
@@ -152,13 +137,7 @@ fi
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 
 if [ -n "${ZAPBOT_GATEWAY_URL:-}" ]; then
-  RESOLVED_BRIDGE_URL="$(resolve_bridge_url)" || exit 1
-  if [ -z "$RESOLVED_BRIDGE_URL" ]; then
-    echo "ERROR: ZAPBOT_GATEWAY_URL is set but a live bridge URL could not be derived."
-    echo "FIX: Set ZAPBOT_BRIDGE_URL to the current public URL or run on a host that exposes one."
-    exit 1
-  fi
-  ZAPBOT_BRIDGE_URL="$RESOLVED_BRIDGE_URL"
+  validate_bridge_url || exit 1
   export ZAPBOT_BRIDGE_URL
 fi
 
