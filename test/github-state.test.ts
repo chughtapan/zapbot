@@ -4,6 +4,7 @@ import {
   getAgentClaim,
   listOpenIssuesWithLabel,
   postComment,
+  getLinkedPullRequest,
   __resetForTests,
 } from "../src/github-state.ts";
 import {
@@ -142,5 +143,40 @@ describe("postComment", () => {
     const r = await postComment(repo, issue, "hello");
     expect(r._tag).toBe("Ok");
     if (r._tag === "Ok") expect(r.value as unknown as number).toBe(9999);
+  });
+});
+
+describe("getLinkedPullRequest", () => {
+  it("returns the latest linked pull request number from cross-reference events", async () => {
+    installFetchStub((url) => {
+      if (url.includes("/issues/42/events")) {
+        return Response.json([
+          {
+            event: "cross-referenced",
+            created_at: "2026-04-20T10:00:00Z",
+            source: { type: "pull_request", pull_request: { number: 17 } },
+          },
+          {
+            event: "cross-referenced",
+            created_at: "2026-04-20T11:00:00Z",
+            source: { type: "pull_request", pull_request: { number: 23 } },
+          },
+        ]);
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const r = await getLinkedPullRequest(repo, issue);
+    expect(r._tag).toBe("Ok");
+    if (r._tag === "Ok") {
+      expect(r.value as unknown as number).toBe(23);
+    }
+  });
+
+  it("returns null when no linked pull request exists", async () => {
+    installFetchStub(() => Response.json([]));
+    const r = await getLinkedPullRequest(repo, issue);
+    expect(r._tag).toBe("Ok");
+    if (r._tag === "Ok") expect(r.value).toBeNull();
   });
 });
