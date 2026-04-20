@@ -1,8 +1,8 @@
 import { describe, it } from "vitest";
 import * as fc from "fast-check";
-import { verifyAndClassify, type GatewayWebhookEnvelope } from "../../v2/gateway.ts";
-import { asDeliveryId, asRepoFullName, asBotUsername } from "../../v2/types.ts";
-import type { RepoFullName } from "../../v2/types.ts";
+import { verifyAndClassify, type GatewayWebhookEnvelope } from "../../src/gateway.ts";
+import { asDeliveryId, asRepoFullName, asBotUsername } from "../../src/types.ts";
+import type { RepoFullName } from "../../src/types.ts";
 import { sign } from "../helpers/sign.ts";
 
 const RUNS = 100;

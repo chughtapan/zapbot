@@ -6,19 +6,19 @@ import process from "node:process";
 import type { EventFrame, Message as MoltzapMessage } from "@moltzap/protocol";
 import { EventNames } from "@moltzap/protocol";
 import { MoltZapService, MoltZapWsClient } from "@moltzap/client";
-import { toClaudeChannelNotification } from "../v2/claude-channel/event.ts";
+import { toClaudeChannelNotification } from "../src/claude-channel/event.ts";
 import {
   bootClaudeChannelServer,
   type ClaudeChannelServerHandle,
-} from "../v2/claude-channel/server.ts";
+} from "../src/claude-channel/server.ts";
 import {
   asMoltzapConversationId,
   asMoltzapMessageId,
   asMoltzapSenderId,
   type MoltzapConversationId,
   type MoltzapSenderId,
-} from "../v2/moltzap/types.ts";
-import { err, ok, type Result } from "../v2/types.ts";
+} from "../src/moltzap/types.ts";
+import { err, ok, type Result } from "../src/types.ts";
 
 type SessionRole = "orchestrator" | "worker";
 

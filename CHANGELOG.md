@@ -8,7 +8,7 @@ Finish the ao-native bridge path and make MoltZap session provisioning real.
 
 - **MoltZap runtime provisioning** — zapbot now decodes `ZAPBOT_MOLTZAP_*` env at boot and forwards real `MOLTZAP_*` credentials to spawned `ao` sessions.
 - **Per-session MoltZap registration mode** — when `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` is configured, zapbot registers a fresh MoltZap agent for each dispatch and passes that key to the child session.
-- **Supervisor and allowlist implementations** — `v2/moltzap/supervisor.ts` and `v2/moltzap/identity-allowlist.ts` are now fully implemented and covered by tests.
+- **Supervisor and allowlist implementations** — `src/moltzap/supervisor.ts` and `src/moltzap/identity-allowlist.ts` are now fully implemented and covered by tests.
 - **Dispatcher env coverage** — tests now verify that `MOLTZAP_*` values actually reach the spawned `ao` process.
 
 ### Changed
@@ -149,7 +149,7 @@ Multi-repo support. Run one bridge instance across multiple GitHub repos.
 
 ### What changed
 
-- **Multi-repo webhook routing** — Bridge loads `agent-orchestrator.yaml` via a new config loader (`src/config/loader.ts`), routes webhooks by `repository.full_name`, and rejects unconfigured repos with 403.
+- **Multi-repo webhook routing** — Bridge loads `agent-orchestrator.yaml` via the runtime config loader (`src/config/*`), routes webhooks by `repository.full_name`, and rejects unconfigured repos with 403.
 - **Per-repo webhook secrets** — Each project can specify its own `secretEnvVar` in the config. HMAC verification resolves the per-repo secret first, falls back to shared `ZAPBOT_API_KEY`.
 - **Repo-scoped plannotator tokens** — Callback tokens now carry repo context. The bridge stores them locally with a 24-hour TTL instead of proxying to AO. Resolves repo via: token store → request body → `ZAPBOT_REPO` env var.
 - **Project-scoped `ao spawn`** — The spawner passes `--project <name>` so AO routes to the correct project.
@@ -158,7 +158,7 @@ Multi-repo support. Run one bridge instance across multiple GitHub repos.
 
 ### For contributors
 
-- New `src/config/loader.ts` module with full test coverage (`test/config-loader.test.ts`)
+- New runtime config loader coverage in `test/config-loader.test.ts`
 - `SpawnContext` now includes optional `projectName`
 - 57 unit tests across 3 files (state-machine, store, config-loader)
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # zapbot-publish.sh — Publish a plan file as a GitHub issue.
-# v2: plannotator and bridge callback are removed. This script creates or
+# The plannotator and bridge callback are removed. This script creates or
 # updates a GitHub issue with the plan content; nothing more.
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"

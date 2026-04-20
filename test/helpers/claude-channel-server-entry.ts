@@ -1,12 +1,12 @@
 import fs from "node:fs/promises";
 import process from "node:process";
-import { bootClaudeChannelServer } from "../../v2/claude-channel/server.ts";
-import { ok } from "../../v2/types.ts";
+import { bootClaudeChannelServer } from "../../src/claude-channel/server.ts";
+import { ok } from "../../src/types.ts";
 import {
   asMoltzapConversationId,
   asMoltzapMessageId,
   asMoltzapSenderId,
-} from "../../v2/moltzap/types.ts";
+} from "../../src/moltzap/types.ts";
 
 const replyFile = process.env.CLAUDE_CHANNEL_REPLY_FILE ?? "";
 const permissionFile = process.env.CLAUDE_CHANNEL_PERMISSION_FILE ?? "";
