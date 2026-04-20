@@ -17,14 +17,28 @@ export interface CommentMirrorSink {
   ) => Promise<Result<CommentId, GhCallError>>;
 }
 
+export type LinkedPullRequestMirrorStatus =
+  | {
+      readonly _tag: "Mirrored";
+      readonly linkedPullRequestCommentId: CommentId;
+    }
+  | {
+      readonly _tag: "NotLinked";
+    }
+  | {
+      readonly _tag: "Failed";
+      readonly cause: string;
+    };
+
 export interface CommentMirrorReceipt {
   readonly issueCommentId: CommentId;
-  readonly linkedPullRequestCommentId: CommentId | null;
+  readonly linkedPullRequestMirror: LinkedPullRequestMirrorStatus;
 }
 
-export type CommentMirrorError =
-  | { readonly _tag: "IssueCommentPostFailed"; readonly cause: string }
-  | { readonly _tag: "PullRequestCommentPostFailed"; readonly cause: string };
+export type CommentMirrorError = {
+  readonly _tag: "IssueCommentPostFailed";
+  readonly cause: string;
+};
 
 export function mirrorDurableStatusComment(
   targets: ThreadMirrorTargets,
@@ -33,4 +47,3 @@ export function mirrorDurableStatusComment(
 ): Promise<Result<CommentMirrorReceipt, CommentMirrorError>> {
   throw new Error("not implemented");
 }
-
