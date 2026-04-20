@@ -25,6 +25,7 @@ describe("toOrchestratorControlPrompt", () => {
     expect(result.value.title).toContain("acme/app#42");
     expect(result.value.body).toContain("github_comment_body:");
     expect(result.value.body).toContain("please review the open work");
+    expect(result.value.body).toContain("bun run bin/ao-spawn-with-moltzap.ts");
   });
 
   it("rejects blank GitHub comments", () => {

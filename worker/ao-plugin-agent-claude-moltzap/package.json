@@ -1,0 +1,6 @@
+{
+  "name": "ao-plugin-agent-claude-moltzap",
+  "private": true,
+  "type": "module",
+  "main": "./index.js"
+}

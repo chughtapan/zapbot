@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildMoltzapProcessEnv,
   buildMoltzapSpawnEnv,
   loadMoltzapRuntimeConfig,
   type MoltzapRuntimeConfig,
@@ -173,5 +174,57 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
     if (result._tag !== "Err") return;
     expect(result.error._tag).toBe("MoltzapProvisionFailed");
     expect(result.error.cause).toContain("403");
+  });
+});
+
+describe("moltzap runtime / buildMoltzapProcessEnv", () => {
+  it("returns an empty env map when MoltZap is disabled", () => {
+    expect(buildMoltzapProcessEnv({ _tag: "MoltzapDisabled" })).toEqual({});
+  });
+
+  it("maps static config into parent-process env for ao sessions", () => {
+    expect(
+      buildMoltzapProcessEnv({
+        _tag: "MoltzapStatic",
+        serverUrl: "wss://moltzap.example/ws",
+        apiKey: "mz-key",
+        allowlistCsv: "orch-1,worker-1",
+        allowlist: loadMoltzapRuntimeConfig({
+          ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+          ZAPBOT_MOLTZAP_API_KEY: "mz-key",
+          ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
+        })._tag === "Ok"
+          ? (loadMoltzapRuntimeConfig({
+              ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+              ZAPBOT_MOLTZAP_API_KEY: "mz-key",
+              ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
+            }) as Extract<
+              ReturnType<typeof loadMoltzapRuntimeConfig>,
+              { readonly _tag: "Ok" }
+            >).value.allowlist
+          : (() => {
+              throw new Error("unreachable");
+            })(),
+      }),
+    ).toEqual({
+      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      MOLTZAP_API_KEY: "mz-key",
+      MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
+    });
+  });
+
+  it("maps registration config into parent-process env for ao sessions", () => {
+    const result = loadMoltzapRuntimeConfig({
+      ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "reg-secret",
+      ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok" || result.value._tag !== "MoltzapRegistration") return;
+    expect(buildMoltzapProcessEnv(result.value)).toEqual({
+      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      MOLTZAP_REGISTRATION_SECRET: "reg-secret",
+      MOLTZAP_ALLOWED_SENDERS: "orch-1",
+    });
   });
 });

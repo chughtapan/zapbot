@@ -7,10 +7,13 @@ import {
   type RepoRoute,
 } from "../v2/bridge.ts";
 import type { ClassifiedWebhook } from "../v2/gateway.ts";
+import { asMoltzapSenderId } from "../v2/moltzap/types.ts";
+import type { AoControlHost } from "../v2/orchestrator/runtime.ts";
 import {
   asAoSessionName,
   asBotUsername,
   asCommentId,
+  asDeliveryId,
   asIssueNumber,
   asProjectName,
   asRepoFullName,
@@ -37,6 +40,12 @@ interface FakeGhCalls {
   postComment: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }>;
 }
 
+interface FakeAoCalls {
+  ensureStarted: Array<string>;
+  resolveReady: Array<string>;
+  sendPrompt: Array<{ session: string; title: string; body: string }>;
+}
+
 function makeGh(opts: {
   permission?: Result<string, GhCallError>;
   postResult?: Result<void, GhCallError>;
@@ -57,6 +66,33 @@ function makeGh(opts: {
     },
   };
   return { gh, calls };
+}
+
+function makeAoHost(): { host: AoControlHost; calls: FakeAoCalls } {
+  const calls: FakeAoCalls = { ensureStarted: [], resolveReady: [], sendPrompt: [] };
+  const host: AoControlHost = {
+    ensureStarted: async (projectName) => {
+      calls.ensureStarted.push(projectName as unknown as string);
+      return ok(undefined);
+    },
+    resolveReady: async (projectName) => {
+      calls.resolveReady.push(projectName as unknown as string);
+      return ok({
+        session: asAoSessionName(`${projectName as unknown as string}-orchestrator`),
+        senderId: asMoltzapSenderId("orch-1"),
+        mode: "reused",
+      });
+    },
+    sendPrompt: async (session, prompt) => {
+      calls.sendPrompt.push({
+        session: session as unknown as string,
+        title: prompt.title,
+        body: prompt.body,
+      });
+      return ok(undefined);
+    },
+  };
+  return { host, calls };
 }
 
 function makeConfig(withRoute = true): BridgeConfig {
@@ -87,11 +123,13 @@ function makeCtx(
   opts: {
     mintToken?: () => Promise<Result<InstallationToken, DispatchError>>;
     withRoute?: boolean;
+    aoControlHost?: AoControlHost;
   } = {}
 ): BridgeHandlerContext {
   return {
     mintToken: opts.mintToken ?? (async () => ok("fake-token" as unknown as InstallationToken)),
     gh,
+    aoControlHost: opts.aoControlHost ?? makeAoHost().host,
     config: makeConfig(opts.withRoute ?? true),
   };
 }
@@ -111,6 +149,8 @@ function asMention(kind: "plan_this" | "investigate_this" | "status" | "unknown_
     repo,
     issue,
     commentId,
+    commentBody: raw ?? "@zapbot plan this",
+    deliveryId: asDeliveryId("delivery-1"),
     command,
     triggeredBy: "carol",
   };
@@ -170,48 +210,30 @@ describe("handleClassifiedWebhook — permission gate", () => {
 describe("handleClassifiedWebhook — plan_this / investigate_this", () => {
   it("project not configured → ProjectNotConfigured error", async () => {
     const { gh } = makeGh({});
-    const out = await handleClassifiedWebhook(
-      asMention("plan_this"),
-      makeCtx(gh, { withRoute: false })
-    );
+    const out = await handleClassifiedWebhook(asMention("plan_this"), makeCtx(gh, { withRoute: false }));
     expect(out._tag).toBe("Err");
     if (out._tag === "Err") expect(out.error._tag).toBe("ProjectNotConfigured");
   });
 
-  it("token mint failure → TokenMintFailed bubbles up", async () => {
-    const { gh } = makeGh({});
-    const out = await handleClassifiedWebhook(
-      asMention("plan_this"),
-      makeCtx(gh, {
-        mintToken: async () => err({ _tag: "TokenMintFailed", cause: "no app" }),
-      })
-    );
-    expect(out._tag).toBe("Err");
-    if (out._tag === "Err") expect(out.error._tag).toBe("TokenMintFailed");
-  });
-
-  it("happy path → dispatched outcome + confirmation comment", async () => {
-    // dispatch() shells out to `ao`; by default it will fail in test env —
-    // so we exercise the plan_this branch by running against a fake dispatcher
-    // that the real flow uses by shelling out. Since dispatch is imported
-    // directly, we can't stub it without module mocking. Instead, exercise
-    // the precondition layers here and leave end-to-end dispatch for e2e.
-    //
-    // Assert: on mintToken success, we've at least passed the permission and
-    // token gates — meaning the next step is dispatch(). No way to assert
-    // further without shelling out. This test stops one layer short of the
-    // shell call; the happy-path confirmation comment is exercised in e2e.
-    const { gh } = makeGh({});
-    // Use investigate_this to vary branch coverage; same code path.
-    const result = handleClassifiedWebhook(asMention("investigate_this"), makeCtx(gh));
-    // Promise resolves with either Ok(dispatched) or Err(AoSpawnFailed).
-    const out = await result;
-    expect(out._tag === "Ok" || out._tag === "Err").toBe(true);
-    if (out._tag === "Err") {
-      expect(out.error._tag).toBe("AoSpawnFailed");
-    } else {
+  it("forwards control to the persistent orchestrator and preserves raw metadata", async () => {
+    const { gh, calls: ghCalls } = makeGh({});
+    const { host, calls } = makeAoHost();
+    const out = await handleClassifiedWebhook(asMention("investigate_this", "please investigate this"), makeCtx(gh, { aoControlHost: host }));
+    expect(out._tag).toBe("Ok");
+    if (out._tag === "Ok") {
       expect(out.value.kind).toBe("dispatched");
+      if (out.value.kind === "dispatched") {
+        expect(out.value.session).toBe("app-orchestrator");
+      }
     }
+    expect(calls.ensureStarted).toEqual(["app"]);
+    expect(calls.resolveReady).toEqual(["app"]);
+    expect(calls.sendPrompt).toHaveLength(1);
+    expect(calls.sendPrompt[0].title).toContain("GitHub control for acme/app#42");
+    expect(calls.sendPrompt[0].body).toContain("delivery_id: delivery-1");
+    expect(calls.sendPrompt[0].body).toContain("github_comment_body:");
+    expect(calls.sendPrompt[0].body).toContain("please investigate this");
+    expect(ghCalls.postComment[0].body).toContain("Forwarded control event");
   });
 });
 
@@ -257,7 +279,3 @@ describe("handleClassifiedWebhook — eyes reaction", () => {
     expect(calls.addReaction[0].reaction).toBe("eyes");
   });
 });
-
-// Satisfy the unused-import lint for asAoSessionName in case of future
-// type-narrowing use.
-void asAoSessionName;

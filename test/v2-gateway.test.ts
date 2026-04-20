@@ -146,6 +146,8 @@ describe("verifyAndClassify", () => {
       expect(r.value.triggeredBy).toBe("alice");
       expect(r.value.issue as unknown as number).toBe(7);
       expect(r.value.commentId as unknown as number).toBe(1234);
+      expect(r.value.deliveryId as unknown as string).toBe("d-1");
+      expect(r.value.commentBody).toBe("@zapbot plan this");
     } else {
       throw new Error("expected mention_command");
     }

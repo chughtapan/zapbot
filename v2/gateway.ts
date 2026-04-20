@@ -124,6 +124,8 @@ export type ClassifiedWebhook =
       readonly repo: RepoFullName;
       readonly issue: IssueNumber;
       readonly commentId: CommentId;
+      readonly commentBody: string;
+      readonly deliveryId: DeliveryId;
       readonly command: MentionCommand;
       readonly triggeredBy: string;
     };
@@ -246,6 +248,8 @@ export async function verifyAndClassify(
     repo: envelope.repo,
     issue: asIssueNumber(p.issue.number),
     commentId: asCommentId(p.comment.id),
+    commentBody: p.comment.body,
+    deliveryId: envelope.deliveryId,
     command,
     triggeredBy: p.sender.login,
   });
