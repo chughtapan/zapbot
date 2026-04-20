@@ -8,11 +8,14 @@ import {
   type RepoRoute,
 } from "../v2/bridge.ts";
 import {
+  asAoSessionName,
   asBotUsername,
   asProjectName,
   asRepoFullName,
   ok,
 } from "../v2/types.ts";
+import { asMoltzapSenderId } from "../v2/moltzap/types.ts";
+import type { AoControlHost } from "../v2/orchestrator/runtime.ts";
 import type { RepoFullName } from "../v2/types.ts";
 
 // Routes covered here are the HTTP-layer routing of the bridge fetch
@@ -68,10 +71,24 @@ function fakeGh(): GhAdapter {
   };
 }
 
+function fakeAo(): AoControlHost {
+  return {
+    ensureStarted: async () => ok(undefined),
+    resolveReady: async () =>
+      ok({
+        session: asAoSessionName("app-orchestrator"),
+        senderId: asMoltzapSenderId("orch-1"),
+        mode: "reused",
+      }),
+    sendPrompt: async () => ok(undefined),
+  };
+}
+
 function makeHandler(cfg: BridgeConfig = makeConfig()): (req: Request) => Promise<Response> {
   const ctx: BridgeHandlerContext = {
     mintToken: defaultMintToken,
     gh: fakeGh(),
+    aoControlHost: fakeAo(),
     config: cfg,
   };
   return buildFetchHandler(() => cfg, ctx);

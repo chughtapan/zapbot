@@ -116,6 +116,38 @@ export async function buildMoltzapSpawnEnv(
   }
 }
 
+/**
+ * Materialize the MoltZap-related parent-process env that `ao start` / `ao spawn`
+ * should inherit before the session-local Claude channel server provisions its
+ * own runtime identity.
+ */
+export function buildMoltzapProcessEnv(
+  config: MoltzapRuntimeConfig,
+): Record<string, string> {
+  switch (config._tag) {
+    case "MoltzapDisabled":
+      return {};
+    case "MoltzapStatic":
+      return {
+        MOLTZAP_SERVER_URL: config.serverUrl,
+        MOLTZAP_API_KEY: config.apiKey,
+        ...(config.allowlistCsv !== null
+          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
+          : {}),
+      };
+    case "MoltzapRegistration":
+      return {
+        MOLTZAP_SERVER_URL: config.serverUrl,
+        MOLTZAP_REGISTRATION_SECRET: config.registrationSecret,
+        ...(config.allowlistCsv !== null
+          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
+          : {}),
+      };
+    default:
+      return absurd(config);
+  }
+}
+
 interface RegistrationResponse {
   readonly apiKey: string;
   readonly agentId: string;

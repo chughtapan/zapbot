@@ -13,12 +13,15 @@
 
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
-import { dispatch } from "./ao/dispatcher.ts";
 import { getIssue } from "./github-state.ts";
-import type { MoltzapRuntimeConfig } from "./moltzap/runtime.ts";
+import {
+  buildMoltzapProcessEnv,
+  type MoltzapRuntimeConfig,
+} from "./moltzap/runtime.ts";
+import { createAoCliControlHost, forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
+import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
 import {
   absurd,
-  asAoSessionName,
   asDeliveryId,
   asRepoFullName,
   err,
@@ -99,6 +102,7 @@ export interface RunningBridge {
 export interface BridgeHandlerContext {
   readonly mintToken: () => Promise<Result<InstallationToken, DispatchError>>;
   readonly gh: GhAdapter;
+  readonly aoControlHost: AoControlHost;
   readonly config: BridgeConfig;
 }
 
@@ -109,6 +113,10 @@ export interface GhAdapter {
 }
 
 export type { HandleOutcome } from "./types.ts";
+type BridgeHotPathError =
+  | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName }
+  | ControlEventShapeError
+  | ForwardControlError;
 
 // ── Handler ─────────────────────────────────────────────────────────
 
@@ -119,7 +127,7 @@ export type { HandleOutcome } from "./types.ts";
 export async function handleClassifiedWebhook(
   classified: ClassifiedWebhook,
   ctx: BridgeHandlerContext
-): Promise<Result<HandleOutcome, DispatchError>> {
+): Promise<Result<HandleOutcome, BridgeHotPathError>> {
   if (classified.kind === "ignore") {
     return { _tag: "Ok", value: { kind: "ignored", reason: classified.reason } };
   }
@@ -132,7 +140,7 @@ export async function handleClassifiedWebhook(
 async function handleMention(
   c: Extract<ClassifiedWebhook, { kind: "mention_command" }>,
   ctx: BridgeHandlerContext
-): Promise<Result<HandleOutcome, DispatchError>> {
+): Promise<Result<HandleOutcome, BridgeHotPathError>> {
   // Eyes reaction for immediate UX feedback (best-effort; log on failure, never bubble).
   void ctx.gh.addReaction(c.repo, c.commentId as unknown as number, "eyes");
 
@@ -162,22 +170,29 @@ async function handleMention(
       if (route === undefined) {
         return err({ _tag: "ProjectNotConfigured", repo: c.repo });
       }
-      const tokenResult = await ctx.mintToken();
-      if (tokenResult._tag === "Err") return tokenResult;
-      const dispatched = await dispatch({
+      const controlEvent: OrchestratorControlEvent = {
+        _tag: "GitHubControlEvent",
         repo: c.repo,
-        issue: c.issue,
         projectName: route.projectName,
-        configPath: ctx.config.aoConfigPath,
-        installationToken: tokenResult.value,
-        moltzap: ctx.config.moltzap,
-      });
-      if (dispatched._tag === "Err") return dispatched;
-      const session = asAoSessionName(dispatched.value as unknown as string);
+        issue: c.issue,
+        commentId: c.commentId,
+        deliveryId: c.deliveryId,
+        commentBody: c.commentBody,
+        triggeredBy: c.triggeredBy,
+      };
+      const prompt = toOrchestratorControlPrompt(controlEvent);
+      if (prompt._tag === "Err") {
+        return err(prompt.error);
+      }
+      const forwarded = await forwardControlPrompt(route.projectName, prompt.value, ctx.aoControlHost);
+      if (forwarded._tag === "Err") {
+        return err(forwarded.error);
+      }
+      const session = forwarded.value.session;
       void ctx.gh.postComment(
         c.repo,
         c.issue,
-        `Dispatching agent for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`
+        `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`
       );
       return ok({ kind: "dispatched", repo: c.repo, session });
     }
@@ -341,13 +356,17 @@ export function buildFetchHandler(
       const outcome = await handleClassifiedWebhook(classified.value, ctx);
       if (outcome._tag === "Err") {
         const e = outcome.error;
-        switch (e._tag) {
-          case "AoSpawnFailed":
-            return errorResponse(502, "dispatch_failed", `ao spawn failed (exit ${e.exitCode}).`);
-          case "MoltzapProvisionFailed":
-            return errorResponse(503, "dispatch_unavailable", "MoltZap session provisioning failed.");
-          case "TokenMintFailed":
-            return errorResponse(503, "auth_unavailable", "Installation token unavailable.");
+      switch (e._tag) {
+          case "AoStartFailed":
+            return errorResponse(503, "dispatch_unavailable", `ao start failed: ${e.cause}.`);
+          case "OrchestratorNotFound":
+            return errorResponse(503, "dispatch_unavailable", `No orchestrator found for ${e.projectName as unknown as string}.`);
+          case "OrchestratorNotReady":
+            return errorResponse(503, "dispatch_unavailable", `Orchestrator for ${e.projectName as unknown as string} is not ready: ${e.reason}.`);
+          case "AoSendFailed":
+            return errorResponse(502, "dispatch_failed", `ao send failed: ${e.cause}.`);
+          case "PromptShapeInvalid":
+            return errorResponse(400, "invalid_request", `Orchestrator prompt invalid: ${e.reason}.`);
           case "ProjectNotConfigured":
             return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' not routed.`);
           default:
@@ -414,9 +433,19 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   }
 
   const ghAdapter = buildDefaultGhAdapter();
+  let aoControlHost = createAoCliControlHost({
+    configPath: current.aoConfigPath,
+    env: {
+      ...process.env,
+      ...buildMoltzapProcessEnv(current.moltzap),
+    },
+  });
   const ctx: BridgeHandlerContext = {
     mintToken: defaultMintToken,
     gh: ghAdapter,
+    get aoControlHost() {
+      return aoControlHost;
+    },
     get config() {
       return current;
     },
@@ -435,6 +464,13 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     },
     async reload(nextConfig: BridgeConfig): Promise<void> {
       current = nextConfig;
+      aoControlHost = createAoCliControlHost({
+        configPath: current.aoConfigPath,
+        env: {
+          ...process.env,
+          ...buildMoltzapProcessEnv(current.moltzap),
+        },
+      });
       await registerAll(current);
     },
   };
