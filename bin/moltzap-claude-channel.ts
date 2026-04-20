@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import process from "node:process";
 import type { EventFrame, Message as MoltzapMessage } from "@moltzap/protocol";
 import { EventNames } from "@moltzap/protocol";
@@ -33,6 +34,30 @@ interface RegistrationPayload {
   readonly apiKey: string;
   readonly agentId: string;
 }
+
+const debugLogPath = resolveDebugLogPath(process.env);
+logDebug("boot");
+process.on("beforeExit", (code) => {
+  logDebug(`beforeExit code=${code}`);
+});
+process.on("exit", (code) => {
+  logDebug(`exit code=${code}`);
+});
+process.on("uncaughtException", (cause) => {
+  logDebug(`uncaughtException ${stringifyCause(cause)}`);
+});
+process.on("unhandledRejection", (cause) => {
+  logDebug(`unhandledRejection ${stringifyCause(cause)}`);
+});
+process.stdin.on("close", () => {
+  logDebug("stdin close");
+});
+process.stdin.on("end", () => {
+  logDebug("stdin end");
+});
+process.stdin.on("error", (cause) => {
+  logDebug(`stdin error ${stringifyCause(cause)}`);
+});
 
 const role: SessionRole = process.env.AO_CALLER_TYPE === "orchestrator" ? "orchestrator" : "worker";
 const bootstrap = await resolveBootstrap(process.env, role);
@@ -150,6 +175,9 @@ try {
   console.error(
     `[moltzap-channel] ready agent=${localSenderId as string} server=${bootstrap.value.serverUrl} role=${role}`,
   );
+  logDebug(
+    `ready agent=${localSenderId as string} server=${bootstrap.value.serverUrl} role=${role}`,
+  );
   await sweepUnreadConversations({ service, channel: channel.value, localSenderId, deliveredMessageIds });
   unreadPoller = setInterval(() => {
     void sweepUnreadConversations({
@@ -164,6 +192,7 @@ try {
   async function shutdown(signal: string): Promise<void> {
     clearInterval(keepAlive);
     console.error(`[moltzap-channel] stopping on ${signal}`);
+    logDebug(`shutdown ${signal}`);
     await channelStop?.();
     process.exit(0);
   }
@@ -513,6 +542,26 @@ function stringifyCause(cause: unknown): string {
 }
 
 function fatal(message: string): never {
+  logDebug(`fatal ${message}`);
   console.error(`[moltzap-channel] ${message}`);
   process.exit(1);
+}
+
+function resolveDebugLogPath(env: Record<string, string | undefined>): string {
+  const explicit = trimEnv(env.MOLTZAP_CHANNEL_DEBUG_LOG_PATH);
+  if (explicit !== null) {
+    return explicit;
+  }
+  const sessionName = trimEnv(env.AO_SESSION_NAME) ?? trimEnv(env.AO_SESSION) ?? `pid-${process.pid}`;
+  return join("/tmp", `moltzap-channel-${sessionName}.log`);
+}
+
+function logDebug(message: string): void {
+  const line = `[${new Date().toISOString()}] ${message}\n`;
+  try {
+    mkdirSync(dirname(debugLogPath), { recursive: true });
+    appendFileSync(debugLogPath, line, "utf8");
+  } catch {
+    // Best-effort debug logging only.
+  }
 }

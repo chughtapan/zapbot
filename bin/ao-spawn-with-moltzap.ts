@@ -7,10 +7,18 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 
-const issue = process.argv[2];
-if (typeof issue !== "string" || issue.trim().length === 0) {
-  fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number>");
+const spawnArgs = process.argv.slice(2);
+if (spawnArgs.length === 0) {
+  fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number> | --prompt <text>");
 }
+
+const moltzapEnvFile = readZapbotEnvFile();
+const MOLTZAP_ENV_FALLBACKS = {
+  MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
+  MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
+  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
+  MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
+} as const;
 
 const sessionDataDir = requireEnv("AO_DATA_DIR");
 const currentSession = requireEnv("AO_SESSION");
@@ -34,12 +42,12 @@ const childEnv: Record<string, string> = {
 };
 delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
-const allowedSenders = trimEnv(process.env.MOLTZAP_ALLOWED_SENDERS);
+const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS");
 if (allowedSenders !== null) {
   childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
 }
 
-const spawnedSession = await runAoSpawn(issue, childEnv);
+const spawnedSession = await runAoSpawn(spawnArgs, childEnv);
 await ensureWorkerChannelsReady({
   sessionName: spawnedSession,
   sessionDataDir,
@@ -55,10 +63,10 @@ function listSessionNames(dataDir: string): string[] {
 }
 
 async function runAoSpawn(
-  issueNumber: string,
+  args: string[],
   env: Record<string, string>,
 ): Promise<string> {
-  const child = spawn("ao", ["spawn", issueNumber], {
+  const child = spawn("ao", ["spawn", ...args], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -368,11 +376,40 @@ async function runCommand(
 }
 
 function requireEnv(name: string): string {
-  const value = trimEnv(process.env[name]);
+  const value = resolveRuntimeEnv(name);
   if (value === null) {
     fatal(`${name} is required`);
   }
   return value;
+}
+
+function resolveRuntimeEnv(name: string): string | null {
+  const direct = trimEnv(process.env[name]);
+  if (direct !== null) {
+    return direct;
+  }
+
+  const fallbackKey = MOLTZAP_ENV_FALLBACKS[name as keyof typeof MOLTZAP_ENV_FALLBACKS];
+  if (fallbackKey !== undefined) {
+    const mappedProcessValue = trimEnv(process.env[fallbackKey]);
+    if (mappedProcessValue !== null) {
+      return mappedProcessValue;
+    }
+  }
+
+  const fileValue = trimEnv(moltzapEnvFile[name]);
+  if (fileValue !== null) {
+    return fileValue;
+  }
+
+  if (fallbackKey !== undefined) {
+    const mappedFileValue = trimEnv(moltzapEnvFile[fallbackKey]);
+    if (mappedFileValue !== null) {
+      return mappedFileValue;
+    }
+  }
+
+  return null;
 }
 
 function trimEnv(value: string | undefined): string | null {
@@ -393,6 +430,42 @@ function stringifyCause(cause: unknown): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readZapbotEnvFile(): Record<string, string> {
+  const path = trimEnv(process.env.ZAPBOT_ENV_PATH) ?? join(homedir(), ".zapbot", ".env");
+  if (!existsSync(path)) {
+    return {};
+  }
+
+  const env: Record<string, string> = {};
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) {
+      continue;
+    }
+    const normalized = trimmed.startsWith("export ") ? trimmed.slice(7).trim() : trimmed;
+    const index = normalized.indexOf("=");
+    if (index <= 0) {
+      continue;
+    }
+    const key = normalized.slice(0, index).trim();
+    const value = stripWrappingQuotes(normalized.slice(index + 1).trim());
+    if (key.length > 0 && value.length > 0) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function stripWrappingQuotes(value: string): string {
+  if (
+    (value.startsWith("\"") && value.endsWith("\"")) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 function fatal(message: string): never {
