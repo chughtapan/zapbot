@@ -56,6 +56,40 @@ function patAuthError(
   return { ok: false, error: { type, message, fix } };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function decodeGitHubUserLogin(body: unknown): { ok: true; login: string } | PatAuthOutcome {
+  if (!isRecord(body) || typeof body.login !== "string" || body.login.length === 0) {
+    return patAuthError(
+      "github_api_error",
+      "GitHub API returned a user response without a login.",
+      "Check GitHub API status and try again.",
+    );
+  }
+
+  return { ok: true, login: body.login };
+}
+
+function decodeGitHubPermission(
+  body: unknown,
+): { ok: true; permission: string } | PatAuthOutcome {
+  if (
+    !isRecord(body) ||
+    typeof body.permission !== "string" ||
+    body.permission.length === 0
+  ) {
+    return patAuthError(
+      "github_api_error",
+      "GitHub API returned a permission response without a permission value.",
+      "Check GitHub API status and try again.",
+    );
+  }
+
+  return { ok: true, permission: body.permission };
+}
+
 function extractBearerToken(authHeader: string | null): { ok: true; token: string } | AuthOutcome {
   if (!authHeader) {
     return authError(
@@ -242,13 +276,9 @@ export async function verifyGitHubPAT(
       );
     }
 
-    const userBody = (await userResp.json()) as { login?: string };
-    if (!userBody.login) {
-      return patAuthError(
-        "github_api_error",
-        "GitHub API returned a user response without a login.",
-        "Check GitHub API status and try again.",
-      );
+    const userBody = decodeGitHubUserLogin(await userResp.json());
+    if (!userBody.ok) {
+      return userBody;
     }
 
     const permissionResp = await globalThis.fetch(
@@ -283,13 +313,9 @@ export async function verifyGitHubPAT(
       );
     }
 
-    const permissionBody = (await permissionResp.json()) as { permission?: string };
-    if (!permissionBody.permission) {
-      return patAuthError(
-        "github_api_error",
-        "GitHub API returned a permission response without a permission value.",
-        "Check GitHub API status and try again.",
-      );
+    const permissionBody = decodeGitHubPermission(await permissionResp.json());
+    if (!permissionBody.ok) {
+      return permissionBody;
     }
 
     if (!WRITE_PERMISSIONS.has(permissionBody.permission)) {

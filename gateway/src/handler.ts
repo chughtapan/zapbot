@@ -35,6 +35,35 @@ function authErrorResponse(error: AuthError): Response {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+interface PublishRequestBody {
+  repo: string;
+  issueNumber: number;
+  issueUrl?: string;
+}
+
+function decodePublishRequest(body: unknown): PublishRequestBody | Response {
+  if (!isRecord(body)) {
+    return errorResponse(400, "invalid_request", "Request body must be a JSON object.");
+  }
+
+  const { repo, issueNumber, issueUrl } = body;
+  if (typeof repo !== "string" || repo.length === 0) {
+    return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
+  }
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    return errorResponse(400, "invalid_request", "Missing or invalid 'issueNumber' field.");
+  }
+  if (issueUrl !== undefined && typeof issueUrl !== "string") {
+    return errorResponse(400, "invalid_request", "Invalid 'issueUrl' field.");
+  }
+
+  return { repo, issueNumber, issueUrl };
+}
+
 const FORWARDED_HEADERS = [
   "content-type",
   "x-github-event",
@@ -246,23 +275,18 @@ async function handlePublish(
   req: Request,
   timeoutMs: number,
 ): Promise<Response> {
-  let body: any;
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
   }
 
-  const { repo, issueNumber, issueUrl } = body;
-  if (!repo || typeof repo !== "string") {
-    return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
+  const decodedBody = decodePublishRequest(body);
+  if (decodedBody instanceof Response) {
+    return decodedBody;
   }
-  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
-    return errorResponse(400, "invalid_request", "Missing or invalid 'issueNumber' field.");
-  }
-  if (issueUrl !== undefined && typeof issueUrl !== "string") {
-    return errorResponse(400, "invalid_request", "Invalid 'issueUrl' field.");
-  }
+  const { repo, issueNumber, issueUrl } = decodedBody;
 
   const authOrResp = await authenticateTeammateRequest(req, repo);
   if (authOrResp instanceof Response) return authOrResp;

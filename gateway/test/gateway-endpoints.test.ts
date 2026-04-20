@@ -417,6 +417,24 @@ describe("gateway endpoints", () => {
     expect(body.error.type).toBe("invalid_token");
   });
 
+  it("POST /api/publish rejects non-object JSON bodies", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/publish`, {
+      method: "POST",
+      body: "null",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_PAT_WRITE}`,
+      },
+    });
+
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error.type).toBe("invalid_request");
+    expect(tokenRegistrations).toHaveLength(0);
+    expect(callbackEvents).toHaveLength(0);
+  });
+
   it("GET /api/workflows/:id proxies to the bridge for a teammate with write access", async () => {
     registerBridge("acme/app", mockBridgeUrl);
     const resp = await originalFetch(`${baseUrl}/api/workflows/91?repo=acme/app`, {

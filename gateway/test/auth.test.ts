@@ -230,6 +230,33 @@ describe("verifyGitHubPAT", () => {
     }
   });
 
+  it("rejects a malformed GitHub user payload", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      Response.json({ login: 91 }, { status: 200 }),
+    );
+
+    const result = await verifyGitHubPAT("ghp_malformed_user", "acme/app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("github_api_error");
+      expect(result.error.message).toContain("without a login");
+    }
+  });
+
+  it("rejects a malformed GitHub permission payload", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(MOCK_USER_RESPONSE, { status: 200 }))
+      .mockResolvedValueOnce(Response.json({ permission: 123 }, { status: 200 }));
+
+    const result = await verifyGitHubPAT("ghp_malformed_permission", "acme/app");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe("github_api_error");
+      expect(result.error.message).toContain("without a permission value");
+    }
+  });
+
   it("caches valid PAT checks per repo", async () => {
     const mockFetch = vi
       .fn()
