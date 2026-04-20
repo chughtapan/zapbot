@@ -134,7 +134,7 @@ ln -snf "$ZAPBOT_DIR" "$SKILLS_DIR/zapbot"
 link_skill_dirs "$ZAPBOT_DIR" "$SKILLS_DIR"
 
 # Make scripts executable
-chmod +x "$ZAPBOT_DIR/bin/"* "$ZAPBOT_DIR/setup" "$ZAPBOT_DIR/start.sh" "$ZAPBOT_DIR/test/e2e-smoke.sh" 2>/dev/null || true
+chmod +x "$ZAPBOT_DIR/bin/"* "$ZAPBOT_DIR/setup" "$ZAPBOT_DIR/start.sh" 2>/dev/null || true
 
 # Create ~/.zapbot/ dir
 STATE_DIR="$HOME/.zapbot"
