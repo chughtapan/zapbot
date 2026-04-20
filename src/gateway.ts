@@ -212,8 +212,9 @@ function decodeIssueCommentPayload(
 
 /**
  * Verify HMAC, then classify the envelope into either `ignore` or a
- * `mention_command`. Only `issue_comment.created` events whose body mentions
- * the bot can become `mention_command`; everything else resolves to `ignore`.
+ * `mention_command`. Only issue-thread `issue_comment.created` events whose
+ * body mentions the bot can become `mention_command`; PR-thread comments are
+ * canonical-issue misses and are ignored.
  */
 export async function verifyAndClassify(
   envelope: GatewayWebhookEnvelope,
@@ -234,6 +235,9 @@ export async function verifyAndClassify(
   }
 
   const p = decoded.value;
+  if (p.issue.isPullRequest) {
+    return ok({ kind: "ignore", reason: "pull_request_thread" });
+  }
   if (p.sender.login === (botUsername as unknown as string)) {
     return ok({ kind: "ignore", reason: "self-mention" });
   }

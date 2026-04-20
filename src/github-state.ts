@@ -41,6 +41,22 @@ export interface CommentSnapshot {
   readonly createdAt: string;
 }
 
+interface IssueEventSourcePullRequest {
+  readonly number?: number | null;
+}
+
+interface IssueEventSource {
+  readonly type?: string | null;
+  readonly pull_request?: IssueEventSourcePullRequest | null;
+  readonly issue?: { readonly number?: number | null } | null;
+}
+
+interface IssueEventSnapshot {
+  readonly event?: string | null;
+  readonly created_at?: string | null;
+  readonly source?: IssueEventSource | null;
+}
+
 export type Claim =
   | { readonly kind: "unclaimed" }
   | { readonly kind: "claimed"; readonly by: BotUsername };
@@ -159,6 +175,53 @@ export async function postComment(
   } catch (e) {
     return err(toError(repo, issue, e));
   }
+}
+
+export async function getLinkedPullRequest(
+  repo: RepoFullName,
+  issue: IssueNumber
+): Promise<Result<IssueNumber | null, GithubStateError>> {
+  const client = getOctokit();
+  if (client === null) return err({ _tag: "GitHubAuthMissing" });
+  const r = splitRepo(repo);
+  try {
+    const { data } = await client.rest.issues.listEvents({
+      owner: r.owner,
+      repo: r.repo,
+      issue_number: issue as unknown as number,
+      per_page: 100,
+    });
+    return ok(findLinkedPullRequest(data as ReadonlyArray<IssueEventSnapshot>));
+  } catch (e) {
+    return err(toError(repo, issue, e));
+  }
+}
+
+function findLinkedPullRequest(events: ReadonlyArray<IssueEventSnapshot>): IssueNumber | null {
+  let latestAt = Number.NEGATIVE_INFINITY;
+  let linked: IssueNumber | null = null;
+  for (const event of events) {
+    if (event.event !== "cross-referenced") continue;
+    const pullRequest = extractPullRequestNumber(event.source);
+    if (pullRequest === null) continue;
+    const createdAt = event.created_at ? Date.parse(event.created_at) : Number.NaN;
+    if (Number.isNaN(createdAt)) continue;
+    if (createdAt >= latestAt) {
+      latestAt = createdAt;
+      linked = pullRequest;
+    }
+  }
+  return linked;
+}
+
+function extractPullRequestNumber(source: IssueEventSource | null | undefined): IssueNumber | null {
+  if (!source) return null;
+  if (source.type !== undefined && source.type !== null && source.type !== "pull_request") {
+    return null;
+  }
+  const number = source.pull_request?.number ?? source.issue?.number ?? null;
+  if (typeof number !== "number") return null;
+  return asIssueNumber(number);
 }
 
 // ── Octokit wiring ──────────────────────────────────────────────────
