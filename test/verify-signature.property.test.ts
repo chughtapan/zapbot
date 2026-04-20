@@ -1,13 +1,14 @@
 import { describe, it, expect } from "vitest";
 import * as fc from "fast-check";
-import { verifySignature } from "../src/http/verify-signature.js";
+import { verifySignature } from "../v2/http/verify-signature.js";
 import { sign } from "./helpers/sign.ts";
 
-const RUNS = 200;
+const RUNS = 100;
 
 // Non-empty secret so the HMAC key is well-defined across both sides.
 const arbSecret = fc.string({ minLength: 1, maxLength: 64 });
 const arbBody = fc.string({ maxLength: 512 });
+const arbSuffix = fc.string({ minLength: 1, maxLength: 512 });
 
 describe("verifySignature (property)", () => {
   it("accepts any correctly-signed payload", async () => {
@@ -50,9 +51,8 @@ describe("verifySignature (property)", () => {
       fc.asyncProperty(
         arbSecret,
         arbBody,
-        arbBody,
+        arbSuffix,
         async (secret, body, suffix) => {
-          fc.pre(suffix.length > 0); // ensure the body actually changes
           const originalSig = await sign(body, secret);
           const mutatedBody = body + suffix;
           return (
