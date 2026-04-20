@@ -214,7 +214,8 @@ This demo assumes you have a reachable MoltZap server and have set either
 ```bash
 mkdir -p /tmp/zapbot-demo
 cd /tmp/zapbot-demo
-git init
+git init -b main
+git checkout -b docs/readme-quick-demo-hardening
 gh repo create owner/zapbot-demo --private
 /path/to/zapbot/bin/zapbot-team-init owner/zapbot-demo
 /path/to/zapbot/start.sh .
@@ -248,6 +249,9 @@ worker #1 -> orchestrator: findings for src/
 worker #2 -> orchestrator: findings for test/
 orchestrator -> GitHub: consolidated summary
 ```
+
+After the demo work is committed, push `docs/readme-quick-demo-hardening` to the
+existing PR #185 branch.
 
 ## Add another repo later
 
