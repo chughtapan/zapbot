@@ -149,13 +149,22 @@ describe("postComment", () => {
 describe("getLinkedPullRequest", () => {
   it("returns the latest linked pull request number from cross-reference events", async () => {
     installFetchStub((url) => {
-      if (url.includes("/issues/42/events")) {
+      if (url.includes("/issues/42/events") && url.includes("page=1")) {
         return Response.json([
           {
             event: "cross-referenced",
             created_at: "2026-04-20T10:00:00Z",
             source: { type: "pull_request", pull_request: { number: 17 } },
           },
+          ...Array.from({ length: 99 }, (_, index) => ({
+            event: "labeled",
+            created_at: `2026-04-20T10:${String(index % 60).padStart(2, "0")}:00Z`,
+            source: null,
+          })),
+        ]);
+      }
+      if (url.includes("/issues/42/events") && url.includes("page=2")) {
+        return Response.json([
           {
             event: "cross-referenced",
             created_at: "2026-04-20T11:00:00Z",
@@ -170,6 +179,27 @@ describe("getLinkedPullRequest", () => {
     expect(r._tag).toBe("Ok");
     if (r._tag === "Ok") {
       expect(r.value as unknown as number).toBe(23);
+    }
+  });
+
+  it("rejects malformed issue event payloads at the boundary", async () => {
+    installFetchStub((url) => {
+      if (url.includes("/issues/42/events")) {
+        return Response.json([
+          {
+            event: "cross-referenced",
+            created_at: "2026-04-20T10:00:00Z",
+            source: { type: "pull_request", pull_request: { number: "not-a-number" } },
+          },
+        ]);
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const r = await getLinkedPullRequest(repo, issue);
+    expect(r._tag).toBe("Err");
+    if (r._tag === "Err") {
+      expect(r.error._tag).toBe("GitHubApiFailed");
     }
   });
 

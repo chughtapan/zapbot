@@ -139,6 +139,22 @@ interface IssueCommentPayload {
   readonly sender: { readonly login: string };
 }
 
+interface JsonObject {
+  readonly [key: string]: unknown;
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object";
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === "number";
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
 type DecodeResult =
   | { readonly kind: "decoded"; readonly value: IssueCommentPayload }
   | { readonly kind: "invalid"; readonly reason: string }
@@ -154,45 +170,41 @@ function decodeIssueCommentPayload(
   payload: unknown,
   eventType: string
 ): DecodeResult {
-  if (payload === null || typeof payload !== "object") {
+  if (!isJsonObject(payload)) {
     return { kind: "invalid", reason: "payload is not an object" };
   }
   if (eventType !== "issue_comment") {
     return { kind: "other_event", reason: `event ${eventType}` };
   }
-  const p = payload as Record<string, unknown>;
-  const action = p.action;
-  if (typeof action !== "string") {
+  const action = payload.action;
+  if (!isString(action)) {
     return { kind: "invalid", reason: "missing string 'action'" };
   }
   if (action !== "created") {
     return { kind: "other_event", reason: `action ${action}` };
   }
 
-  const comment = p.comment;
-  if (comment === null || typeof comment !== "object") {
+  const comment = payload.comment;
+  if (!isJsonObject(comment)) {
     return { kind: "invalid", reason: "missing 'comment' object" };
   }
-  const c = comment as Record<string, unknown>;
-  if (typeof c.id !== "number" || typeof c.body !== "string") {
+  if (!isNumber(comment.id) || !isString(comment.body)) {
     return { kind: "invalid", reason: "comment.id/body malformed" };
   }
 
-  const issue = p.issue;
-  if (issue === null || typeof issue !== "object") {
+  const issue = payload.issue;
+  if (!isJsonObject(issue)) {
     return { kind: "invalid", reason: "missing 'issue' object" };
   }
-  const i = issue as Record<string, unknown>;
-  if (typeof i.number !== "number") {
+  if (!isNumber(issue.number)) {
     return { kind: "invalid", reason: "issue.number malformed" };
   }
 
-  const sender = p.sender;
-  if (sender === null || typeof sender !== "object") {
+  const sender = payload.sender;
+  if (!isJsonObject(sender)) {
     return { kind: "invalid", reason: "missing 'sender' object" };
   }
-  const s = sender as Record<string, unknown>;
-  if (typeof s.login !== "string") {
+  if (!isString(sender.login)) {
     return { kind: "invalid", reason: "sender.login malformed" };
   }
 
@@ -200,12 +212,12 @@ function decodeIssueCommentPayload(
     kind: "decoded",
     value: {
       action,
-      comment: { id: c.id, body: c.body },
+      comment: { id: comment.id, body: comment.body },
       issue: {
-        number: i.number,
-        isPullRequest: i.pull_request !== undefined && i.pull_request !== null,
+        number: issue.number,
+        isPullRequest: issue.pull_request !== undefined && issue.pull_request !== null,
       },
-      sender: { login: s.login },
+      sender: { login: sender.login },
     },
   };
 }
