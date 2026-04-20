@@ -13,6 +13,8 @@ import { clearTokenCache, type AuthConfig } from "../src/auth.js";
 
 const TEST_GATEWAY_SECRET = "test-gateway-secret";
 const TEST_GITHUB_TOKEN = "ghs_test_installation_token";
+const TEST_PAT_WRITE = "ghp_writer_pat";
+const TEST_PAT_READ = "ghp_reader_pat";
 
 const MOCK_REPOS_RESPONSE = {
   repositories: [
@@ -29,6 +31,9 @@ let server: ReturnType<typeof Bun.serve>;
 let baseUrl: string;
 let mockBridge: ReturnType<typeof Bun.serve>;
 let mockBridgeUrl: string;
+let tokenRegistrations: Array<{ token: string; issueNumber: number; repo: string }>;
+let callbackEvents: Array<{ token: string; repo: string; event: string; author?: string }>;
+let workflowRequests: string[];
 
 const originalFetch = globalThis.fetch;
 
@@ -41,14 +46,31 @@ function installFetchMock() {
   const mockFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.includes("api.github.com")) {
-      // Check the auth header to decide the response
       const headers = init?.headers as Record<string, string> | undefined;
       const authHeader =
         (headers && headers["authorization"]) ||
         (input instanceof Request ? input.headers.get("authorization") : undefined);
 
-      if (authHeader === `Bearer ${TEST_GITHUB_TOKEN}`) {
+      if (url.endsWith("/installation/repositories") && authHeader === `Bearer ${TEST_GITHUB_TOKEN}`) {
         return Response.json(MOCK_REPOS_RESPONSE, { status: 200 });
+      }
+      if (url.endsWith("/user") && authHeader === `Bearer ${TEST_PAT_WRITE}`) {
+        return Response.json({ login: "writer" }, { status: 200 });
+      }
+      if (url.endsWith("/user") && authHeader === `Bearer ${TEST_PAT_READ}`) {
+        return Response.json({ login: "reader" }, { status: 200 });
+      }
+      if (
+        url.endsWith("/repos/acme/app/collaborators/writer/permission") &&
+        authHeader === `Bearer ${TEST_PAT_WRITE}`
+      ) {
+        return Response.json({ permission: "write" }, { status: 200 });
+      }
+      if (
+        url.endsWith("/repos/acme/app/collaborators/reader/permission") &&
+        authHeader === `Bearer ${TEST_PAT_READ}`
+      ) {
+        return Response.json({ permission: "read" }, { status: 200 });
       }
       return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
     }
@@ -59,6 +81,10 @@ function installFetchMock() {
 }
 
 beforeAll(() => {
+  tokenRegistrations = [];
+  callbackEvents = [];
+  workflowRequests = [];
+
   // Start a mock bridge that echoes back a success response
   mockBridge = Bun.serve({
     port: 0,
@@ -70,6 +96,24 @@ beforeAll(() => {
       if (url.pathname === "/api/webhooks/github" && req.method === "POST") {
         const body = await req.text();
         return Response.json({ forwarded: true, bodyLength: body.length });
+      }
+      if (url.pathname === "/api/tokens" && req.method === "POST") {
+        const body = await req.json();
+        tokenRegistrations.push(body);
+        return Response.json({ ok: true });
+      }
+      if (url.pathname.match(/^\/api\/callbacks\/plannotator\/\d+$/) && req.method === "POST") {
+        const body = await req.json();
+        callbackEvents.push(body);
+        return Response.json({ ok: true });
+      }
+      if (url.pathname.match(/^\/api\/workflows\/\d+$/) && req.method === "GET") {
+        workflowRequests.push(`${url.pathname}${url.search}`);
+        return Response.json({ workflowId: url.pathname.split("/").pop(), status: "running" });
+      }
+      if (url.pathname.match(/^\/api\/workflows\/\d+\/history$/) && req.method === "GET") {
+        workflowRequests.push(`${url.pathname}${url.search}`);
+        return Response.json({ events: ["queued", "running"] });
       }
       return new Response("not found", { status: 404 });
     },
@@ -94,6 +138,9 @@ afterAll(() => {
 beforeEach(() => {
   clearRegistry();
   clearTokenCache();
+  tokenRegistrations = [];
+  callbackEvents = [];
+  workflowRequests = [];
   installFetchMock();
 });
 
@@ -303,6 +350,114 @@ describe("gateway endpoints", () => {
     expect(resp.status).toBe(403);
     const body = await resp.json();
     expect(body.error.type).toBe("repo_not_authorized");
+  });
+
+  // ── Teammate proxy routes ────────────────────────────────────────
+
+  it("POST /api/publish with write-access PAT registers callback token and forwards publish callback", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/publish`, {
+      method: "POST",
+      body: JSON.stringify({
+        repo: "acme/app",
+        issueNumber: 91,
+        issueUrl: "https://github.com/acme/app/issues/91",
+      }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_PAT_WRITE}`,
+      },
+    });
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.ok).toBe(true);
+    expect(body.issueUrl).toBe("https://github.com/acme/app/issues/91");
+    expect(tokenRegistrations).toHaveLength(1);
+    expect(tokenRegistrations[0].issueNumber).toBe(91);
+    expect(tokenRegistrations[0].repo).toBe("acme/app");
+    expect(callbackEvents).toHaveLength(1);
+    expect(callbackEvents[0].event).toBe("plan_published");
+    expect(callbackEvents[0].repo).toBe("acme/app");
+    expect(callbackEvents[0].author).toBe("writer");
+    expect(callbackEvents[0].token).toBe(tokenRegistrations[0].token);
+  });
+
+  it("POST /api/publish with read-only PAT returns 403", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/publish`, {
+      method: "POST",
+      body: JSON.stringify({ repo: "acme/app", issueNumber: 91 }),
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${TEST_PAT_READ}`,
+      },
+    });
+
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error.type).toBe("repo_not_authorized");
+    expect(tokenRegistrations).toHaveLength(0);
+    expect(callbackEvents).toHaveLength(0);
+  });
+
+  it("POST /api/publish with invalid PAT returns 401", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/publish`, {
+      method: "POST",
+      body: JSON.stringify({ repo: "acme/app", issueNumber: 91 }),
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer ghp_invalid_pat",
+      },
+    });
+
+    expect(resp.status).toBe(401);
+    const body = await resp.json();
+    expect(body.error.type).toBe("invalid_token");
+  });
+
+  it("GET /api/workflows/:id proxies to the bridge for a teammate with write access", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/workflows/91?repo=acme/app`, {
+      headers: { authorization: `Bearer ${TEST_PAT_WRITE}` },
+    });
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.workflowId).toBe("91");
+    expect(body.status).toBe("running");
+    expect(workflowRequests).toEqual(["/api/workflows/91"]);
+  });
+
+  it("GET /api/workflows/:id/history proxies to the bridge", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+    const resp = await originalFetch(`${baseUrl}/api/workflows/91/history?repo=acme/app`, {
+      headers: { authorization: `Bearer ${TEST_PAT_WRITE}` },
+    });
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.events).toEqual(["queued", "running"]);
+    expect(workflowRequests).toEqual(["/api/workflows/91/history"]);
+  });
+
+  it("PAT auth cache avoids a second GitHub API round-trip on repeated workflow checks", async () => {
+    registerBridge("acme/app", mockBridgeUrl);
+
+    await originalFetch(`${baseUrl}/api/workflows/91?repo=acme/app`, {
+      headers: { authorization: `Bearer ${TEST_PAT_WRITE}` },
+    });
+    await originalFetch(`${baseUrl}/api/workflows/91/history?repo=acme/app`, {
+      headers: { authorization: `Bearer ${TEST_PAT_WRITE}` },
+    });
+
+    const githubCalls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([input]) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        return url.includes("api.github.com");
+      });
+    expect(githubCalls).toHaveLength(2);
   });
 
   // ── Webhook forwarding ────────────────────────────────────────────

@@ -13,10 +13,12 @@ import {
 } from "./registry.js";
 import {
   verifyRequest,
+  verifyGitHubPAT,
   requireRepoAccess,
   type AuthConfig,
   type AuthResult,
   type AuthError,
+  type PatAuthResult,
 } from "./auth.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -77,6 +79,14 @@ export function createFetchHandler(config: GatewayConfig) {
       return handleBridgeDeregister(req, authConfig);
     }
 
+    if (pathname === "/api/publish" && req.method === "POST") {
+      return handlePublish(req, forwardTimeoutMs);
+    }
+
+    if (pathname.match(/^\/api\/workflows\/[^/]+(?:\/history)?$/) && req.method === "GET") {
+      return handleWorkflowProxy(req, url, forwardTimeoutMs);
+    }
+
     return errorResponse(404, "not_found", "Resource not found.");
   };
 }
@@ -88,6 +98,36 @@ async function authenticateRequest(
   authConfig: AuthConfig,
 ): Promise<AuthResult | Response> {
   const outcome = await verifyRequest(req, authConfig);
+  if (!outcome.ok) {
+    return authErrorResponse(outcome.error);
+  }
+
+  return outcome.result;
+}
+
+async function authenticateTeammateRequest(
+  req: Request,
+  repo: string,
+): Promise<PatAuthResult | Response> {
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader) {
+    return authErrorResponse({
+      type: "missing_token",
+      message: "No Authorization header provided.",
+      fix: "Include `Authorization: Bearer <github-pat>` header.",
+    });
+  }
+
+  const parts = authHeader.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer" || !parts[1]) {
+    return authErrorResponse({
+      type: "invalid_token_format",
+      message: "Authorization header must be `Bearer <token>`.",
+      fix: "Check header format.",
+    });
+  }
+
+  const outcome = await verifyGitHubPAT(parts[1], repo);
   if (!outcome.ok) {
     return authErrorResponse(outcome.error);
   }
@@ -200,4 +240,122 @@ async function handleBridgeDeregister(req: Request, authConfig: AuthConfig): Pro
 
   const removed = deregisterBridge(repo);
   return Response.json({ ok: true, removed });
+}
+
+async function handlePublish(
+  req: Request,
+  timeoutMs: number,
+): Promise<Response> {
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return errorResponse(400, "invalid_request", "Request body is not valid JSON.");
+  }
+
+  const { repo, issueNumber, issueUrl } = body;
+  if (!repo || typeof repo !== "string") {
+    return errorResponse(400, "invalid_request", "Missing or invalid 'repo' field.");
+  }
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    return errorResponse(400, "invalid_request", "Missing or invalid 'issueNumber' field.");
+  }
+  if (issueUrl !== undefined && typeof issueUrl !== "string") {
+    return errorResponse(400, "invalid_request", "Invalid 'issueUrl' field.");
+  }
+
+  const authOrResp = await authenticateTeammateRequest(req, repo);
+  if (authOrResp instanceof Response) return authOrResp;
+
+  const bridge = getBridge(repo);
+  if (!bridge) {
+    return errorResponse(502, "no_bridge", `No active bridge registered for '${repo}'.`);
+  }
+
+  const callbackToken = crypto.randomUUID().replaceAll("-", "");
+
+  try {
+    const tokenRegistration = await globalThis.fetch(`${bridge.bridgeUrl}/api/tokens`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: callbackToken,
+        issueNumber,
+        repo,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!tokenRegistration.ok) {
+      return errorResponse(502, "bridge_error", `Bridge for '${repo}' rejected callback registration.`);
+    }
+
+    const callbackResp = await globalThis.fetch(
+      `${bridge.bridgeUrl}/api/callbacks/plannotator/${issueNumber}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: callbackToken,
+          repo,
+          event: "plan_published",
+          author: authOrResp.user,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+    );
+
+    if (!callbackResp.ok) {
+      return errorResponse(502, "bridge_error", `Bridge for '${repo}' rejected publish callback.`);
+    }
+
+    return Response.json({
+      ok: true,
+      issueNumber,
+      issueUrl: issueUrl ?? `https://github.com/${repo}/issues/${issueNumber}`,
+    });
+  } catch {
+    return errorResponse(502, "bridge_error", `Bridge for '${repo}' is unavailable.`);
+  }
+}
+
+async function handleWorkflowProxy(
+  req: Request,
+  url: URL,
+  timeoutMs: number,
+): Promise<Response> {
+  const repo = url.searchParams.get("repo");
+  if (!repo) {
+    return errorResponse(400, "invalid_request", "Missing required 'repo' query parameter.");
+  }
+
+  const authOrResp = await authenticateTeammateRequest(req, repo);
+  if (authOrResp instanceof Response) return authOrResp;
+
+  const bridge = getBridge(repo);
+  if (!bridge) {
+    return errorResponse(502, "no_bridge", `No active bridge registered for '${repo}'.`);
+  }
+
+  const proxyUrl = new URL(`${bridge.bridgeUrl}${url.pathname}`);
+  for (const [key, value] of url.searchParams.entries()) {
+    if (key !== "repo") {
+      proxyUrl.searchParams.append(key, value);
+    }
+  }
+
+  try {
+    const upstream = await globalThis.fetch(proxyUrl, {
+      method: req.method,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const upstreamBody = await upstream.text();
+    return new Response(upstreamBody, {
+      status: upstream.status,
+      headers: { "content-type": upstream.headers.get("content-type") || "text/plain" },
+    });
+  } catch {
+    return errorResponse(502, "bridge_error", `Bridge for '${repo}' is unavailable.`);
+  }
 }
