@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { verifySignature } from "../src/http/verify-signature.js";
+import { verifySignature } from "../v2/http/verify-signature.js";
 
 // Helper: compute a valid sha256 HMAC signature the same way GitHub does
 async function sign(payload: string, secret: string): Promise<string> {
