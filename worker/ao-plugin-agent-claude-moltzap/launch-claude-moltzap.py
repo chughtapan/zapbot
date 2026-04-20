@@ -30,6 +30,7 @@ def main() -> int:
     command = sys.argv[1]
     child_pid, child_fd = pty.fork()
     if child_pid == 0:
+        os.environ.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
         os.execlp("bash", "bash", "-lc", command)
 
     stdin_fd = sys.stdin.fileno()

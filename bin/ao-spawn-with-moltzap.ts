@@ -32,6 +32,7 @@ const childEnv: Record<string, string> = {
   MOLTZAP_REGISTRATION_SECRET: registrationSecret,
   MOLTZAP_ORCHESTRATOR_SENDER_ID: orchestratorSenderId,
 };
+delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
 const allowedSenders = trimEnv(process.env.MOLTZAP_ALLOWED_SENDERS);
 if (allowedSenders !== null) {
@@ -212,7 +213,7 @@ async function restartWorkerWithResume(options: {
     "server:moltzap",
   ].join(" ");
 
-  const env = {
+  const env: Record<string, string> = {
     ...process.env,
     AO_SESSION: options.sessionName,
     AO_DATA_DIR: options.sessionDataDir,
@@ -224,6 +225,7 @@ async function restartWorkerWithResume(options: {
     MOLTZAP_LOCAL_SENDER_ID: options.localSenderId,
     MOLTZAP_ORCHESTRATOR_SENDER_ID: options.orchestratorSenderId,
   };
+  delete env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
   const command = [
     "python3",

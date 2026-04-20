@@ -2,9 +2,13 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import process from "node:process";
+import type { Message as MoltzapMessage } from "@moltzap/protocol";
 import { MoltZapChannelCore, MoltZapService } from "@moltzap/client";
 import { toClaudeChannelNotification } from "../v2/claude-channel/event.ts";
-import { bootClaudeChannelServer } from "../v2/claude-channel/server.ts";
+import {
+  bootClaudeChannelServer,
+  type ClaudeChannelServerHandle,
+} from "../v2/claude-channel/server.ts";
 import {
   asMoltzapConversationId,
   asMoltzapMessageId,
@@ -41,6 +45,7 @@ const service = new MoltZapService({
 });
 
 let channelStop: (() => Promise<void>) | null = null;
+let unreadPoller: ReturnType<typeof setInterval> | null = null;
 
 try {
   const hello = await service.connect();
@@ -56,6 +61,7 @@ try {
   writeMetadataKey("moltzap_server_url", bootstrap.value.serverUrl);
 
   const dmCache = new Map<string, string>();
+  const deliveredMessageIds = new Set<string>();
   const channel = await bootClaudeChannelServer(
     {
       serverName: "moltzap",
@@ -99,31 +105,22 @@ try {
   }
 
   channelStop = async () => {
+    if (unreadPoller !== null) {
+      clearInterval(unreadPoller);
+      unreadPoller = null;
+    }
     await channel.value.stop();
     service.close();
   };
 
   service.on("message", (message) => {
     void (async () => {
-      const { enriched } = await MoltZapChannelCore.enrichMessage(service, message);
-      if (enriched.isFromMe || enriched.text.trim().length === 0) {
-        return;
-      }
-      const notification = toClaudeChannelNotification({
-        conversationId: asMoltzapConversationId(enriched.conversationId),
-        messageId: asMoltzapMessageId(enriched.id),
-        senderId: asMoltzapSenderId(enriched.sender.id),
-        bodyText: enriched.text,
-        receivedAtMs: Date.parse(enriched.createdAt),
+      await emitClaudeNotification({
+        service,
+        channel: channel.value,
+        message,
+        deliveredMessageIds,
       });
-      if (notification._tag === "Err") {
-        console.error(`[moltzap-channel] skipped inbound message: ${notification.error._tag}`);
-        return;
-      }
-      const pushed = await channel.value.push(notification.value);
-      if (pushed._tag === "Err") {
-        console.error(`[moltzap-channel] failed to emit notification: ${pushed.error.cause}`);
-      }
     })();
   });
   service.on("disconnect", () => {
@@ -136,6 +133,20 @@ try {
   console.error(
     `[moltzap-channel] ready agent=${localSenderId as string} server=${bootstrap.value.serverUrl} role=${role}`,
   );
+  await sweepUnreadConversations({
+    service,
+    channel: channel.value,
+    localSenderId,
+    deliveredMessageIds,
+  });
+  unreadPoller = setInterval(() => {
+    void sweepUnreadConversations({
+      service,
+      channel: channel.value,
+      localSenderId,
+      deliveredMessageIds,
+    });
+  }, 2_000);
 
   const keepAlive = setInterval(() => {}, 1_000);
   async function shutdown(signal: string): Promise<void> {
@@ -362,6 +373,102 @@ function writeMetadataKey(key: string, value: string): void {
     updated.push(nextLine);
   }
   writeFileSync(path, `${updated.join("\n")}\n`, "utf8");
+}
+
+interface ConversationListResult {
+  readonly conversations: ReadonlyArray<{
+    readonly id: string;
+    readonly unreadCount?: number;
+  }>;
+}
+
+interface MessageListResult {
+  readonly messages: ReadonlyArray<MoltzapMessage>;
+}
+
+async function sweepUnreadConversations(options: {
+  readonly service: MoltZapService;
+  readonly channel: ClaudeChannelServerHandle;
+  readonly localSenderId: MoltzapSenderId;
+  readonly deliveredMessageIds: Set<string>;
+}): Promise<void> {
+  let listed: ConversationListResult;
+  try {
+    listed = (await options.service.sendRpc("conversations/list", {})) as ConversationListResult;
+  } catch (cause) {
+    console.error(`[moltzap-channel] unread poll failed: ${stringifyCause(cause)}`);
+    return;
+  }
+
+  for (const conversation of listed.conversations) {
+    if ((conversation.unreadCount ?? 0) <= 0) {
+      continue;
+    }
+
+    let history: MessageListResult;
+    try {
+      history = (await options.service.sendRpc("messages/list", {
+        conversationId: conversation.id,
+        limit: Math.max(20, conversation.unreadCount ?? 0),
+      })) as MessageListResult;
+    } catch (cause) {
+      console.error(
+        `[moltzap-channel] unread history fetch failed for ${conversation.id}: ${stringifyCause(cause)}`,
+      );
+      continue;
+    }
+
+    const ordered = [...history.messages].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt),
+    );
+    for (const message of ordered) {
+      if (message.sender.id === (options.localSenderId as string)) {
+        continue;
+      }
+      await emitClaudeNotification({
+        service: options.service,
+        channel: options.channel,
+        message,
+        deliveredMessageIds: options.deliveredMessageIds,
+      });
+    }
+  }
+}
+
+async function emitClaudeNotification(options: {
+  readonly service: MoltZapService;
+  readonly channel: ClaudeChannelServerHandle;
+  readonly message: MoltzapMessage;
+  readonly deliveredMessageIds: Set<string>;
+}): Promise<void> {
+  if (options.deliveredMessageIds.has(options.message.id)) {
+    return;
+  }
+
+  const { enriched } = await MoltZapChannelCore.enrichMessage(
+    options.service,
+    options.message,
+  );
+  if (enriched.isFromMe || enriched.text.trim().length === 0) {
+    return;
+  }
+  const notification = toClaudeChannelNotification({
+    conversationId: asMoltzapConversationId(enriched.conversationId),
+    messageId: asMoltzapMessageId(enriched.id),
+    senderId: asMoltzapSenderId(enriched.sender.id),
+    bodyText: enriched.text,
+    receivedAtMs: Date.parse(enriched.createdAt),
+  });
+  if (notification._tag === "Err") {
+    console.error(`[moltzap-channel] skipped inbound message: ${notification.error._tag}`);
+    return;
+  }
+  const pushed = await options.channel.push(notification.value);
+  if (pushed._tag === "Err") {
+    console.error(`[moltzap-channel] failed to emit notification: ${pushed.error.cause}`);
+    return;
+  }
+  options.deliveredMessageIds.add(options.message.id);
 }
 
 function trimEnv(value: string | undefined): string | null {

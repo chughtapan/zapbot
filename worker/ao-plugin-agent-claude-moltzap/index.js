@@ -32,7 +32,7 @@ export function create() {
       ].join(" ");
     },
     getEnvironment(config) {
-      const baseEnv = builtin.getEnvironment(config);
+      const baseEnv = sanitizeClaudeChannelEnv(builtin.getEnvironment(config));
       return {
         ...baseEnv,
         ...pickPassthroughEnv([
@@ -137,6 +137,12 @@ function pickPassthroughEnv(keys) {
     }
   }
   return env;
+}
+
+function sanitizeClaudeChannelEnv(env) {
+  const next = { ...env };
+  delete next.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
+  return next;
 }
 
 function shellEscape(value) {
