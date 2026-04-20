@@ -52,6 +52,8 @@ try {
   }
 
   writeMetadataKey("moltzap_sender_id", localSenderId);
+  writeMetadataKey("moltzap_api_key", bootstrap.value.apiKey);
+  writeMetadataKey("moltzap_server_url", bootstrap.value.serverUrl);
 
   const dmCache = new Map<string, string>();
   const channel = await bootClaudeChannelServer(

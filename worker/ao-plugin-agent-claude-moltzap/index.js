@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const builtinModule = await import(pathToFileURL(resolveBuiltinClaudePluginPath()).href);
 const builtin = builtinModule.create();
+const launchWrapperPath = fileURLToPath(new URL("./launch-claude-moltzap.py", import.meta.url));
 
 export const manifest = {
   ...builtinModule.manifest,
@@ -17,12 +18,17 @@ export function create() {
     ...builtin,
     name: "claude-moltzap",
     getLaunchCommand(config) {
-      return [
+      const command = [
         builtin.getLaunchCommand(config),
         "--mcp-config",
         shellEscape(relativeMcpConfigPath()),
         "--dangerously-load-development-channels",
         "server:moltzap",
+      ].join(" ");
+      return [
+        "python3",
+        shellEscape(launchWrapperPath),
+        shellEscape(command),
       ].join(" ");
     },
     getEnvironment(config) {
