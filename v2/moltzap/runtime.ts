@@ -118,6 +118,7 @@ export async function buildMoltzapSpawnEnv(
 
 interface RegistrationResponse {
   readonly apiKey: string;
+  readonly agentId: string;
 }
 
 async function registerSessionAgent(
@@ -168,30 +169,43 @@ async function registerSessionAgent(
   if (apiKey === null) {
     return err({
       _tag: "MoltzapProvisionFailed",
-      cause: "registration response missing string apiKey.",
+      cause: "registration response missing string apiKey or agentId.",
     });
   }
 
-  return ok(toSpawnEnv(config.serverUrl, apiKey, config.allowlistCsv));
+  return ok(toSpawnEnv(config.serverUrl, apiKey.apiKey, config.allowlistCsv, apiKey.agentId));
 }
 
-function decodeRegistrationResponse(payload: unknown): string | null {
+function decodeRegistrationResponse(
+  payload: unknown,
+): { readonly apiKey: string; readonly agentId: string } | null {
   if (payload === null || typeof payload !== "object") {
     return null;
   }
-  const candidate = (payload as RegistrationResponse).apiKey;
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+  const apiKey = (payload as RegistrationResponse).apiKey;
+  const agentId = (payload as RegistrationResponse).agentId;
+  if (typeof apiKey !== "string" || apiKey.length === 0) {
+    return null;
+  }
+  if (typeof agentId !== "string" || agentId.length === 0) {
+    return null;
+  }
+  return { apiKey, agentId };
 }
 
 function toSpawnEnv(
   serverUrl: string,
   apiKey: string,
   allowlistCsv: string | null,
+  localSenderId?: string,
 ): Record<string, string> {
   const env: Record<string, string> = {
     MOLTZAP_SERVER_URL: serverUrl,
     MOLTZAP_API_KEY: apiKey,
   };
+  if (typeof localSenderId === "string" && localSenderId.length > 0) {
+    env.MOLTZAP_LOCAL_SENDER_ID = localSenderId;
+  }
   if (allowlistCsv !== null) {
     env.MOLTZAP_ALLOWED_SENDERS = allowlistCsv;
   }
