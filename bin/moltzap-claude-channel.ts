@@ -473,7 +473,8 @@ async function sweepUnreadConversations(options: {
       left.createdAt.localeCompare(right.createdAt),
     );
     for (const message of ordered) {
-      if (message.sender.id === (options.localSenderId as string)) {
+      const senderId = extractSenderId(message as MoltzapMessageLike);
+      if (senderId === (options.localSenderId as string)) {
         continue;
       }
       await emitClaudeNotification({
