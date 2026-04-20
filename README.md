@@ -98,10 +98,7 @@ bun run bridge
 
 ## Repo map
 
-- `v2/` — current runtime: webhook intake, `ao` dispatch, MoltZap session provisioning
-- `src/config/` — YAML and `.env` reload support
-- `src/github/` — GitHub auth + API wrapper
-- `src/http/` — HMAC verification and HTTP helpers
+- `src/` — current runtime: webhook intake, config load/reload, GitHub helpers, `ao` dispatch, MoltZap session provisioning
 - `gateway/` — optional bridge registry / webhook proxy
 - `bin/webhook-bridge.ts` — bridge entrypoint
 

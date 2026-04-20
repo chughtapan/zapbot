@@ -12,5 +12,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src", "bin", "v2"]
+  "include": ["bin", "src"]
 }

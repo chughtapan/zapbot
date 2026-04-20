@@ -30,9 +30,9 @@ bun run bridge
 
 ## Key paths
 
-- `v2/` — current bridge/runtime modules
-- `v2/ao/dispatcher.ts` — direct `ao spawn`
-- `v2/moltzap/runtime.ts` — MoltZap session env provisioning
+- `src/` — current bridge/runtime modules
+- `src/ao/dispatcher.ts` — direct `ao spawn`
+- `src/moltzap/runtime.ts` — MoltZap session env provisioning
 - `src/config/` — config load + reload
 - `src/github/` — GitHub auth and API access
 - `bin/webhook-bridge.ts` — bridge entrypoint
