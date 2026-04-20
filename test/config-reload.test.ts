@@ -3,6 +3,7 @@ import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.js";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.js";
 import { loadBridgeRuntimeConfig } from "../src/config/load.js";
 import { readConfigFiles, type ConfigDiskReader } from "../src/config/disk.js";
+import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -199,6 +200,166 @@ describe("systemd integration: start.sh guard", () => {
     expect(projectIndex).toBeGreaterThanOrEqual(0);
     expect(sharedIndex).toBeLessThan(projectIndex);
   });
+
+  it("retries once after a duplicate orchestrator session is reported", () => {
+    const repoRoot = path.join(__dirname, "..");
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-retry-"));
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-home-"));
+    const projectDir = path.join(tempRoot, "project");
+    const fakeBinDir = path.join(tempRoot, "bin");
+    const tmuxLog = path.join(tempRoot, "tmux.log");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
+
+    try {
+      writeFile(
+        path.join(projectDir, "agent-orchestrator.yaml"),
+        [
+          "projects:",
+          "  demo:",
+          "    repo: owner/repo",
+          "    path: " + projectDir,
+          "    defaultBranch: main",
+          "    scm:",
+          "      plugin: github",
+          "      webhook:",
+          "        path: /api/webhooks/github",
+          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
+          "        signatureHeader: x-hub-signature-256",
+          "        eventHeader: x-github-event",
+          "",
+        ].join("\n"),
+      );
+      writeFile(
+        path.join(projectDir, ".env"),
+        [
+          "# project-local secrets must win",
+          "ZAPBOT_API_KEY=project-api-key",
+          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
+          "",
+        ].join("\n"),
+      );
+      writeFile(
+        path.join(tempHome, ".zapbot", ".env"),
+        [
+          "# shared state intentionally stale",
+          "ZAPBOT_API_KEY=shared-api-key",
+          "ZAPBOT_WEBHOOK_SECRET=shared-webhook-secret",
+          "",
+        ].join("\n"),
+      );
+
+      writeExecutable(
+        path.join(fakeBinDir, "gh"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  echo "fake-user"
+  exit 0
+fi
+echo "unexpected gh args: $@" >&2
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "systemctl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "is-active" ]; then
+  exit 1
+fi
+exit 0
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "tmux"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "\${TMUX_LOG}"
+if [ "$1" = "kill-session" ]; then
+  exit 0
+fi
+exit 0
+`,
+      );
+writeExecutable(
+        path.join(fakeBinDir, "ao"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+STATE_FILE="\${AO_CONFIG_PATH}.count"
+COUNT=0
+if [ -f "$STATE_FILE" ]; then
+  COUNT=$(cat "$STATE_FILE")
+fi
+if [ "$1" = "start" ]; then
+  COUNT=$((COUNT + 1))
+  echo "$COUNT" > "$STATE_FILE"
+  if [ "$COUNT" -eq 1 ]; then
+    echo "Failed to setup orchestrator: duplicate session: stale-orchestrator-1"
+    exit 1
+  fi
+  echo "Dashboard starting on http://localhost:3002"
+  trap 'exit 0' TERM INT
+  sleep 2
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  echo '[]'
+  exit 0
+fi
+echo "unexpected ao args: $@" >&2
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "bun"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+trap 'exit 0' TERM INT
+sleep 2
+exit 0
+`,
+      );
+writeExecutable(
+        path.join(fakeBinDir, "curl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+url="\${!#}"
+case "$url" in
+  *"/api/observability")
+    echo '{"overallStatus":"ok"}'
+    exit 0
+    ;;
+  *"/healthz")
+    exit 0
+    ;;
+esac
+exit 0
+`,
+      );
+
+      const output = execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
+        cwd: projectDir,
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+          TMUX_LOG: tmuxLog,
+        },
+        encoding: "utf8",
+      });
+
+      expect(output).toContain("Detected stale AO tmux session stale-orchestrator-1; removing and retrying startup...");
+      expect(output).toContain("AO ready on port 3002");
+      expect(output).toContain("Bridge ready on port 3000");
+      expect(fs.readFileSync(tmuxLog, "utf8")).toContain("kill-session -t stale-orchestrator-1");
+      expect(fs.readFileSync(path.join(projectDir, "agent-orchestrator.yaml"), "utf8")).toContain("repo: owner/repo");
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("systemd integration: team-init reload", () => {
@@ -234,3 +395,12 @@ describe("SIGHUP handler: bridge registers signal handler", () => {
     expect(bridge).toContain("reloadBridgeRuntimeConfig");
   });
 });
+
+function writeFile(filePath: string, content: string): void {
+  fs.writeFileSync(filePath, content, "utf8");
+}
+
+function writeExecutable(filePath: string, content: string): void {
+  writeFile(filePath, content);
+  fs.chmodSync(filePath, 0o755);
+}

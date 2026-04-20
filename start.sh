@@ -37,6 +37,16 @@ AO_PORT="${ZAPBOT_AO_PORT:-3001}"
 AO_LOG_FILE="/tmp/zapbot-ao.log"
 AO_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX.yaml")"
 
+start_ao_once() {
+  : > "$AO_LOG_FILE"
+  (cd "$PROJECT_DIR" && AO_CONFIG_PATH="$AO_CONFIG_FILE" ao start > "$AO_LOG_FILE" 2>&1) &
+  AO_PID=$!
+}
+
+extract_duplicate_session() {
+  grep -Eo 'duplicate session: [^[:space:]]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/^duplicate session: //'
+}
+
 node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" <<'NODE'
 const fs = require("node:fs");
 const [sourcePath, targetPath, desiredPort] = process.argv.slice(2);
@@ -106,29 +116,45 @@ fi
 
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
 
-echo "Starting agent-orchestrator with explicit port ${AO_PORT}..."
-(cd "$PROJECT_DIR" && AO_CONFIG_PATH="$AO_CONFIG_FILE" ao start > "$AO_LOG_FILE" 2>&1) &
-AO_PID=$!
-
 AO_DASHBOARD_PORT=""
-for i in $(seq 1 20); do
-  AO_DASHBOARD_PORT="$(grep -Eo 'Dashboard starting on http://localhost:[0-9]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+for attempt in 1 2; do
+  echo "Starting agent-orchestrator with explicit port ${AO_PORT}..."
+  AO_DASHBOARD_PORT=""
+  DUPLICATE_SESSION=""
+  start_ao_once
+
+  for i in $(seq 1 20); do
+    AO_DASHBOARD_PORT="$(grep -Eo 'Dashboard starting on http://localhost:[0-9]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+    if [ -n "$AO_DASHBOARD_PORT" ]; then
+      break
+    fi
+    if ! kill -0 "$AO_PID" 2>/dev/null; then
+      DUPLICATE_SESSION="$(extract_duplicate_session)"
+      if [ "$attempt" -eq 1 ] && [ -n "$DUPLICATE_SESSION" ]; then
+        echo "Detected stale AO tmux session ${DUPLICATE_SESSION}; removing and retrying startup..."
+        tmux kill-session -t "$DUPLICATE_SESSION" 2>/dev/null || true
+        wait "$AO_PID" 2>/dev/null || true
+        break
+      fi
+      echo "ERROR: AO failed to start. Check $AO_LOG_FILE"
+      kill "$AO_PID" 2>/dev/null || true
+      exit 1
+    fi
+    sleep 1
+  done
+
   if [ -n "$AO_DASHBOARD_PORT" ]; then
     break
   fi
-  if ! kill -0 "$AO_PID" 2>/dev/null; then
-    echo "ERROR: AO failed to start. Check $AO_LOG_FILE"
-    kill "$AO_PID" 2>/dev/null || true
-    exit 1
-  fi
-  sleep 1
-done
 
-if [ -z "$AO_DASHBOARD_PORT" ]; then
+  if [ "$attempt" -eq 1 ] && [ -n "${DUPLICATE_SESSION:-}" ]; then
+    continue
+  fi
+
   echo "ERROR: AO failed to start. Check $AO_LOG_FILE"
   kill "$AO_PID" 2>/dev/null || true
   exit 1
-fi
+done
 
 for i in $(seq 1 20); do
   if curl -fsS "http://localhost:${AO_DASHBOARD_PORT}/api/observability" 2>/dev/null | grep -q '"overallStatus"'; then
