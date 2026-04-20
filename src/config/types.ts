@@ -3,6 +3,7 @@ import type {
   ProjectName,
   RepoFullName,
 } from "../types.ts";
+import type { IngressPolicy } from "./ingress.ts";
 
 export type EnvFilePath = string & { readonly __brand: "EnvFilePath" };
 export type ProjectConfigPath = string & { readonly __brand: "ProjectConfigPath" };
@@ -34,8 +35,8 @@ export interface ProjectConfigDocument {
 
 export interface NormalizedRuntimeEnv {
   readonly port: number;
-  readonly publicUrl: string;
-  readonly gatewayUrl: string;
+  readonly publicUrl: string | null;
+  readonly gatewayUrl: string | null;
   readonly gatewaySecret: string | null;
   readonly botUsername: BotUsername;
   readonly aoConfigPath: ProjectConfigPath | null;
@@ -53,8 +54,9 @@ export interface ProjectRouteConfig {
 
 export interface BridgeRuntimeConfig {
   readonly port: number;
-  readonly publicUrl: string;
-  readonly gatewayUrl: string;
+  readonly ingress: IngressPolicy;
+  readonly publicUrl: string | null;
+  readonly gatewayUrl: string | null;
   readonly gatewaySecret: string | null;
   readonly botUsername: BotUsername;
   readonly aoConfigPath: ProjectConfigPath | null;

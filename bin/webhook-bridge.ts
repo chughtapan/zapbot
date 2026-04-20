@@ -13,6 +13,7 @@ import {
   loadBridgeRuntimeConfig,
 } from "../src/config/load.ts";
 import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.ts";
+import { resolveIngressPolicy } from "../src/config/ingress.ts";
 import { parseProjectConfig, readConfigFiles } from "../src/config/disk.ts";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.ts";
 import type { BridgeRuntimeConfig } from "../src/config/types.ts";
@@ -51,7 +52,7 @@ interface LoadedBridgeInputs {
   readonly mergedEnv: Record<string, string | undefined>;
 }
 
-function loadBridgeInputs(configPath: string | undefined): Result<LoadedBridgeInputs, { readonly reason: string }> {
+async function loadBridgeInputs(configPath: string | undefined): Promise<Result<LoadedBridgeInputs, { readonly reason: string }>> {
   const sourcePaths = deriveConfigSourcePaths(configPath);
   const rawFiles = readConfigFiles(sourcePaths, nodeDiskReader);
   if (rawFiles._tag === "Err") {
@@ -74,6 +75,26 @@ function loadBridgeInputs(configPath: string | undefined): Result<LoadedBridgeIn
     return err({ reason: formatConfigError(runtimeEnv.error) });
   }
 
+  const ingressMode = runtimeEnv.value.gatewayUrl === null ? "local-only" : "github-demo";
+  const ingress = await resolveIngressPolicy({
+    mode: ingressMode,
+    gatewayUrl: runtimeEnv.value.gatewayUrl ?? "",
+    publicUrl: runtimeEnv.value.publicUrl,
+    isPublicUrlReachable: async (publicUrl) => {
+      try {
+        const response = await fetch(`${publicUrl.replace(/\/+$/u, "")}/healthz`, {
+          signal: AbortSignal.timeout(2_000),
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    },
+  });
+  if (ingress._tag === "Err") {
+    return err({ reason: formatIngressError(ingress.error) });
+  }
+
   const projectDocument = rawFiles.value.projectConfigText === null || sourcePaths.projectConfigPath === null
     ? ok(null)
     : parseProjectConfig(sourcePaths.projectConfigPath, rawFiles.value.projectConfigText);
@@ -81,7 +102,7 @@ function loadBridgeInputs(configPath: string | undefined): Result<LoadedBridgeIn
     return err({ reason: formatConfigError(projectDocument.error) });
   }
 
-  const runtime = loadBridgeRuntimeConfig(runtimeEnv.value, parsedEnv.value, projectDocument.value);
+  const runtime = loadBridgeRuntimeConfig(runtimeEnv.value, parsedEnv.value, projectDocument.value, ingress.value);
   if (runtime._tag === "Err") {
     return err({ reason: formatConfigError(runtime.error) });
   }
@@ -107,6 +128,7 @@ function buildBridgeConfig(runtime: BridgeRuntimeConfig, mergedEnv: Record<strin
 
   return ok({
     port: runtime.port,
+    ingress: runtime.ingress,
     publicUrl: runtime.publicUrl,
     gatewayUrl: runtime.gatewayUrl,
     gatewaySecret: runtime.gatewaySecret,
@@ -154,8 +176,23 @@ function formatConfigError(error: { readonly _tag?: string; readonly reason?: st
   }
 }
 
+function formatIngressError(error: { readonly _tag?: string; readonly mode?: string; readonly gatewayUrl?: string; readonly publicUrl?: string }): string {
+  switch (error._tag) {
+    case "InvalidIngressMode":
+      return `Unsupported ingress mode: ${error.mode}`;
+    case "MissingPublicBridgeUrl":
+      return "ZAPBOT_BRIDGE_URL is required in GitHub demo mode.";
+    case "UnreachablePublicBridgeUrl":
+      return `ZAPBOT_BRIDGE_URL is unreachable: ${error.publicUrl}`;
+    case "DemoModeRequiresGateway":
+      return "ZAPBOT_GATEWAY_URL is required in GitHub demo mode.";
+    default:
+      return "Unknown ingress error.";
+  }
+}
+
 async function main() {
-  const initialInputs = loadBridgeInputs(process.env.ZAPBOT_CONFIG);
+  const initialInputs = await loadBridgeInputs(process.env.ZAPBOT_CONFIG);
   if (initialInputs._tag === "Err") {
     console.error(`[bridge] ${initialInputs.error.reason}`);
     process.exit(1);
@@ -172,9 +209,10 @@ async function main() {
   let liveRuntime = initialInputs.value.runtime;
   const cfg = initialConfig.value;
   log.info(`Webhook bridge starting on port ${cfg.port}`);
+  log.info(`Ingress mode: ${cfg.ingress.mode}`);
 
   const running = await startBridge(cfg);
-  log.info(`Webhook bridge listening on ${cfg.publicUrl}`);
+  log.info(`Webhook bridge listening on ${cfg.ingress.mode === "github-demo" ? cfg.publicUrl : "local-only ingress"}`);
 
   let reloadInFlight = false;
   process.on("SIGHUP", () => {
@@ -185,7 +223,7 @@ async function main() {
     reloadInFlight = true;
     (async () => {
       try {
-        const nextInputs = loadBridgeInputs(process.env.ZAPBOT_CONFIG);
+        const nextInputs = await loadBridgeInputs(process.env.ZAPBOT_CONFIG);
         if (nextInputs._tag === "Err") {
           log.error(`Reload failed: ${nextInputs.error.reason}`);
           return;

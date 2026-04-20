@@ -1,4 +1,4 @@
-import type { Result } from "../types.ts";
+import { err, ok, type Result } from "../types.ts";
 import type { IngressPolicy } from "../config/ingress.ts";
 
 export type StartupReceiptError =
@@ -26,9 +26,38 @@ export interface StartupReceipt {
 export function buildStartupReceipt(
   input: StartupReceiptInput,
 ): Result<StartupReceipt, StartupReceiptError> {
-  throw new Error("not implemented");
+  if (input.projectDir.trim().length === 0) {
+    return err({ _tag: "MissingProjectDir" });
+  }
+  if (input.repos.length === 0) {
+    return err({ _tag: "MissingRepoList" });
+  }
+
+  const lines = [
+    `Mode:      ${input.ingress.mode}`,
+    `Project:   ${input.projectDir}`,
+    ...input.repos.map((repo) => `Repo:      https://github.com/${repo}`),
+    `Bridge:    http://localhost:${input.bridgePort}`,
+    `Dashboard: http://localhost:${input.dashboardPort}`,
+  ];
+
+  if (input.ingress.mode === "github-demo") {
+    lines.push(`Gateway:   ${input.gatewayUrl ?? input.ingress.gatewayUrl}`);
+    lines.push(`Public:    ${input.publicUrl ?? input.ingress.publicUrl}`);
+  } else {
+    lines.push("Gateway:   (local-only)");
+    lines.push("Public:    (local-only)");
+  }
+
+  lines.push(`Logs:      ${input.logsPath}`);
+  lines.push(`Publish:   ${input.publishCommand}`);
+
+  return ok({
+    mode: input.ingress.mode,
+    lines,
+  });
 }
 
 export function renderStartupReceipt(receipt: StartupReceipt): string {
-  throw new Error("not implemented");
+  return receipt.lines.join("\n");
 }

@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.js";
+import { resolveIngressPolicy } from "../src/config/ingress.js";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.js";
 import { loadBridgeRuntimeConfig } from "../src/config/load.js";
+import { buildStartupReceipt, renderStartupReceipt } from "../src/startup/receipt.js";
 import { readConfigFiles, type ConfigDiskReader } from "../src/config/disk.js";
 import { execFileSync } from "child_process";
 import * as fs from "fs";
@@ -38,7 +40,13 @@ function buildRuntime(
   env: Record<string, string | undefined>,
 ) {
   const resolvedEnv = expectOk(resolveRuntimeEnv(env, null));
-  return expectOk(loadBridgeRuntimeConfig(resolvedEnv, null, null));
+  return expectOk(loadBridgeRuntimeConfig(resolvedEnv, null, null, {
+    _tag: "LocalOnly",
+    mode: "local-only",
+    gatewayUrl: null,
+    publicUrl: null,
+    requiresReachablePublicUrl: false,
+  }));
 }
 
 describe("parseEnvFile", () => {
@@ -72,6 +80,141 @@ describe("parseEnvFile", () => {
     expect(result._tag).toBe("Err");
     if (result._tag === "Err") {
       expect(result.error._tag).toBe("MalformedEnvLine");
+    }
+  });
+});
+
+describe("resolveIngressPolicy", () => {
+  it("allows local-only startup without a public bridge url", async () => {
+    let called = false;
+    const result = await resolveIngressPolicy({
+      mode: "local-only",
+      gatewayUrl: "",
+      publicUrl: null,
+      isPublicUrlReachable: async () => {
+        called = true;
+        return false;
+      },
+    });
+
+    expect(result._tag).toBe("Ok");
+    expect(called).toBe(false);
+    if (result._tag === "Ok") {
+      expect(result.value).toMatchObject({
+        _tag: "LocalOnly",
+        mode: "local-only",
+        gatewayUrl: null,
+        publicUrl: null,
+        requiresReachablePublicUrl: false,
+      });
+    }
+  });
+
+  it("fails demo mode when the public bridge url is missing", async () => {
+    const result = await resolveIngressPolicy({
+      mode: "github-demo",
+      gatewayUrl: "https://gateway.example",
+      publicUrl: null,
+      isPublicUrlReachable: async () => true,
+    });
+
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "MissingPublicBridgeUrl" },
+    });
+  });
+
+  it("fails demo mode when the public bridge url is unreachable", async () => {
+    const result = await resolveIngressPolicy({
+      mode: "github-demo",
+      gatewayUrl: "https://gateway.example",
+      publicUrl: "https://bridge.example",
+      isPublicUrlReachable: async () => false,
+    });
+
+    expect(result).toEqual({
+      _tag: "Err",
+      error: { _tag: "UnreachablePublicBridgeUrl", publicUrl: "https://bridge.example" },
+    });
+  });
+
+  it("accepts demo mode only when the public bridge url is reachable", async () => {
+    const result = await resolveIngressPolicy({
+      mode: "github-demo",
+      gatewayUrl: "https://gateway.example",
+      publicUrl: "https://bridge.example",
+      isPublicUrlReachable: async () => true,
+    });
+
+    expect(result._tag).toBe("Ok");
+    if (result._tag === "Ok") {
+      expect(result.value).toMatchObject({
+        _tag: "GitHubDemo",
+        mode: "github-demo",
+        gatewayUrl: "https://gateway.example",
+        publicUrl: "https://bridge.example",
+        requiresReachablePublicUrl: true,
+      });
+    }
+  });
+});
+
+describe("startup receipt", () => {
+  it("renders local-only mode with local ingress markers", () => {
+    const receipt = buildStartupReceipt({
+      projectDir: "/tmp/project",
+      repos: ["owner/repo"],
+      ingress: {
+        _tag: "LocalOnly",
+        mode: "local-only",
+        gatewayUrl: null,
+        publicUrl: null,
+        requiresReachablePublicUrl: false,
+      },
+      bridgePort: 3000,
+      dashboardPort: 3001,
+      gatewayUrl: null,
+      publicUrl: null,
+      logsPath: "/tmp/logs",
+      publishCommand: "bash publish.sh",
+    });
+
+    expect(receipt._tag).toBe("Ok");
+    if (receipt._tag === "Ok") {
+      const rendered = renderStartupReceipt(receipt.value);
+      expect(receipt.value.mode).toBe("local-only");
+      expect(rendered).toContain("Mode:      local-only");
+      expect(rendered).toContain("Gateway:   (local-only)");
+      expect(rendered).toContain("Public:    (local-only)");
+    }
+  });
+
+  it("renders github demo mode with explicit ingress endpoints", () => {
+    const receipt = buildStartupReceipt({
+      projectDir: "/tmp/project",
+      repos: ["owner/repo"],
+      ingress: {
+        _tag: "GitHubDemo",
+        mode: "github-demo",
+        gatewayUrl: "https://gateway.example",
+        publicUrl: "https://bridge.example",
+        requiresReachablePublicUrl: true,
+      },
+      bridgePort: 3000,
+      dashboardPort: 3001,
+      gatewayUrl: "https://gateway.example",
+      publicUrl: "https://bridge.example",
+      logsPath: "/tmp/logs",
+      publishCommand: "bash publish.sh",
+    });
+
+    expect(receipt._tag).toBe("Ok");
+    if (receipt._tag === "Ok") {
+      const rendered = renderStartupReceipt(receipt.value);
+      expect(receipt.value.mode).toBe("github-demo");
+      expect(rendered).toContain("Mode:      github-demo");
+      expect(rendered).toContain("Gateway:   https://gateway.example");
+      expect(rendered).toContain("Public:    https://bridge.example");
     }
   });
 });
@@ -361,7 +504,7 @@ exit 0
     }
   });
 
-  it("rejects a dead explicit bridge url even without a gateway configured", () => {
+  it("keeps local-only startup running even if a stale bridge url is present", () => {
     const repoRoot = path.join(__dirname, "..");
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-explicit-"));
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-home-"));
@@ -395,6 +538,135 @@ exit 0
         [
           "ZAPBOT_API_KEY=project-api-key",
           "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
+          "ZAPBOT_BRIDGE_URL=http://dead.example:3000",
+          "",
+        ].join("\n"),
+      );
+
+      writeExecutable(
+        path.join(fakeBinDir, "gh"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "api" ] && [ "$2" = "user" ]; then
+  echo "fake-user"
+  exit 0
+fi
+echo "unexpected gh args: $@" >&2
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "systemctl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "ao"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "start" ]; then
+  echo "Dashboard starting on http://localhost:3002"
+  trap 'exit 0' TERM INT
+  sleep 2
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  echo '[]'
+  exit 0
+fi
+echo "unexpected ao args: $@" >&2
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "bun"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+trap 'exit 0' TERM INT
+sleep 2
+exit 0
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "curl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+url="\${!#}"
+case "$url" in
+  http://localhost:3002/api/observability)
+    echo '{"overallStatus":"ok"}'
+    exit 0
+    ;;
+  http://localhost:3000/healthz)
+    exit 0
+    ;;
+  http://dead.example:3000/healthz)
+    exit 7
+    ;;
+  *)
+    echo "unexpected curl url: $url" >&2
+    exit 1
+    ;;
+esac
+`,
+      );
+
+      const output = execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
+        cwd: projectDir,
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+        },
+        encoding: "utf8",
+      });
+
+      expect(output).toContain("Mode:      local-only");
+      expect(output).toContain("Gateway:   (local-only)");
+      expect(output).toContain("Public:    (local-only)");
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed in github demo mode when the public bridge url is dead", () => {
+    const repoRoot = path.join(__dirname, "..");
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-demo-"));
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-demo-home-"));
+    const projectDir = path.join(tempRoot, "project");
+    const fakeBinDir = path.join(tempRoot, "bin");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
+
+    try {
+      writeFile(
+        path.join(projectDir, "agent-orchestrator.yaml"),
+        [
+          "projects:",
+          "  demo:",
+          "    repo: owner/repo",
+          "    path: " + projectDir,
+          "    defaultBranch: main",
+          "    scm:",
+          "      plugin: github",
+          "      webhook:",
+          "        path: /api/webhooks/github",
+          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
+          "        signatureHeader: x-hub-signature-256",
+          "        eventHeader: x-github-event",
+          "",
+        ].join("\n"),
+      );
+      writeFile(
+        path.join(projectDir, ".env"),
+        [
+          "ZAPBOT_API_KEY=project-api-key",
+          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
+          "ZAPBOT_GATEWAY_URL=https://gateway.example",
           "ZAPBOT_BRIDGE_URL=http://dead.example:3000",
           "",
         ].join("\n"),

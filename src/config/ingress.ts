@@ -1,4 +1,5 @@
 import type { Result } from "../types.ts";
+import { err, ok } from "../types.ts";
 
 export type IngressMode = "local-only" | "github-demo";
 
@@ -34,6 +35,39 @@ export interface IngressPolicyInputs {
 export function resolveIngressPolicy(
   inputs: IngressPolicyInputs,
 ): Promise<Result<IngressPolicy, IngressResolutionError>> {
-  throw new Error("not implemented");
-}
+  if (inputs.mode === "local-only") {
+    return Promise.resolve(
+      ok({
+        _tag: "LocalOnly",
+        mode: "local-only",
+        gatewayUrl: null,
+        publicUrl: null,
+        requiresReachablePublicUrl: false,
+      }),
+    );
+  }
 
+  const gatewayUrl = inputs.gatewayUrl.trim();
+  if (gatewayUrl.length === 0) {
+    return Promise.resolve(err({ _tag: "DemoModeRequiresGateway", gatewayUrl: inputs.gatewayUrl }));
+  }
+
+  const publicUrl = inputs.publicUrl?.trim() ?? null;
+  if (publicUrl === null || publicUrl.length === 0) {
+    return Promise.resolve(err({ _tag: "MissingPublicBridgeUrl" }));
+  }
+
+  return inputs.isPublicUrlReachable(publicUrl).then((reachable) => {
+    if (!reachable) {
+      return err({ _tag: "UnreachablePublicBridgeUrl", publicUrl });
+    }
+
+    return ok({
+      _tag: "GitHubDemo",
+      mode: "github-demo",
+      gatewayUrl,
+      publicUrl,
+      requiresReachablePublicUrl: true,
+    });
+  });
+}

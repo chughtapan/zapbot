@@ -18,6 +18,7 @@ import {
   buildMoltzapProcessEnv,
   type MoltzapRuntimeConfig,
 } from "./moltzap/runtime.ts";
+import type { IngressPolicy } from "./config/ingress.ts";
 import { createAoCliControlHost, forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
 import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
 import {
@@ -73,8 +74,9 @@ async function safeGh<T>(
 
 export interface BridgeConfig {
   readonly port: number;
-  readonly publicUrl: string;
-  readonly gatewayUrl: string;
+  readonly ingress: IngressPolicy;
+  readonly publicUrl: string | null;
+  readonly gatewayUrl: string | null;
   readonly gatewaySecret: string | null;
   readonly botUsername: BotUsername;
   readonly aoConfigPath: string;
@@ -405,30 +407,41 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   let stopHeartbeat: (() => void) | null = null;
 
   async function registerAll(cfg: BridgeConfig): Promise<void> {
+    if (stopHeartbeat) {
+      stopHeartbeat();
+      stopHeartbeat = null;
+    }
     const repos = Array.from(cfg.repos.keys());
     if (repos.length === 0) return;
+    if (cfg.ingress.mode === "local-only") return;
+    if (cfg.gatewayUrl === null || cfg.publicUrl === null) return;
+    const gatewayUrl = cfg.gatewayUrl;
+    const publicUrl = cfg.publicUrl;
     const client: GatewayClientConfig = {
-      gatewayUrl: cfg.gatewayUrl,
+      gatewayUrl,
       secret: cfg.gatewaySecret,
       token: null,
     };
     await Promise.allSettled(
-      repos.map((repo) => registerBridge(client, repo, cfg.publicUrl))
+      repos.map((repo) => registerBridge(client, repo, publicUrl))
     );
-    if (stopHeartbeat) stopHeartbeat();
     const intervalMs = parseInt(process.env.ZAPBOT_GATEWAY_HEARTBEAT_MS ?? "300000", 10);
-    stopHeartbeat = startHeartbeat(client, repos, cfg.publicUrl, intervalMs);
+    stopHeartbeat = startHeartbeat(client, repos, publicUrl, intervalMs);
   }
 
   async function deregisterAll(cfg: BridgeConfig): Promise<void> {
+    if (cfg.ingress.mode === "local-only") return;
+    if (cfg.gatewayUrl === null || cfg.publicUrl === null) return;
+    const gatewayUrl = cfg.gatewayUrl;
+    const publicUrl = cfg.publicUrl;
     const repos = Array.from(cfg.repos.keys());
     const client: GatewayClientConfig = {
-      gatewayUrl: cfg.gatewayUrl,
+      gatewayUrl,
       secret: cfg.gatewaySecret,
       token: null,
     };
     await Promise.allSettled(
-      repos.map((repo) => deregisterBridge(client, repo, cfg.publicUrl))
+      repos.map((repo) => deregisterBridge(client, repo, publicUrl))
     );
   }
 
@@ -458,11 +471,15 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
 
   const running: RunningBridge = {
     async stop(): Promise<void> {
-      if (stopHeartbeat) stopHeartbeat();
+      if (stopHeartbeat) {
+        stopHeartbeat();
+        stopHeartbeat = null;
+      }
       await deregisterAll(current);
       server.stop();
     },
     async reload(nextConfig: BridgeConfig): Promise<void> {
+      await deregisterAll(current);
       current = nextConfig;
       aoControlHost = createAoCliControlHost({
         configPath: current.aoConfigPath,

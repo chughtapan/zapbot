@@ -7,8 +7,8 @@ set -euo pipefail
 # Run from a project directory that has agent-orchestrator.yaml (created by
 # zapbot-team-init), or pass the path as the first argument.
 #
-# The bridge registers with the gateway at ZAPBOT_GATEWAY_URL. If no gateway
-# is configured, the bridge just listens on its local port.
+# `ZAPBOT_GATEWAY_URL` selects GitHub-backed demo mode. Without a gateway,
+# the launcher stays local-only and never advertises public ingress.
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -56,6 +56,11 @@ validate_bridge_url() {
   echo "FIX: Do not rely on host-derived fallback; set ZAPBOT_BRIDGE_URL to a live public URL."
   return 1
 }
+
+INGRESS_MODE="local-only"
+if [ -n "${ZAPBOT_GATEWAY_URL:-}" ]; then
+  INGRESS_MODE="github-demo"
+fi
 
 start_ao_once() {
   : > "$AO_LOG_FILE"
@@ -110,6 +115,11 @@ if [ "${ZAPBOT_WEBHOOK_SECRET}" = "${ZAPBOT_API_KEY}" ]; then
   exit 1
 fi
 
+if [ "$INGRESS_MODE" = "github-demo" ]; then
+  validate_bridge_url || exit 1
+  export ZAPBOT_BRIDGE_URL
+fi
+
 ZAPBOT_REPOS=()
 while IFS= read -r line; do
   repo=$(echo "$line" | awk '{print $2}')
@@ -135,11 +145,6 @@ if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
 fi
 
 pkill -f "bun.*webhook-bridge.ts" 2>/dev/null || true
-
-if [ -n "${ZAPBOT_BRIDGE_URL:-}" ]; then
-  validate_bridge_url || exit 1
-  export ZAPBOT_BRIDGE_URL
-fi
 
 AO_DASHBOARD_PORT=""
 for attempt in 1 2; do
@@ -230,14 +235,18 @@ echo "================================================"
 echo "  Zapbot is running!"
 echo "================================================"
 echo "  Project:   $PROJECT_DIR"
+echo "  Mode:      $INGRESS_MODE"
 for repo in "${ZAPBOT_REPOS[@]}"; do
 echo "  Repo:      https://github.com/${repo}"
 done
 echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
 echo "  Dashboard: http://localhost:${AO_DASHBOARD_PORT}"
-if [ -n "${ZAPBOT_GATEWAY_URL:-}" ]; then
+if [ "$INGRESS_MODE" = "github-demo" ]; then
   echo "  Gateway:   ${ZAPBOT_GATEWAY_URL}"
-  [ -n "${ZAPBOT_BRIDGE_URL:-}" ] && echo "  Public:    ${ZAPBOT_BRIDGE_URL}"
+  echo "  Public:    ${ZAPBOT_BRIDGE_URL}"
+else
+  echo "  Gateway:   (local-only)"
+  echo "  Public:    (local-only)"
 fi
 echo ""
 echo "  Publish:   bash $ZAPBOT_DIR/bin/zapbot-publish.sh <plan-file>"
