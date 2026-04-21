@@ -11,7 +11,6 @@ import {
   asBotUsername,
   asProjectName,
   asRepoFullName,
-  err,
   ok,
 } from "../src/types.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
@@ -86,7 +85,7 @@ function fakeAo(): AoControlHost {
 
 function makeHandler(cfg: BridgeConfig = makeConfig()): (req: Request) => Promise<Response> {
   const ctx: BridgeHandlerContext = {
-    mintToken: async () => err({ _tag: "TokenMintFailed", cause: "no installation token available" }),
+    mintToken: async () => null,
     gh: fakeGh(),
     aoControlHost: fakeAo(),
     config: cfg,
@@ -320,12 +319,27 @@ describe("bridge fetch handler — installation token broker", () => {
     const saved = process.env.ZAPBOT_API_KEY;
     delete process.env.ZAPBOT_API_KEY;
     try {
-      const h = makeHandler();
+      const minted = {
+        token: "ghs_mockinstallationtoken",
+        expiresAt: "2026-04-18T03:59:59Z",
+      };
+      const h = buildFetchHandler(
+        () => makeConfig(),
+        {
+          mintToken: async () => minted,
+          gh: fakeGh(),
+          aoControlHost: fakeAo(),
+          config: makeConfig(),
+        }
+      );
       const r = await get(h, "/api/tokens/installation", {
         authorization: `Bearer ${API_KEY}`,
       });
-      // 409 proves Bearer passed and the handler stayed on the injected seam.
-      expect(r.status).toBe(409);
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({
+        token: minted.token,
+        expires_at: minted.expiresAt,
+      });
     } finally {
       if (savedAppId !== undefined) process.env.GITHUB_APP_ID = savedAppId;
       else delete process.env.GITHUB_APP_ID;
