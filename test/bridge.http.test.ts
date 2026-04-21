@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   buildFetchHandler,
-  defaultMintToken,
   type BridgeConfig,
   type BridgeHandlerContext,
   type GhAdapter,
@@ -12,6 +11,7 @@ import {
   asBotUsername,
   asProjectName,
   asRepoFullName,
+  err,
   ok,
 } from "../src/types.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
@@ -86,7 +86,7 @@ function fakeAo(): AoControlHost {
 
 function makeHandler(cfg: BridgeConfig = makeConfig()): (req: Request) => Promise<Response> {
   const ctx: BridgeHandlerContext = {
-    mintToken: defaultMintToken,
+    mintToken: async () => err({ _tag: "TokenMintFailed", cause: "no installation token available" }),
     gh: fakeGh(),
     aoControlHost: fakeAo(),
     config: cfg,
@@ -259,6 +259,30 @@ describe("bridge fetch handler — webhook route", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.outcome.kind).toBe("ignored");
   });
+
+  it("ignores ambient webhook secret env and uses BridgeConfig", async () => {
+    const saved = process.env.ZAPBOT_WEBHOOK_SECRET;
+    process.env.ZAPBOT_WEBHOOK_SECRET = "wrong-wrong-wrong-wrong-wrong-wrong-wrong-wrong";
+    try {
+      const h = makeHandler();
+      const body = JSON.stringify({
+        action: "opened",
+        repository: { full_name: "acme/app" },
+        sender: { login: "alice" },
+        pull_request: { number: 1 },
+      });
+      const sig = await signPayload(body, WEBHOOK_SECRET);
+      const r = await post(h, "/api/webhooks/github", body, {
+        "x-hub-signature-256": sig,
+        "x-github-event": "pull_request",
+        "x-github-delivery": "d-1",
+      });
+      expect(r.status).toBe(200);
+    } finally {
+      if (saved !== undefined) process.env.ZAPBOT_WEBHOOK_SECRET = saved;
+      else delete process.env.ZAPBOT_WEBHOOK_SECRET;
+    }
+  });
 });
 
 describe("bridge fetch handler — installation token broker", () => {
@@ -286,7 +310,13 @@ describe("bridge fetch handler — installation token broker", () => {
     expect((await r.json()).error).toBe("app_not_configured");
   });
 
-  it("reads apiKey from BridgeConfig, not process.env (no env-leak)", async () => {
+  it("uses the injected mintToken seam even when GitHub App env is present", async () => {
+    const savedAppId = process.env.GITHUB_APP_ID;
+    const savedInstallationId = process.env.GITHUB_APP_INSTALLATION_ID;
+    const savedPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY;
+    process.env.GITHUB_APP_ID = "123456";
+    process.env.GITHUB_APP_INSTALLATION_ID = "654321";
+    process.env.GITHUB_APP_PRIVATE_KEY = "-----BEGIN PRIVATE KEY----- fake";
     const saved = process.env.ZAPBOT_API_KEY;
     delete process.env.ZAPBOT_API_KEY;
     try {
@@ -294,10 +324,17 @@ describe("bridge fetch handler — installation token broker", () => {
       const r = await get(h, "/api/tokens/installation", {
         authorization: `Bearer ${API_KEY}`,
       });
-      // 409 proves Bearer passed. If the bridge read from process.env we'd see 401.
+      // 409 proves Bearer passed and the handler stayed on the injected seam.
       expect(r.status).toBe(409);
     } finally {
+      if (savedAppId !== undefined) process.env.GITHUB_APP_ID = savedAppId;
+      else delete process.env.GITHUB_APP_ID;
+      if (savedInstallationId !== undefined) process.env.GITHUB_APP_INSTALLATION_ID = savedInstallationId;
+      else delete process.env.GITHUB_APP_INSTALLATION_ID;
+      if (savedPrivateKey !== undefined) process.env.GITHUB_APP_PRIVATE_KEY = savedPrivateKey;
+      else delete process.env.GITHUB_APP_PRIVATE_KEY;
       if (saved !== undefined) process.env.ZAPBOT_API_KEY = saved;
+      else delete process.env.ZAPBOT_API_KEY;
     }
   });
 });

@@ -46,6 +46,7 @@ import { createLogger } from "./logger.ts";
 import { errorResponse } from "./http/error-response.ts";
 import {
   handleInstallationTokenRequest,
+  type MintedInstallationToken,
   type InstallationTokenStatus,
 } from "./http/routes/installation-token.ts";
 
@@ -337,10 +338,24 @@ export function buildFetchHandler(
     }
 
     // Installation token broker (paired with safer-by-default#50).
-    // Thin wrapper around getInstallationToken() — no new mint path.
     if (pathname === "/api/tokens/installation" && req.method === "GET") {
       const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
-        mintToken: getInstallationToken,
+        mintToken: async () => {
+          const minted = await ctx.mintToken();
+          if (minted._tag === "Ok") {
+            return {
+              token: minted.value as unknown as MintedInstallationToken["token"],
+              expiresAt: new Date().toISOString(),
+            };
+          }
+          if (
+            minted.error._tag === "TokenMintFailed" &&
+            minted.error.cause === "no installation token available"
+          ) {
+            return null;
+          }
+          throw new Error(minted.error.cause);
+        },
         apiKey: current.apiKey,
       });
       const clientIp = req.headers.get("x-forwarded-for") ?? "local";
@@ -543,12 +558,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   return running;
 }
 
-function resolveSecret(repo: RepoFullName, cfg: BridgeConfig): string | null {
-  const route = cfg.repos.get(repo);
-  if (!route) {
-    return cfg.webhookSecret;
-  }
-  const perRepo = process.env[route.webhookSecretEnvVar];
-  if (perRepo) return perRepo;
+function resolveSecret(_repo: RepoFullName, cfg: BridgeConfig): string | null {
   return cfg.webhookSecret;
 }
