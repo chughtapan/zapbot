@@ -24,6 +24,7 @@ import type {
   GhCallError,
   IssueNumber,
   RepoFullName,
+  Result,
 } from "../src/types.ts";
 import type { MintedInstallationToken } from "../src/http/routes/installation-token.ts";
 
