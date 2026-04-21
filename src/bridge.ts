@@ -32,10 +32,8 @@ import {
 } from "./types.ts";
 import type {
   BotUsername,
-  DispatchError,
   GhCallError,
   HandleOutcome,
-  InstallationToken,
   IssueNumber,
   ProjectName,
   RepoFullName,
@@ -46,6 +44,7 @@ import { createLogger } from "./logger.ts";
 import { errorResponse } from "./http/error-response.ts";
 import {
   handleInstallationTokenRequest,
+  type MintedInstallationToken,
   type InstallationTokenStatus,
 } from "./http/routes/installation-token.ts";
 
@@ -104,7 +103,7 @@ export interface RunningBridge {
 }
 
 export interface BridgeHandlerContext {
-  readonly mintToken: () => Promise<Result<InstallationToken, DispatchError>>;
+  readonly mintToken: () => Promise<MintedInstallationToken | null>;
   readonly gh: GhAdapter;
   readonly aoControlHost: AoControlHost;
   readonly config: BridgeConfig;
@@ -337,10 +336,9 @@ export function buildFetchHandler(
     }
 
     // Installation token broker (paired with safer-by-default#50).
-    // Thin wrapper around getInstallationToken() — no new mint path.
     if (pathname === "/api/tokens/installation" && req.method === "GET") {
       const result: InstallationTokenStatus = await handleInstallationTokenRequest(req, {
-        mintToken: getInstallationToken,
+        mintToken: ctx.mintToken,
         apiKey: current.apiKey,
       });
       const clientIp = req.headers.get("x-forwarded-for") ?? "local";
@@ -434,17 +432,10 @@ export function buildFetchHandler(
 
 /**
  * Default `mintToken` implementation — delegates to the v1 singleton
- * `getInstallationToken` and maps `null`/throw into `DispatchError`.
+ * `getInstallationToken` and preserves the broker's minted token contract.
  */
-export async function defaultMintToken(): Promise<Result<InstallationToken, DispatchError>> {
-  try {
-    const t = await getInstallationToken();
-    if (!t) return err({ _tag: "TokenMintFailed", cause: "no installation token available" });
-    return ok(t.token as unknown as InstallationToken);
-  } catch (e) {
-    const cause = e instanceof Error ? e.message : String(e);
-    return err({ _tag: "TokenMintFailed", cause });
-  }
+export async function defaultMintToken(): Promise<MintedInstallationToken | null> {
+  return await getInstallationToken();
 }
 
 /**
@@ -543,12 +534,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   return running;
 }
 
-function resolveSecret(repo: RepoFullName, cfg: BridgeConfig): string | null {
-  const route = cfg.repos.get(repo);
-  if (!route) {
-    return cfg.webhookSecret;
-  }
-  const perRepo = process.env[route.webhookSecretEnvVar];
-  if (perRepo) return perRepo;
+function resolveSecret(_repo: RepoFullName, cfg: BridgeConfig): string | null {
   return cfg.webhookSecret;
 }

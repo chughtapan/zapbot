@@ -21,13 +21,12 @@ import {
   ok,
 } from "../src/types.ts";
 import type {
-  DispatchError,
   GhCallError,
-  InstallationToken,
   IssueNumber,
   RepoFullName,
   Result,
 } from "../src/types.ts";
+import type { MintedInstallationToken } from "../src/http/routes/installation-token.ts";
 
 const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
@@ -121,13 +120,13 @@ function makeConfig(withRoute = true): BridgeConfig {
 function makeCtx(
   gh: GhAdapter,
   opts: {
-    mintToken?: () => Promise<Result<InstallationToken, DispatchError>>;
+    mintToken?: () => Promise<MintedInstallationToken | null>;
     withRoute?: boolean;
     aoControlHost?: AoControlHost;
   } = {}
 ): BridgeHandlerContext {
   return {
-    mintToken: opts.mintToken ?? (async () => ok("fake-token" as unknown as InstallationToken)),
+    mintToken: opts.mintToken ?? (async () => null),
     gh,
     aoControlHost: opts.aoControlHost ?? makeAoHost().host,
     config: makeConfig(opts.withRoute ?? true),
