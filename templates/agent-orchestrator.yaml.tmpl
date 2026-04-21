@@ -1,5 +1,15 @@
 port: 3000
 
+defaults:
+  runtime: tmux
+  agent: claude-code
+  workspace: worktree
+
+plugins:
+  - name: claude-moltzap
+    source: local
+    path: {{ZAPBOT_DIR}}/worker/ao-plugin-agent-claude-moltzap
+
 # Each key under `projects:` is a project name. The bridge builds a
 # repo -> projectName lookup from these entries so incoming webhooks
 # are routed to the correct project automatically.
@@ -11,6 +21,7 @@ projects:
   {{REPO_NAME}}:
     repo: {{REPO}}
     path: {{REPO_PATH}}
+    agent: claude-moltzap
     defaultBranch: main
     scm:
       plugin: github

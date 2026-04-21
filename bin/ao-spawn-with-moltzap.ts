@@ -215,8 +215,6 @@ async function restartWorkerWithResume(options: {
     "--resume",
     shellSingleQuote(options.claudeSessionId),
     "--dangerously-skip-permissions",
-    "--mcp-config",
-    ".claude/moltzap-channel.mcp.json",
     "--dangerously-load-development-channels",
     "server:moltzap",
   ].join(" ");

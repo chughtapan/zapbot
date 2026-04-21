@@ -76,8 +76,6 @@ describe("planClaudeChannelLaunch", () => {
           2,
         ),
         extraArgs: [
-          "--mcp-config",
-          "/tmp/session/.mcp.json",
           "--dangerously-load-development-channels",
           "server:moltzap",
         ],
@@ -99,8 +97,6 @@ describe("planClaudeChannelLaunch", () => {
     expect(result._tag).toBe("Ok");
     if (result._tag !== "Ok") return;
     expect(result.value.extraArgs).toEqual([
-      "--mcp-config",
-      "/tmp/session/.mcp.json",
       "--channels",
       "plugin:moltzap@claude-plugins-official",
     ]);

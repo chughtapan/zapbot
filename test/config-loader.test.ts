@@ -92,6 +92,21 @@ projects:
     expect(runtime.aoConfigPath).toBe(configPath);
   });
 
+  it("prefers AO_CONFIG_PATH over ZAPBOT_CONFIG for the live AO control surface", () => {
+    const projectConfigPath = join(tmpDir, "agent-orchestrator.yaml");
+    const liveAoConfigPath = join(tmpDir, "zapbot-ao-config.runtime.yaml");
+    writeFileSync(projectConfigPath, "projects:\n");
+
+    const env = expectOk(resolveRuntimeEnv({
+      ZAPBOT_API_KEY: "api-key-123",
+      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
+      ZAPBOT_CONFIG: projectConfigPath,
+      AO_CONFIG_PATH: liveAoConfigPath,
+    }, null));
+
+    expect(env.aoConfigPath).toBe(liveAoConfigPath);
+  });
+
   it("builds runtime routes for multiple projects", () => {
     const yaml = `
 projects:

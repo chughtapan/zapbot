@@ -137,6 +137,7 @@ if [ -f "$TEMPLATE" ]; then
     -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
     -e "s|{{REPO_PATH}}|$PROJECT_DIR|g" \
     -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
+    -e "s|{{ZAPBOT_DIR}}|$ZAPBOT_DIR|g" \
     "$TEMPLATE" > "$PROJECT_DIR/agent-orchestrator.yaml"
   echo "  Generated $PROJECT_DIR/agent-orchestrator.yaml"
 else
@@ -159,12 +160,6 @@ if [ ! -f "$ENV_FILE" ]; then
 #                            Never hand this to GitHub.
 ZAPBOT_WEBHOOK_SECRET=${GENERATED_WEBHOOK_SECRET}
 ZAPBOT_API_KEY=${GENERATED_API_KEY}
-
-# Teammate config is gateway-first. The installer should point Claude Code at:
-#   ~/.zapbot/config.json
-# with:
-#   { "gateway": "https://zapbot-gateway.up.railway.app" }
-# New teammates should use `gateway` instead of wiring bridge URLs directly.
 
 # Bridge port (default: 3000)
 # ZAPBOT_PORT=3000

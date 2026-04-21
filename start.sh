@@ -77,32 +77,51 @@ extract_duplicate_session() {
   grep -Eo 'duplicate session: [^[:space:]]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/^duplicate session: //'
 }
 
-node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" <<'NODE'
+node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" "$ZAPBOT_DIR/worker/ao-plugin-agent-claude-moltzap" <<'NODE'
 const fs = require("node:fs");
-const [sourcePath, targetPath, desiredPort] = process.argv.slice(2);
-const portLine = `port: ${desiredPort}`;
-const yaml = fs.readFileSync(sourcePath, "utf8");
-const lines = yaml.split(/\r?\n/);
-let replaced = false;
+const YAML = require("yaml");
+const [sourcePath, targetPath, desiredPort, pluginPath] = process.argv.slice(2);
+const sourceText = fs.readFileSync(sourcePath, "utf8");
+const parsed = YAML.parse(sourceText) ?? {};
 
-for (let i = 0; i < lines.length; i += 1) {
-  if (/^port:[ \t]*.*$/.test(lines[i])) {
-    lines[i] = portLine;
-    replaced = true;
-    break;
+if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  throw new Error(`Invalid AO config at ${sourcePath}`);
+}
+
+parsed.port = Number.parseInt(desiredPort, 10);
+parsed.defaults = typeof parsed.defaults === "object" && parsed.defaults !== null && !Array.isArray(parsed.defaults)
+  ? parsed.defaults
+  : {};
+parsed.defaults.runtime = typeof parsed.defaults.runtime === "string" ? parsed.defaults.runtime : "tmux";
+parsed.defaults.agent = typeof parsed.defaults.agent === "string" ? parsed.defaults.agent : "claude-code";
+parsed.defaults.workspace = typeof parsed.defaults.workspace === "string" ? parsed.defaults.workspace : "worktree";
+
+const plugins = Array.isArray(parsed.plugins) ? parsed.plugins : [];
+const hasClaudeMoltzap = plugins.some((plugin) =>
+  plugin !== null &&
+  typeof plugin === "object" &&
+  !Array.isArray(plugin) &&
+  plugin.name === "claude-moltzap",
+);
+if (!hasClaudeMoltzap) {
+  plugins.push({
+    name: "claude-moltzap",
+    source: "local",
+    path: pluginPath,
+  });
+}
+parsed.plugins = plugins;
+
+const projects = parsed.projects;
+if (projects !== null && typeof projects === "object" && !Array.isArray(projects)) {
+  for (const project of Object.values(projects)) {
+    if (project !== null && typeof project === "object" && !Array.isArray(project)) {
+      project.agent = "claude-moltzap";
+    }
   }
 }
 
-if (!replaced) {
-  if (lines[0] === "---") {
-    lines.splice(1, 0, portLine);
-  } else {
-    lines.unshift(portLine);
-  }
-}
-
-const output = lines.join("\n") + (yaml.endsWith("\n") ? "\n" : "");
-fs.writeFileSync(targetPath, output);
+fs.writeFileSync(targetPath, YAML.stringify(parsed), "utf8");
 NODE
 
 if [ -z "${ZAPBOT_API_KEY:-}" ]; then
@@ -211,6 +230,8 @@ echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
 export ZAPBOT_API_KEY
 export ZAPBOT_WEBHOOK_SECRET
 export ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml"
+export ZAPBOT_AO_CONFIG_PATH="$AO_CONFIG_FILE"
+export AO_CONFIG_PATH="$AO_CONFIG_FILE"
 export ZAPBOT_PORT=$BRIDGE_PORT
 [ -n "${ZAPBOT_GATEWAY_URL:-}" ] && export ZAPBOT_GATEWAY_URL
 [ -n "${ZAPBOT_GATEWAY_SECRET:-}" ] && export ZAPBOT_GATEWAY_SECRET

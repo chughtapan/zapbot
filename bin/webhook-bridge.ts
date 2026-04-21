@@ -133,12 +133,27 @@ function buildBridgeConfig(runtime: BridgeRuntimeConfig, mergedEnv: Record<strin
     gatewayUrl: runtime.gatewayUrl,
     gatewaySecret: runtime.gatewaySecret,
     botUsername: runtime.botUsername,
-    aoConfigPath: runtime.aoConfigPath ?? "",
+    aoConfigPath: resolveAoCliConfigPath(runtime, mergedEnv),
     apiKey: runtime.apiKey,
     webhookSecret: runtime.webhookSecret,
     moltzap: moltzap.value,
     repos: buildRepos(runtime),
   });
+}
+
+function resolveAoCliConfigPath(
+  runtime: BridgeRuntimeConfig,
+  mergedEnv: Record<string, string | undefined>,
+): string {
+  const aoCliEnvPath = mergedEnv.AO_CONFIG_PATH?.trim();
+  if (typeof aoCliEnvPath === "string" && aoCliEnvPath.length > 0) {
+    return aoCliEnvPath;
+  }
+  const override = mergedEnv.ZAPBOT_AO_CONFIG_PATH?.trim();
+  if (typeof override === "string" && override.length > 0) {
+    return override;
+  }
+  return runtime.aoConfigPath ?? "";
 }
 
 function buildRepos(runtime: BridgeRuntimeConfig): ReadonlyMap<import("../src/types.ts").RepoFullName, RepoRoute> {

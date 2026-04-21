@@ -4,7 +4,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
@@ -125,6 +125,7 @@ interface SpawnResult {
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const STARTING_STATUSES = new Set(["starting", "initializing", "provisioning", "booting"]);
+const TERMINAL_STATUSES = new Set(["killed", "exited", "merged", "closed", "done"]);
 
 function normalizeEnvValue(value: string | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -242,13 +243,113 @@ function isNotReadyStatus(status: string | undefined): boolean {
   return STARTING_STATUSES.has(status.trim().toLowerCase());
 }
 
-function resolveSenderId(projectName: ProjectName, session: AoStatusSession): MoltzapSenderId {
+function isTerminalStatus(status: string | undefined): boolean {
+  if (typeof status !== "string") return false;
+  return TERMINAL_STATUSES.has(status.trim().toLowerCase());
+}
+
+function requiresMoltzapIdentity(options: AoCliOptions): boolean {
+  const env = options.env ?? process.env;
+  return normalizeEnvValue(env.MOLTZAP_SERVER_URL) !== undefined;
+}
+
+function resolveSenderId(session: AoStatusSession): MoltzapSenderId | null {
   const raw =
+    normalizeEnvValue(session.metadata?.moltzap_sender_id as string | undefined) ??
     normalizeEnvValue(session.metadata?.senderId as string | undefined) ??
-    normalizeEnvValue(session.metadata?.localSenderId as string | undefined) ??
-    normalizeEnvValue(process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID) ??
-    sessionNameFor(projectName);
-  return asMoltzapSenderId(raw);
+    normalizeEnvValue(session.metadata?.localSenderId as string | undefined);
+  return raw === undefined ? null : asMoltzapSenderId(raw);
+}
+
+function readSessionMetadataFromDisk(
+  sessionName: string,
+  projectName: ProjectName,
+  options: AoCliOptions,
+): ReadonlyMap<string, string> {
+  const homeDir = normalizeEnvValue((options.env ?? process.env).HOME) ?? process.env.HOME;
+  if (typeof homeDir !== "string" || homeDir.trim().length === 0) {
+    return new Map();
+  }
+
+  const root = join(homeDir, ".agent-orchestrator");
+  if (!existsSync(root)) {
+    return new Map();
+  }
+
+  const matches = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith(`-${projectName as string}`))
+    .map((entry) => join(root, entry.name, "sessions", sessionName))
+    .filter((path) => existsSync(path));
+
+  if (matches.length === 0) {
+    return new Map();
+  }
+
+  const metadataPath = matches.sort((left, right) => {
+    try {
+      return statSync(right).mtimeMs - statSync(left).mtimeMs;
+    } catch {
+      return 0;
+    }
+  })[0];
+
+  try {
+    const values = new Map<string, string>();
+    for (const line of readFileSync(metadataPath, "utf8").split("\n")) {
+      const separator = line.indexOf("=");
+      if (separator <= 0) {
+        continue;
+      }
+      values.set(line.slice(0, separator), line.slice(separator + 1));
+    }
+    return values;
+  } catch {
+    return new Map();
+  }
+}
+
+function resolveSenderIdForSession(
+  session: AoStatusSession,
+  projectName: ProjectName,
+  options: AoCliOptions,
+): MoltzapSenderId | null {
+  const fromStatus = resolveSenderId(session);
+  if (fromStatus !== null) {
+    return fromStatus;
+  }
+  const sessionName = session.name ?? session.id;
+  if (typeof sessionName !== "string" || sessionName.trim().length === 0) {
+    return null;
+  }
+  const metadata = readSessionMetadataFromDisk(sessionName, projectName, options);
+  const raw =
+    normalizeEnvValue(metadata.get("moltzap_sender_id")) ??
+    normalizeEnvValue(metadata.get("senderId")) ??
+    normalizeEnvValue(metadata.get("localSenderId"));
+  return raw === undefined ? null : asMoltzapSenderId(raw);
+}
+
+function pickPreferredOrchestratorSession(
+  sessions: readonly AoStatusSession[],
+  projectName: ProjectName,
+  options: AoCliOptions,
+): AoStatusSession | undefined {
+  const candidates = sessions.filter((session) =>
+    isOrchestratorSession(session, projectName),
+  );
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  const nonTerminal = candidates.filter((session) => !isTerminalStatus(session.status));
+  const liveCandidates = nonTerminal.length > 0 ? nonTerminal : candidates;
+  if (!requiresMoltzapIdentity(options)) {
+    return liveCandidates[0];
+  }
+  return (
+    liveCandidates.find((session) =>
+      resolveSenderIdForSession(session, projectName, options) !== null,
+    ) ?? liveCandidates[0]
+  );
 }
 
 function formatPrompt(prompt: OrchestratorControlPrompt): string {
@@ -288,7 +389,11 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
     if (sessions._tag === "Err") {
       return err(sessions.error);
     }
-    const found = sessions.value.find((session) => isOrchestratorSession(session, projectName));
+    const found = pickPreferredOrchestratorSession(
+      sessions.value,
+      projectName,
+      options,
+    );
     if (!found) {
       return err({ _tag: "OrchestratorNotFound", projectName });
     }
@@ -300,9 +405,22 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
         reason: `orchestrator session ${name} is ${found.status ?? "not ready"}`,
       });
     }
+    const senderId = resolveSenderIdForSession(found, projectName, options);
+    if (requiresMoltzapIdentity(options) && senderId === null) {
+      return err({
+        _tag: "OrchestratorNotReady",
+        projectName,
+        reason: `orchestrator session ${name} is missing moltzap_sender_id metadata`,
+      });
+    }
     return ok({
       session: name as AoSessionName,
-      senderId: resolveSenderId(projectName, found),
+      senderId:
+        senderId ??
+        asMoltzapSenderId(
+          normalizeEnvValue(process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID) ??
+            sessionNameFor(projectName),
+        ),
       mode: found.status ? "reused" : "started",
     });
   }

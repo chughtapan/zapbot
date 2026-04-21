@@ -36,8 +36,8 @@ export type ClaudeChannelLaunchPlanError =
   | { readonly _tag: "McpConfigInvalid"; readonly reason: string };
 
 /**
- * Render the session-local MCP config JSON Claude Code will consume through
- * `--mcp-config`.
+ * Render the session-local MCP config JSON Claude Code will consume from the
+ * workspace `.mcp.json`.
  */
 export function renderSessionMcpConfig(
   server: SessionMcpServerConfig,
@@ -100,7 +100,7 @@ export function planClaudeChannelLaunch(input: {
   return ok({
     mcpConfigPath: input.mcpConfigPath,
     mcpConfigJson: mcpConfigJson.value,
-    extraArgs: ["--mcp-config", input.mcpConfigPath, ...entryArgs.value],
+    extraArgs: [...entryArgs.value],
     entry: input.entry,
   });
 }

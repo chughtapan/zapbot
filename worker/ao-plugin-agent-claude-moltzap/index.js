@@ -30,8 +30,6 @@ export function create() {
     getLaunchCommand(config) {
       const command = [
         builtin.getLaunchCommand(config),
-        "--mcp-config",
-        shellEscape(relativeMcpConfigPath()),
         "--dangerously-load-development-channels",
         "server:moltzap",
       ].join(" ");
@@ -119,17 +117,31 @@ function resolveBuiltinClaudePluginPath() {
 function ensureChannelMcpConfig(workspacePath) {
   const configPath = join(workspacePath, relativeMcpConfigPath());
   mkdirSync(dirname(configPath), { recursive: true });
+  const current = readJsonFile(configPath);
+  const mcpServers =
+    current !== null &&
+    typeof current === "object" &&
+    !Array.isArray(current) &&
+    current.mcpServers !== null &&
+    typeof current.mcpServers === "object" &&
+    !Array.isArray(current.mcpServers)
+      ? { ...current.mcpServers }
+      : {};
+  mcpServers.moltzap = {
+    command: "bun",
+    args: [join(workspacePath, "bin", "moltzap-claude-channel.ts")],
+    env: resolveMoltzapRuntimeEnv(),
+  };
   writeFileSync(
     configPath,
     JSON.stringify(
       {
-        mcpServers: {
-          moltzap: {
-            command: "bun",
-            args: [join(workspacePath, "bin", "moltzap-claude-channel.ts")],
-            env: resolveMoltzapRuntimeEnv(),
-          },
-        },
+        ...(current !== null &&
+        typeof current === "object" &&
+        !Array.isArray(current)
+          ? current
+          : {}),
+        mcpServers,
       },
       null,
       2,
@@ -139,7 +151,18 @@ function ensureChannelMcpConfig(workspacePath) {
 }
 
 function relativeMcpConfigPath() {
-  return ".claude/moltzap-channel.mcp.json";
+  return ".mcp.json";
+}
+
+function readJsonFile(path) {
+  if (!existsSync(path)) {
+    return null;
+  }
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 function pickPassthroughEnv(keys) {
@@ -259,8 +282,6 @@ function shellEscape(value) {
 function wrapClaudeCommand(command) {
   const withChannel = [
     command,
-    "--mcp-config",
-    shellEscape(relativeMcpConfigPath()),
     "--dangerously-load-development-channels",
     "server:moltzap",
   ].join(" ");

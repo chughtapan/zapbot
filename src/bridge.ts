@@ -13,9 +13,7 @@
 
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
-import { getIssue, postComment as postGitHubComment } from "./github-state.ts";
-import { mirrorDurableStatusComment, type DurableStatusComment } from "./github/comment-mirroring.ts";
-import { resolveThreadMirrorTargets, type IssueThreadAnchor } from "./github/thread-links.ts";
+import { getIssue } from "./github-state.ts";
 import {
   buildMoltzapProcessEnv,
   type MoltzapRuntimeConfig,
@@ -193,23 +191,16 @@ async function handleMention(
         return err(forwarded.error);
       }
       const session = forwarded.value.session;
-      await postDurableStatusComment(
-        { repo: c.repo, issue: c.issue },
-        {
-          source: "bridge",
-          body: `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`,
-        },
-        ctx,
+      void ctx.gh.postComment(
+        c.repo,
+        c.issue,
+        `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`
       );
       return ok({ kind: "dispatched", repo: c.repo, session });
     }
     case "status": {
       const summary = await summarizeIssue(c.repo, c.issue);
-      await postDurableStatusComment(
-        { repo: c.repo, issue: c.issue },
-        { source: "bridge", body: summary },
-        ctx,
-      );
+      void ctx.gh.postComment(c.repo, c.issue, summary);
       return ok({ kind: "replied", command: "status" });
     }
     case "unknown_command": {
@@ -237,46 +228,6 @@ async function summarizeIssue(repo: RepoFullName, issue: IssueNumber): Promise<s
     `Assignees: ${assignees.length ? assignees.map((a) => `@${a}`).join(", ") : "_(none)_"}`,
   ];
   return lines.join("\n");
-}
-
-async function postDurableStatusComment(
-  anchor: IssueThreadAnchor,
-  comment: DurableStatusComment,
-  ctx: BridgeHandlerContext,
-): Promise<void> {
-  const targets = await resolveThreadMirrorTargets(anchor);
-  if (targets._tag === "Err") {
-    log.warn(
-      `durable_comment_target_lookup_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${targets.error._tag}`,
-    );
-    const fallback = await ctx.gh.postComment(anchor.repo, anchor.issue, comment.body);
-    if (fallback._tag === "Err") {
-      log.warn(
-        `durable_comment_issue_post_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${fallback.error.cause}`,
-      );
-    }
-    return;
-  }
-
-  const receipt = await mirrorDurableStatusComment(
-    targets.value,
-    comment,
-    { postComment: postGitHubComment },
-  );
-  if (receipt._tag === "Err") {
-    const fallback = await ctx.gh.postComment(anchor.repo, anchor.issue, comment.body);
-    if (fallback._tag === "Err") {
-      log.warn(
-        `durable_comment_issue_post_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${receipt.error.cause}`,
-      );
-    }
-    return;
-  }
-  if (receipt.value.linkedPullRequestMirror._tag === "Failed") {
-    log.warn(
-      `durable_comment_pr_mirror_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} linked_pr=${targets.value.linkedPullRequest as unknown as number} cause=${receipt.value.linkedPullRequestMirror.cause}`,
-    );
-  }
 }
 
 // ── Server boot ─────────────────────────────────────────────────────
@@ -499,6 +450,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     configPath: current.aoConfigPath,
     env: {
       ...process.env,
+      AO_CALLER_TYPE: "orchestrator",
       ...buildMoltzapProcessEnv(current.moltzap),
     },
   });
@@ -534,6 +486,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
         configPath: current.aoConfigPath,
         env: {
           ...process.env,
+          AO_CALLER_TYPE: "orchestrator",
           ...buildMoltzapProcessEnv(current.moltzap),
         },
       });

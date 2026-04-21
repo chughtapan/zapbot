@@ -56,6 +56,9 @@ exit 1
     const config = readFileSync(configPath, "utf8");
     expect(config).toContain("repo: owner/example-repo");
     expect(config).toContain(`path: ${projectDir}`);
+    expect(config).toContain("name: claude-moltzap");
+    expect(config).toContain(`path: ${REPO_ROOT}/worker/ao-plugin-agent-claude-moltzap`);
+    expect(config).toContain("agent: claude-moltzap");
 
     const env = readFileSync(envPath, "utf8");
     expect(env).toContain("ZAPBOT_WEBHOOK_SECRET=");

@@ -79,7 +79,9 @@ export function resolveRuntimeEnv(
     normalizeEnvValue(mergedEnv.ZAPBOT_BOT_USERNAME) ?? "zapbot[bot]",
   );
 
-  const aoConfigPathValue = normalizeEnvValue(mergedEnv.ZAPBOT_CONFIG);
+  const aoConfigPathValue =
+    normalizeEnvValue(mergedEnv.AO_CONFIG_PATH) ??
+    normalizeEnvValue(mergedEnv.ZAPBOT_CONFIG);
   const singleRepoValue = normalizeEnvValue(mergedEnv.ZAPBOT_REPO);
 
   return ok({
