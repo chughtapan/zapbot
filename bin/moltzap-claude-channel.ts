@@ -3,9 +3,8 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import type { EventFrame, Message as MoltzapMessage } from "@moltzap/protocol";
-import { EventNames } from "@moltzap/protocol";
-import { MoltZapService, MoltZapWsClient } from "@moltzap/client";
+import type { Message as MoltzapMessage } from "@moltzap/protocol";
+import { MoltZapService } from "@moltzap/client";
 import { toClaudeChannelNotification } from "../src/claude-channel/event.ts";
 import {
   bootClaudeChannelServer,
@@ -82,7 +81,6 @@ const service = new MoltZapService({
 
 let channelStop: (() => Promise<void>) | null = null;
 let unreadPoller: ReturnType<typeof setInterval> | null = null;
-let eventClient: MoltZapWsClient | null = null;
 
 try {
   const hello = await service.connect();
@@ -141,43 +139,32 @@ try {
     fatal(channel.error.cause);
   }
 
-  eventClient = new MoltZapWsClient({
-    serverUrl: bootstrap.value.serverUrl,
-    agentKey: bootstrap.value.apiKey,
-    onEvent: (frame) => {
-      const message = messageFromEventFrame(frame);
-      if (message === null) {
-        return;
-      }
-      void emitClaudeNotification({
-        channel: channel.value,
-        message,
-        localSenderId,
-        deliveredMessageIds,
-      });
-    },
-    onDisconnect: () => {
-      console.error("[moltzap-channel] disconnected");
-    },
-    onReconnect: () => {
-      console.error("[moltzap-channel] reconnected");
-      void sweepUnreadConversations({
-        service,
-        channel: channel.value,
-        localSenderId,
-        deliveredMessageIds,
-      });
-    },
+  service.on("message", (message) => {
+    void emitClaudeNotification({
+      channel: channel.value,
+      message,
+      localSenderId,
+      deliveredMessageIds,
+    });
   });
-  await eventClient.connect();
+  service.on("disconnect", () => {
+    console.error("[moltzap-channel] disconnected");
+  });
+  service.on("reconnect", () => {
+    console.error("[moltzap-channel] reconnected");
+    void sweepUnreadConversations({
+      service,
+      channel: channel.value,
+      localSenderId,
+      deliveredMessageIds,
+    });
+  });
 
   channelStop = async () => {
     if (unreadPoller !== null) {
       clearInterval(unreadPoller);
       unreadPoller = null;
     }
-    eventClient?.close();
-    eventClient = null;
     await channel.value.stop();
     service.close();
   };
@@ -537,20 +524,6 @@ function trimEnv(value: string | undefined): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function messageFromEventFrame(frame: EventFrame): MoltzapMessageLike | null {
-  if (frame.event !== EventNames.MessageReceived) {
-    return null;
-  }
-  if (typeof frame.data !== "object" || frame.data === null) {
-    return null;
-  }
-  const nested = asMessageLike((frame.data as { readonly message?: unknown }).message);
-  if (nested !== null) {
-    return nested;
-  }
-  return asMessageLike(frame.data);
 }
 
 function stringifyCause(cause: unknown): string {
