@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import {
   buildFetchHandler,
   defaultMintToken,
@@ -24,6 +24,46 @@ import type { RepoFullName } from "../src/types.ts";
 
 const WEBHOOK_SECRET = "a".repeat(64);
 const API_KEY = "b".repeat(64);
+const BRIDGE_ENV_KEYS = [
+  "ZAPBOT_WEBHOOK_SECRET",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+] as const;
+
+type BridgeEnvKey = (typeof BRIDGE_ENV_KEYS)[number];
+
+function snapshotBridgeEnv(): Map<BridgeEnvKey, string | undefined> {
+  return new Map(BRIDGE_ENV_KEYS.map((key) => [key, process.env[key]]));
+}
+
+function clearBridgeEnv(): void {
+  for (const key of BRIDGE_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
+function restoreBridgeEnv(snapshot: Map<BridgeEnvKey, string | undefined>): void {
+  for (const key of BRIDGE_ENV_KEYS) {
+    const value = snapshot.get(key);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
+
+let bridgeEnvSnapshot = snapshotBridgeEnv();
+
+beforeEach(() => {
+  bridgeEnvSnapshot = snapshotBridgeEnv();
+  clearBridgeEnv();
+});
+
+afterEach(() => {
+  restoreBridgeEnv(bridgeEnvSnapshot);
+});
 
 async function signPayload(body: string, secret: string): Promise<string> {
   const enc = new TextEncoder();
