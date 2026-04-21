@@ -112,6 +112,7 @@ shift || true
 case "$cmd" in
   start)
     printf 'start %s\\n' "$*" >> "$log"
+    printf 'env AO_CONFIG_PATH=%s AO_CALLER_TYPE=%s\\n' "\${AO_CONFIG_PATH:-}" "\${AO_CALLER_TYPE:-}" >> "$log"
     ;;
   status)
     printf 'status %s\\n' "$*" >> "$log"
@@ -150,6 +151,8 @@ esac
       env: {
         FAKE_AO_LOG: logFile,
         FAKE_AO_STATUS_JSON: statusJson,
+        AO_CALLER_TYPE: "orchestrator",
+        MOLTZAP_SERVER_URL: "ws://127.0.0.1:41973",
       },
       timeoutMs: 5_000,
     });
@@ -179,10 +182,55 @@ esac
 
     const log = readFileSync(logFile, "utf8");
     expect(log).toContain("start app --no-dashboard");
+    expect(log).toContain("env AO_CONFIG_PATH=/tmp/agent-orchestrator.yaml AO_CALLER_TYPE=orchestrator");
     expect(log).toContain("status --project app --json");
     expect(log).toContain("send app-orchestrator --file");
     expect(log).toContain("# GitHub control");
     expect(log).toContain("github_comment_body:");
     expect(log).toContain("@zapbot plan this");
+  });
+
+  it("holds the orchestrator as not ready when MoltZap is enabled but sender metadata is missing", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "zapbot-ao-host-"));
+    const logFile = join(workdir, "ao.log");
+    const fakeAo = join(workdir, "ao");
+    const statusJson = JSON.stringify([
+      {
+        name: "app-orchestrator",
+        role: "orchestrator",
+        status: "running",
+        metadata: {},
+      },
+    ]);
+    writeFileSync(
+      fakeAo,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "\${FAKE_AO_STATUS_JSON:-[]}"
+`,
+      "utf8",
+    );
+    chmodSync(fakeAo, 0o755);
+
+    const host = createAoCliControlHost({
+      aoBinary: fakeAo,
+      configPath: "/tmp/agent-orchestrator.yaml",
+      env: {
+        FAKE_AO_LOG: logFile,
+        FAKE_AO_STATUS_JSON: statusJson,
+        MOLTZAP_SERVER_URL: "ws://127.0.0.1:41973",
+      },
+      timeoutMs: 5_000,
+    });
+
+    const ready = await host.resolveReady(asProjectName("app"));
+    expect(ready).toEqual({
+      _tag: "Err",
+      error: {
+        _tag: "OrchestratorNotReady",
+        projectName: "app",
+        reason: "orchestrator session app-orchestrator is missing moltzap_sender_id metadata",
+      },
+    });
   });
 });

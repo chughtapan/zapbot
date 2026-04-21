@@ -242,13 +242,17 @@ function isNotReadyStatus(status: string | undefined): boolean {
   return STARTING_STATUSES.has(status.trim().toLowerCase());
 }
 
-function resolveSenderId(projectName: ProjectName, session: AoStatusSession): MoltzapSenderId {
+function requiresMoltzapIdentity(options: AoCliOptions): boolean {
+  const env = options.env ?? process.env;
+  return normalizeEnvValue(env.MOLTZAP_SERVER_URL) !== undefined;
+}
+
+function resolveSenderId(session: AoStatusSession): MoltzapSenderId | null {
   const raw =
+    normalizeEnvValue(session.metadata?.moltzap_sender_id as string | undefined) ??
     normalizeEnvValue(session.metadata?.senderId as string | undefined) ??
-    normalizeEnvValue(session.metadata?.localSenderId as string | undefined) ??
-    normalizeEnvValue(process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID) ??
-    sessionNameFor(projectName);
-  return asMoltzapSenderId(raw);
+    normalizeEnvValue(session.metadata?.localSenderId as string | undefined);
+  return raw === undefined ? null : asMoltzapSenderId(raw);
 }
 
 function formatPrompt(prompt: OrchestratorControlPrompt): string {
@@ -300,9 +304,17 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
         reason: `orchestrator session ${name} is ${found.status ?? "not ready"}`,
       });
     }
+    const senderId = resolveSenderId(found);
+    if (requiresMoltzapIdentity(options) && senderId === null) {
+      return err({
+        _tag: "OrchestratorNotReady",
+        projectName,
+        reason: `orchestrator session ${name} is missing moltzap_sender_id metadata`,
+      });
+    }
     return ok({
       session: name as AoSessionName,
-      senderId: resolveSenderId(projectName, found),
+      senderId: senderId ?? asMoltzapSenderId(sessionNameFor(projectName)),
       mode: found.status ? "reused" : "started",
     });
   }

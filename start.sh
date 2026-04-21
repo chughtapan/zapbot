@@ -69,7 +69,7 @@ fi
 
 start_ao_once() {
   : > "$AO_LOG_FILE"
-  (cd "$PROJECT_DIR" && AO_CONFIG_PATH="$AO_CONFIG_FILE" ao start > "$AO_LOG_FILE" 2>&1) &
+  (cd "$PROJECT_DIR" && AO_CONFIG_PATH="$AO_CONFIG_FILE" AO_CALLER_TYPE="orchestrator" ao start > "$AO_LOG_FILE" 2>&1) &
   AO_PID=$!
 }
 
@@ -212,6 +212,7 @@ export ZAPBOT_API_KEY
 export ZAPBOT_WEBHOOK_SECRET
 export ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml"
 export ZAPBOT_PORT=$BRIDGE_PORT
+export AO_CONFIG_PATH="$AO_CONFIG_FILE"
 [ -n "${ZAPBOT_GATEWAY_URL:-}" ] && export ZAPBOT_GATEWAY_URL
 [ -n "${ZAPBOT_GATEWAY_SECRET:-}" ] && export ZAPBOT_GATEWAY_SECRET
 [ -n "${ZAPBOT_BRIDGE_URL:-}" ] && export ZAPBOT_BRIDGE_URL

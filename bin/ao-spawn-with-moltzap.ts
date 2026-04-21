@@ -27,7 +27,9 @@ const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
 const orchestratorSenderId = resolveMetadataValue(
   currentSession,
   "moltzap_sender_id",
-) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
+) ?? fatal(
+  "moltzap_sender_id not found in orchestrator metadata; plain `ao spawn` fallback is forbidden for MoltZap-linked worker bootstrap",
+);
 const serverUrl = requireEnv("MOLTZAP_SERVER_URL");
 const registrationSecret = requireEnv("MOLTZAP_REGISTRATION_SECRET");
 const beforeSessions = new Set(listSessionNames(sessionDataDir));

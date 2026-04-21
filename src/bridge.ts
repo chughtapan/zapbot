@@ -499,6 +499,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     configPath: current.aoConfigPath,
     env: {
       ...process.env,
+      AO_CALLER_TYPE: "orchestrator",
       ...buildMoltzapProcessEnv(current.moltzap),
     },
   });
@@ -534,6 +535,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
         configPath: current.aoConfigPath,
         env: {
           ...process.env,
+          AO_CALLER_TYPE: "orchestrator",
           ...buildMoltzapProcessEnv(current.moltzap),
         },
       });

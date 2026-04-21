@@ -26,6 +26,7 @@ describe("toOrchestratorControlPrompt", () => {
     expect(result.value.body).toContain("github_comment_body:");
     expect(result.value.body).toContain("please review the open work");
     expect(result.value.body).toContain("bun run bin/ao-spawn-with-moltzap.ts");
+    expect(result.value.body).toContain("Do not fall back to plain `ao spawn`");
   });
 
   it("rejects blank GitHub comments", () => {

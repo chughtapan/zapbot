@@ -60,6 +60,7 @@ export function toOrchestratorControlPrompt(
       "",
       "Interpret the GitHub message directly. Do not rely on the webhook bridge having pre-classified it into a specific command.",
       "When you need a new worker session, use `bun run bin/ao-spawn-with-moltzap.ts <issue-number>` instead of plain `ao spawn` so the worker keeps its MoltZap control link back to you.",
+      "If MoltZap-linked worker bootstrap fails, treat that as blocking and publish the failure. Do not fall back to plain `ao spawn`.",
       "",
       "github_comment_body:",
       event.commentBody,
