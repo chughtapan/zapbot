@@ -77,12 +77,16 @@ extract_duplicate_session() {
   grep -Eo 'duplicate session: [^[:space:]]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/^duplicate session: //'
 }
 
-node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" "$ZAPBOT_DIR/worker/ao-plugin-agent-claude-moltzap" <<'NODE'
+NODE_PATH="$ZAPBOT_DIR/node_modules${NODE_PATH:+:$NODE_PATH}" \
+node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" "$ZAPBOT_DIR/worker/ao-plugin-agent-claude-moltzap" "$PROJECT_DIR" <<'NODE'
 const fs = require("node:fs");
+const path = require("node:path");
 const YAML = require("yaml");
-const [sourcePath, targetPath, desiredPort, pluginPath] = process.argv.slice(2);
+const [sourcePath, targetPath, desiredPort, pluginPath, projectDir] = process.argv.slice(2);
 const sourceText = fs.readFileSync(sourcePath, "utf8");
 const parsed = YAML.parse(sourceText) ?? {};
+const sourceDir = path.dirname(sourcePath);
+const normalizedProjectDir = path.resolve(projectDir);
 
 if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
   throw new Error(`Invalid AO config at ${sourcePath}`);
@@ -115,7 +119,13 @@ parsed.plugins = plugins;
 const projects = parsed.projects;
 if (projects !== null && typeof projects === "object" && !Array.isArray(projects)) {
   for (const project of Object.values(projects)) {
-    if (project !== null && typeof project === "object" && !Array.isArray(project)) {
+    if (
+      project !== null &&
+      typeof project === "object" &&
+      !Array.isArray(project) &&
+      typeof project.path === "string" &&
+      path.resolve(sourceDir, project.path) === normalizedProjectDir
+    ) {
       project.agent = "claude-moltzap";
     }
   }

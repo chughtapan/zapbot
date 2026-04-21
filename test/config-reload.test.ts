@@ -9,6 +9,7 @@ import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { parse as parseYaml } from "yaml";
 import type { ConfigDiskError } from "../src/config/types.js";
 import type { Result } from "../src/types.js";
 
@@ -343,6 +344,153 @@ describe("systemd integration: start.sh guard", () => {
     expect(projectIndex).toBeGreaterThanOrEqual(0);
     expect(sharedIndex).toBeLessThan(projectIndex);
   });
+
+  it("only forces claude-moltzap for the project path being bootstrapped", () => {
+    const repoRoot = path.join(__dirname, "..");
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-local-agent-"));
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-local-agent-home-"));
+    const projectDir = path.join(tempRoot, "project");
+    const otherProjectDir = path.join(tempRoot, "other-project");
+    const fakeBinDir = path.join(tempRoot, "bin");
+    const capturedAoConfigPath = path.join(tempRoot, "captured-ao-config.yaml");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(otherProjectDir, { recursive: true });
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
+
+    try {
+      writeFile(
+        path.join(projectDir, "agent-orchestrator.yaml"),
+        [
+          "port: 3000",
+          "",
+          "defaults:",
+          "  runtime: tmux",
+          "  agent: claude-code",
+          "  workspace: worktree",
+          "",
+          "projects:",
+          "  local-project:",
+          "    repo: owner/local",
+          `    path: ${projectDir}`,
+          "    defaultBranch: main",
+          "    scm:",
+          "      plugin: github",
+          "      webhook:",
+          "        path: /api/webhooks/github",
+          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
+          "        signatureHeader: x-hub-signature-256",
+          "        eventHeader: x-github-event",
+          "  remote-project:",
+          "    repo: owner/remote",
+          `    path: ${otherProjectDir}`,
+          "    agent: claude-code",
+          "    defaultBranch: main",
+          "    scm:",
+          "      plugin: github",
+          "      webhook:",
+          "        path: /api/webhooks/github",
+          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
+          "        signatureHeader: x-hub-signature-256",
+          "        eventHeader: x-github-event",
+          "",
+        ].join("\n"),
+      );
+      writeFile(
+        path.join(projectDir, ".env"),
+        [
+          "ZAPBOT_API_KEY=project-api-key",
+          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
+          "",
+        ].join("\n"),
+      );
+
+      writeExecutable(
+        path.join(fakeBinDir, "systemctl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "ao"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "start" ]; then
+  cp "$AO_CONFIG_PATH" "$CAPTURED_AO_CONFIG"
+  echo "Dashboard starting on http://localhost:3002"
+  trap 'exit 0' TERM INT
+  sleep 2
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  echo '[]'
+  exit 0
+fi
+echo "unexpected ao args: $@" >&2
+exit 1
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "bun"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+trap 'exit 0' TERM INT
+sleep 2
+exit 0
+`,
+      );
+      writeExecutable(
+        path.join(fakeBinDir, "curl"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+url="\${!#}"
+case "$url" in
+  http://localhost:3002/api/observability)
+    echo '{"overallStatus":"ok"}'
+    exit 0
+    ;;
+  http://localhost:3000/healthz)
+    exit 0
+    ;;
+  *)
+    echo "unexpected curl url: $url" >&2
+    exit 1
+    ;;
+esac
+`,
+      );
+
+      execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
+        cwd: projectDir,
+        env: {
+          ...process.env,
+          CAPTURED_AO_CONFIG: capturedAoConfigPath,
+          HOME: tempHome,
+          PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+        },
+        encoding: "utf8",
+      });
+
+      const runtimeConfig = parseYaml(fs.readFileSync(capturedAoConfigPath, "utf8")) as {
+        defaults: { agent: string };
+        plugins: Array<{ name?: string; path?: string }>;
+        projects: Record<string, { agent?: string }>;
+      };
+
+      expect(runtimeConfig.defaults.agent).toBe("claude-code");
+      expect(runtimeConfig.plugins).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "claude-moltzap" }),
+        ]),
+      );
+      expect(runtimeConfig.projects["local-project"]?.agent).toBe("claude-moltzap");
+      expect(runtimeConfig.projects["remote-project"]?.agent).toBe("claude-code");
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  }, 15000);
 
   it("retries once after a duplicate orchestrator session is reported", () => {
     const repoRoot = path.join(__dirname, "..");
