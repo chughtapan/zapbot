@@ -351,6 +351,8 @@ describe("systemd integration: start.sh guard", () => {
     const projectDir = path.join(tempRoot, "project");
     const fakeBinDir = path.join(tempRoot, "bin");
     const tmuxLog = path.join(tempRoot, "tmux.log");
+    const aoCallsLog = path.join(tempRoot, "ao-calls.log");
+    const realBun = execFileSync("which", ["bun"], { encoding: "utf8" }).trim();
     fs.mkdirSync(projectDir, { recursive: true });
     fs.mkdirSync(fakeBinDir, { recursive: true });
     fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
@@ -392,6 +394,33 @@ describe("systemd integration: start.sh guard", () => {
           "",
         ].join("\n"),
       );
+      writeFile(
+        path.join(projectDir, ".zapbot-managed-sessions.json"),
+        JSON.stringify({
+          version: 1,
+          records: [
+            {
+              id: "demo-orchestrator-1",
+              tag: {
+                managed: true,
+                owner: "zapbot",
+                projectName: "demo",
+                sessionName: "demo-orchestrator-1",
+                scope: "orchestrator",
+                origin: "start.sh",
+                claimedAtMs: Date.now(),
+              },
+              tmuxName: "demo-orchestrator-1",
+              worktree: projectDir,
+              processId: null,
+              phase: "active",
+              lastHeartbeatAtMs: Date.now(),
+            },
+          ],
+        }, null, 2) + "\n",
+      );
+      writeFile(tmuxLog, "");
+      writeFile(aoCallsLog, "");
 
       writeExecutable(
         path.join(fakeBinDir, "gh"),
@@ -426,7 +455,7 @@ fi
 exit 0
 `,
       );
-writeExecutable(
+      writeExecutable(
         path.join(fakeBinDir, "ao"),
         `#!/usr/bin/env bash
 set -euo pipefail
@@ -438,8 +467,9 @@ fi
 if [ "$1" = "start" ]; then
   COUNT=$((COUNT + 1))
   echo "$COUNT" > "$STATE_FILE"
+  echo "start $COUNT $*" >> "\${AO_CALLS_LOG}"
   if [ "$COUNT" -eq 1 ]; then
-    echo "Failed to setup orchestrator: duplicate session: stale-orchestrator-1"
+    echo "Failed to setup orchestrator: duplicate session: demo-orchestrator-1"
     exit 1
   fi
   echo "Dashboard starting on http://localhost:3002"
@@ -459,12 +489,15 @@ exit 1
         path.join(fakeBinDir, "bun"),
         `#!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == *"resolve-managed-startup-retry.ts" ]]; then
+  exec "${realBun}" "$@"
+fi
 trap 'exit 0' TERM INT
 sleep 2
 exit 0
 `,
       );
-writeExecutable(
+      writeExecutable(
         path.join(fakeBinDir, "curl"),
         `#!/usr/bin/env bash
 set -euo pipefail
@@ -489,14 +522,17 @@ exit 0
           HOME: tempHome,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
           TMUX_LOG: tmuxLog,
+          AO_CALLS_LOG: aoCallsLog,
         },
         encoding: "utf8",
       });
 
-      expect(output).toContain("Detected stale AO tmux session stale-orchestrator-1; removing and retrying startup...");
+      expect(output).toContain("Detected duplicate managed orchestrator session demo-orchestrator-1; retrying startup...");
       expect(output).toContain("AO ready on port 3002");
       expect(output).toContain("Bridge ready on port 3000");
-      expect(fs.readFileSync(tmuxLog, "utf8")).toContain("kill-session -t stale-orchestrator-1");
+      expect(fs.readFileSync(tmuxLog, "utf8")).not.toContain("kill-session");
+      expect(fs.readFileSync(aoCallsLog, "utf8")).toContain("start 1");
+      expect(fs.readFileSync(aoCallsLog, "utf8")).toContain("start 2");
       expect(fs.readFileSync(path.join(projectDir, "agent-orchestrator.yaml"), "utf8")).toContain("repo: owner/repo");
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });

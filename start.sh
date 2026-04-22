@@ -73,8 +73,11 @@ start_ao_once() {
   AO_PID=$!
 }
 
-extract_duplicate_session() {
-  grep -Eo 'duplicate session: [^[:space:]]+' "$AO_LOG_FILE" 2>/dev/null | tail -n 1 | sed -E 's/^duplicate session: //'
+resolve_managed_startup_retry() {
+  bun "$ZAPBOT_DIR/bin/resolve-managed-startup-retry.ts" \
+    "$PROJECT_DIR" \
+    "$PROJECT_DIR/agent-orchestrator.yaml" \
+    "$AO_LOG_FILE"
 }
 
 node - "$PROJECT_DIR/agent-orchestrator.yaml" "$AO_CONFIG_FILE" "$AO_PORT" <<'NODE'
@@ -157,7 +160,7 @@ AO_DASHBOARD_PORT=""
 for attempt in 1 2; do
   echo "Starting agent-orchestrator with explicit port ${AO_PORT}..."
   AO_DASHBOARD_PORT=""
-  DUPLICATE_SESSION=""
+  RETRY_DUPLICATE_SESSION=""
   start_ao_once
 
   for i in $(seq 1 20); do
@@ -166,10 +169,12 @@ for attempt in 1 2; do
       break
     fi
     if ! kill -0 "$AO_PID" 2>/dev/null; then
-      DUPLICATE_SESSION="$(extract_duplicate_session)"
-      if [ "$attempt" -eq 1 ] && [ -n "$DUPLICATE_SESSION" ]; then
-        echo "Detected stale AO tmux session ${DUPLICATE_SESSION}; removing and retrying startup..."
-        tmux kill-session -t "$DUPLICATE_SESSION" 2>/dev/null || true
+      RETRY_DUPLICATE_SESSION=""
+      if [ "$attempt" -eq 1 ]; then
+        RETRY_DUPLICATE_SESSION="$(resolve_managed_startup_retry 2>/dev/null || true)"
+      fi
+      if [ "$attempt" -eq 1 ] && [ -n "$RETRY_DUPLICATE_SESSION" ]; then
+        echo "Detected duplicate managed orchestrator session ${RETRY_DUPLICATE_SESSION}; retrying startup..."
         wait "$AO_PID" 2>/dev/null || true
         break
       fi
@@ -184,7 +189,7 @@ for attempt in 1 2; do
     break
   fi
 
-  if [ "$attempt" -eq 1 ] && [ -n "${DUPLICATE_SESSION:-}" ]; then
+  if [ "$attempt" -eq 1 ] && [ -n "${RETRY_DUPLICATE_SESSION:-}" ]; then
     continue
   fi
 

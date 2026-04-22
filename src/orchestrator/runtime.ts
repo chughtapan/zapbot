@@ -4,9 +4,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   createManagedSessionFileRegistry,
   isManagedSessionRecord,
@@ -18,7 +19,7 @@ import {
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
-import { asAoSessionName, err, ok } from "../types.ts";
+import { asAoSessionName, asProjectName, err, ok } from "../types.ts";
 import type { OrchestratorControlPrompt } from "./control-event.ts";
 
 export interface OrchestratorReady {
@@ -64,6 +65,18 @@ export type EnsureOrchestratorError =
 
 export type ForwardControlError = EnsureOrchestratorError | Extract<AoControlHostError, { readonly _tag: "AoSendFailed" }>;
 
+export interface ManagedStartupRetryRequest {
+  readonly projectDir: string;
+  readonly projectConfigPath: string;
+  readonly aoLogText: string;
+}
+
+export interface ManagedStartupRetryDecision {
+  readonly action: "retry" | "fail";
+  readonly duplicateSession: AoSessionName | null;
+  readonly reason: string;
+}
+
 /**
  * Ensure the persistent per-project orchestrator session exists and has a
  * discoverable MoltZap identity before any control prompt is forwarded.
@@ -105,6 +118,66 @@ export async function forwardControlPrompt(
   });
 }
 
+export async function resolveManagedStartupRetry(
+  request: ManagedStartupRetryRequest,
+): Promise<ManagedStartupRetryDecision> {
+  const duplicateSession = extractDuplicateSessionName(request.aoLogText);
+  if (duplicateSession === null) {
+    return {
+      action: "fail",
+      duplicateSession: null,
+      reason: "ao startup failure did not report a duplicate session",
+    };
+  }
+
+  const projectName = resolveProjectNameForPath(
+    request.projectConfigPath,
+    request.projectDir,
+  );
+  if (projectName._tag === "Err") {
+    return {
+      action: "fail",
+      duplicateSession,
+      reason: projectName.error,
+    };
+  }
+
+  const registry = createManagedSessionFileRegistry({
+    registryPath: resolveManagedSessionRegistryPath({
+      projectDir: request.projectDir,
+    }),
+  });
+  const managed = await registry.listByProject(projectName.value);
+  if (managed._tag === "Err") {
+    return {
+      action: "fail",
+      duplicateSession,
+      reason: stringifyRegistryError(managed.error),
+    };
+  }
+
+  const managedDuplicate = managed.value.some(
+    (record) =>
+      isManagedSessionRecord(record) &&
+      record.tag.projectName === projectName.value &&
+      record.tag.scope === "orchestrator" &&
+      record.tag.sessionName === duplicateSession,
+  );
+  if (!managedDuplicate) {
+    return {
+      action: "fail",
+      duplicateSession,
+      reason: `duplicate session ${duplicateSession as string} is not a zapbot-managed orchestrator`,
+    };
+  }
+
+  return {
+    action: "retry",
+    duplicateSession,
+    reason: `duplicate session ${duplicateSession as string} matches a zapbot-managed orchestrator`,
+  };
+}
+
 interface AoCliOptions {
   readonly aoBinary?: string;
   readonly configPath: string | null;
@@ -138,6 +211,59 @@ function normalizeEnvValue(value: string | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function extractDuplicateSessionName(logText: string): AoSessionName | null {
+  const match = /duplicate session:\s+([^\s]+)/.exec(logText);
+  if (!match || typeof match[1] !== "string" || match[1].trim().length === 0) {
+    return null;
+  }
+  return asAoSessionName(match[1].trim());
+}
+
+function resolveProjectNameForPath(
+  projectConfigPath: string,
+  projectDir: string,
+): Result<ProjectName, string> {
+  let yamlText: string;
+  try {
+    yamlText = readFileSync(projectConfigPath, "utf8");
+  } catch (error) {
+    return err(error instanceof Error ? error.message : String(error));
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(yamlText);
+  } catch (error) {
+    return err(error instanceof Error ? error.message : String(error));
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return err("project config was not a valid YAML object");
+  }
+
+  const projects = (parsed as { readonly projects?: unknown }).projects;
+  if (!projects || typeof projects !== "object") {
+    return err("project config does not contain projects");
+  }
+
+  for (const [projectName, candidate] of Object.entries(projects)) {
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+    const candidatePath = (candidate as { readonly path?: unknown }).path;
+    if (candidatePath === projectDir) {
+      return ok(asProjectName(projectName));
+    }
+  }
+
+  const [firstProjectName] = Object.keys(projects);
+  if (typeof firstProjectName === "string" && firstProjectName.length > 0) {
+    return ok(asProjectName(firstProjectName));
+  }
+
+  return err("project config did not define any project names");
 }
 
 function buildCliEnv(base: Record<string, string | undefined>, configPath: string | null): Record<string, string | undefined> {
