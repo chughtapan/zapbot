@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import * as fc from "fast-check";
-import { verifySignature } from "../v2/http/verify-signature.js";
+import { verifySignature } from "../src/http/verify-signature.js";
 import { sign } from "./helpers/sign.ts";
 
 const RUNS = 100;

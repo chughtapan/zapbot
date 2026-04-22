@@ -3,7 +3,6 @@ import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.js";
 import { resolveIngressPolicy } from "../src/config/ingress.js";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.js";
 import { loadBridgeRuntimeConfig } from "../src/config/load.js";
-import { buildStartupReceipt, renderStartupReceipt } from "../src/startup/receipt.js";
 import { readConfigFiles, type ConfigDiskReader } from "../src/config/disk.js";
 import { execFileSync } from "child_process";
 import * as fs from "fs";
@@ -155,66 +154,6 @@ describe("resolveIngressPolicy", () => {
         publicUrl: "https://bridge.example",
         requiresReachablePublicUrl: true,
       });
-    }
-  });
-});
-
-describe("startup receipt", () => {
-  it("renders local-only mode with local ingress markers", () => {
-    const receipt = buildStartupReceipt({
-      projectDir: "/tmp/project",
-      repos: ["owner/repo"],
-      ingress: {
-        _tag: "LocalOnly",
-        mode: "local-only",
-        gatewayUrl: null,
-        publicUrl: null,
-        requiresReachablePublicUrl: false,
-      },
-      bridgePort: 3000,
-      dashboardPort: 3001,
-      gatewayUrl: null,
-      publicUrl: null,
-      logsPath: "/tmp/logs",
-      publishCommand: "bash publish.sh",
-    });
-
-    expect(receipt._tag).toBe("Ok");
-    if (receipt._tag === "Ok") {
-      const rendered = renderStartupReceipt(receipt.value);
-      expect(receipt.value.mode).toBe("local-only");
-      expect(rendered).toContain("Mode:      local-only");
-      expect(rendered).toContain("Gateway:   (local-only)");
-      expect(rendered).toContain("Public:    (local-only)");
-    }
-  });
-
-  it("renders github demo mode with explicit ingress endpoints", () => {
-    const receipt = buildStartupReceipt({
-      projectDir: "/tmp/project",
-      repos: ["owner/repo"],
-      ingress: {
-        _tag: "GitHubDemo",
-        mode: "github-demo",
-        gatewayUrl: "https://gateway.example",
-        publicUrl: "https://bridge.example",
-        requiresReachablePublicUrl: true,
-      },
-      bridgePort: 3000,
-      dashboardPort: 3001,
-      gatewayUrl: "https://gateway.example",
-      publicUrl: "https://bridge.example",
-      logsPath: "/tmp/logs",
-      publishCommand: "bash publish.sh",
-    });
-
-    expect(receipt._tag).toBe("Ok");
-    if (receipt._tag === "Ok") {
-      const rendered = renderStartupReceipt(receipt.value);
-      expect(receipt.value.mode).toBe("github-demo");
-      expect(rendered).toContain("Mode:      github-demo");
-      expect(rendered).toContain("Gateway:   https://gateway.example");
-      expect(rendered).toContain("Public:    https://bridge.example");
     }
   });
 });

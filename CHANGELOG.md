@@ -8,7 +8,7 @@ Finish the ao-native bridge path and make MoltZap session provisioning real.
 
 - **MoltZap runtime provisioning** — zapbot now decodes `ZAPBOT_MOLTZAP_*` env at boot and forwards real `MOLTZAP_*` credentials to spawned `ao` sessions.
 - **Per-session MoltZap registration mode** — when `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` is configured, zapbot registers a fresh MoltZap agent for each dispatch and passes that key to the child session.
-- **Supervisor and allowlist implementations** — `src/moltzap/supervisor.ts` and `src/moltzap/identity-allowlist.ts` are now fully implemented and covered by tests.
+- **MoltZap guardrails** — allowlist enforcement and reconnect supervision landed with test coverage.
 - **Dispatcher env coverage** — tests now verify that `MOLTZAP_*` values actually reach the spawned `ao` process.
 
 ### Changed
