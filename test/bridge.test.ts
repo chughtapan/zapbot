@@ -7,6 +7,7 @@ import {
   type RepoRoute,
 } from "../src/bridge.ts";
 import type { ClassifiedWebhook } from "../src/gateway.ts";
+import { buildEligibleMentionRequest } from "../src/github-control-request.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import type { AoControlHost } from "../src/orchestrator/runtime.ts";
 import {
@@ -138,20 +139,31 @@ function mentionWebhook(command: ClassifiedWebhook extends infer _ ? never : nev
 }
 void mentionWebhook;
 
-function asMention(kind: "plan_this" | "investigate_this" | "status" | "unknown_command", raw?: string): ClassifiedWebhook {
-  const command =
-    kind === "unknown_command"
-      ? { kind: "unknown_command" as const, raw: raw ?? "frobnicate" }
-      : { kind };
-  return {
-    kind: "mention_command",
-    repo,
-    issue,
-    commentId,
-    commentBody: raw ?? "@zapbot plan this",
-    deliveryId: asDeliveryId("delivery-1"),
-    command,
+function asMentionRequest(
+  rawCommentBody = "@zapbot please plan the next lane",
+  threadKind: "issue" | "pull_request" = "issue",
+): ClassifiedWebhook {
+  const request = buildEligibleMentionRequest({
+    placement: {
+      repo,
+      projectName: asProjectName("app"),
+      issue,
+      issueThreadKind: threadKind,
+      issueTitle: threadKind === "issue" ? "Plan the next lane" : "Review the PR lane",
+      issueUrl: "https://github.com/acme/app/issues/42",
+      commentId,
+      commentUrl: "https://github.com/acme/app/issues/42#issuecomment-7",
+      deliveryId: asDeliveryId("delivery-1"),
+    },
+    rawCommentBody,
     triggeredBy: "carol",
+  });
+  if (request._tag !== "Ok") {
+    throw new Error(`unexpected invalid request: ${request.error._tag}`);
+  }
+  return {
+    kind: "mention_request",
+    request: request.value,
   };
 }
 
@@ -179,7 +191,7 @@ describe("handleClassifiedWebhook — permission gate", () => {
   });
 
   it("insufficient permission → unauthorized + comment posted", async () => {
-    const out = await handleClassifiedWebhook(asMention("plan_this"), makeCtx(gh));
+    const out = await handleClassifiedWebhook(asMentionRequest(), makeCtx(gh));
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
       expect(out.value.kind).toBe("unauthorized");
@@ -196,7 +208,7 @@ describe("handleClassifiedWebhook — permission gate", () => {
     const made = makeGh({
       permission: err({ _tag: "GhCallFailed", label: "getUserPermission", cause: "network" }),
     });
-    const out = await handleClassifiedWebhook(asMention("plan_this"), makeCtx(made.gh));
+    const out = await handleClassifiedWebhook(asMentionRequest(), makeCtx(made.gh));
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok" && out.value.kind === "unauthorized") {
       expect(out.value.reason).toBe("permission_check_failed");
@@ -206,18 +218,14 @@ describe("handleClassifiedWebhook — permission gate", () => {
   });
 });
 
-describe("handleClassifiedWebhook — plan_this / investigate_this", () => {
-  it("project not configured → ProjectNotConfigured error", async () => {
-    const { gh } = makeGh({});
-    const out = await handleClassifiedWebhook(asMention("plan_this"), makeCtx(gh, { withRoute: false }));
-    expect(out._tag).toBe("Err");
-    if (out._tag === "Err") expect(out.error._tag).toBe("ProjectNotConfigured");
-  });
-
+describe("handleClassifiedWebhook — mention_request", () => {
   it("forwards control to the persistent orchestrator and preserves raw metadata", async () => {
     const { gh, calls: ghCalls } = makeGh({});
     const { host, calls } = makeAoHost();
-    const out = await handleClassifiedWebhook(asMention("investigate_this", "please investigate this"), makeCtx(gh, { aoControlHost: host }));
+    const out = await handleClassifiedWebhook(
+      asMentionRequest("@zapbot please investigate this failure"),
+      makeCtx(gh, { aoControlHost: host }),
+    );
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
       expect(out.value.kind).toBe("dispatched");
@@ -230,48 +238,47 @@ describe("handleClassifiedWebhook — plan_this / investigate_this", () => {
     expect(calls.sendPrompt).toHaveLength(1);
     expect(calls.sendPrompt[0].title).toContain("GitHub control for acme/app#42");
     expect(calls.sendPrompt[0].body).toContain("delivery_id: delivery-1");
+    expect(calls.sendPrompt[0].body).toContain("issue_thread_kind: issue");
     expect(calls.sendPrompt[0].body).toContain("github_comment_body:");
-    expect(calls.sendPrompt[0].body).toContain("please investigate this");
+    expect(calls.sendPrompt[0].body).toContain("please investigate this failure");
     expect(ghCalls.postComment[0].body).toContain("Forwarded control event");
   });
-});
 
-describe("handleClassifiedWebhook — status command", () => {
-  it("returns replied outcome tagged with 'status' and posts a summary", async () => {
-    // getIssue() will fail in test env (no GitHub creds). summarizeIssue
-    // returns a "Could not fetch" string, which is still posted. The outcome
-    // must be `replied` with command: "status" — not `ignored`.
+  it("accepts pull-request issue threads and forwards their placement context", async () => {
     const { gh, calls } = makeGh({});
-    const out = await handleClassifiedWebhook(asMention("status"), makeCtx(gh));
+    const { host, calls: aoCalls } = makeAoHost();
+    const out = await handleClassifiedWebhook(
+      asMentionRequest("@zapbot please summarize the current PR state", "pull_request"),
+      makeCtx(gh, { aoControlHost: host }),
+    );
     expect(out._tag).toBe("Ok");
-    if (out._tag === "Ok") {
-      expect(out.value.kind).toBe("replied");
-      if (out.value.kind === "replied") expect(out.value.command).toBe("status");
-    }
-    // Post fired (possibly after the summary fetch — either way, called exactly once).
-    expect(calls.postComment.length).toBe(1);
+    expect(calls.postComment).toHaveLength(1);
+    expect(aoCalls.sendPrompt).toHaveLength(1);
+    expect(aoCalls.sendPrompt[0].body).toContain("issue_thread_kind: pull_request");
+    expect(aoCalls.sendPrompt[0].body).toContain("please summarize the current PR state");
   });
-});
 
-describe("handleClassifiedWebhook — unknown_command", () => {
-  it("returns replied outcome and posts a help comment citing the raw command", async () => {
+  it("does not emit a bridge-side help fallback for arbitrary raw text", async () => {
     const { gh, calls } = makeGh({});
-    const out = await handleClassifiedWebhook(asMention("unknown_command", "frobnicate"), makeCtx(gh));
+    const { host, calls: aoCalls } = makeAoHost();
+    const out = await handleClassifiedWebhook(
+      asMentionRequest("@zapbot frobnicate the lane and decide what this means"),
+      makeCtx(gh, { aoControlHost: host }),
+    );
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
-      expect(out.value.kind).toBe("replied");
-      if (out.value.kind === "replied") expect(out.value.command).toBe("unknown_command");
+      expect(out.value.kind).toBe("dispatched");
     }
     expect(calls.postComment.length).toBe(1);
-    expect(calls.postComment[0].body).toContain("frobnicate");
-    expect(calls.postComment[0].body).toContain("plan this");
+    expect(calls.postComment[0].body).toContain("Forwarded control event");
+    expect(aoCalls.sendPrompt[0].body).toContain("frobnicate the lane");
   });
 });
 
 describe("handleClassifiedWebhook — eyes reaction", () => {
-  it("fires addReaction on any mention_command (fire-and-forget)", async () => {
+  it("fires addReaction on any mention_request (fire-and-forget)", async () => {
     const { gh, calls } = makeGh({});
-    await handleClassifiedWebhook(asMention("status"), makeCtx(gh));
+    await handleClassifiedWebhook(asMentionRequest("@zapbot please look at this"), makeCtx(gh));
     // addReaction runs async and fire-and-forget — give it a microtask to resolve.
     await new Promise((r) => setTimeout(r, 0));
     expect(calls.addReaction.length).toBe(1);

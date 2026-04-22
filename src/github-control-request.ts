@@ -6,6 +6,7 @@ import type {
   RepoFullName,
   Result,
 } from "./types.ts";
+import { err, ok } from "./types.ts";
 
 export type IssueThreadKind = "issue" | "pull_request";
 
@@ -38,5 +39,37 @@ export function buildEligibleMentionRequest(args: {
   readonly rawCommentBody: string;
   readonly triggeredBy: string;
 }): Result<EligibleMentionRequest, EligibleMentionRequestError> {
-  throw new Error("not implemented");
+  if (args.rawCommentBody.trim().length === 0) {
+    return err({ _tag: "RawCommentBodyInvalid", reason: "rawCommentBody must be non-empty" });
+  }
+  if (args.triggeredBy.trim().length === 0) {
+    return err({ _tag: "TriggeredByInvalid", reason: "triggeredBy must be non-empty" });
+  }
+  if ((args.placement.projectName as unknown as string).trim().length === 0) {
+    return err({ _tag: "PlacementInvalid", reason: "projectName must be non-empty" });
+  }
+  if (
+    args.placement.issueThreadKind !== "issue" &&
+    args.placement.issueThreadKind !== "pull_request"
+  ) {
+    return err({ _tag: "PlacementInvalid", reason: "issueThreadKind must be issue or pull_request" });
+  }
+  if (
+    args.placement.issueUrl !== null &&
+    args.placement.issueUrl.trim().length === 0
+  ) {
+    return err({ _tag: "PlacementInvalid", reason: "issueUrl must be null or a non-empty string" });
+  }
+  if (
+    args.placement.commentUrl !== null &&
+    args.placement.commentUrl.trim().length === 0
+  ) {
+    return err({ _tag: "PlacementInvalid", reason: "commentUrl must be null or a non-empty string" });
+  }
+  return ok({
+    _tag: "EligibleMentionRequest",
+    placement: args.placement,
+    rawCommentBody: args.rawCommentBody,
+    triggeredBy: args.triggeredBy,
+  });
 }

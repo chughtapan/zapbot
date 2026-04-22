@@ -13,7 +13,7 @@
 
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
-import { getIssue, postComment as postGitHubComment } from "./github-state.ts";
+import { postComment as postGitHubComment } from "./github-state.ts";
 import { mirrorDurableStatusComment, type DurableStatusComment } from "./github/comment-mirroring.ts";
 import { resolveThreadMirrorTargets, type IssueThreadAnchor } from "./github/thread-links.ts";
 import {
@@ -22,7 +22,7 @@ import {
 } from "./moltzap/runtime.ts";
 import type { IngressPolicy } from "./config/ingress.ts";
 import { createAoCliControlHost, forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
-import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
+import { toOrchestratorControlPrompt, type ControlPromptShapeError } from "./orchestrator/github-control-prompt.ts";
 import {
   absurd,
   asDeliveryId,
@@ -117,8 +117,7 @@ export interface GhAdapter {
 
 export type { HandleOutcome } from "./types.ts";
 type BridgeHotPathError =
-  | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName }
-  | ControlEventShapeError
+  | ControlPromptShapeError
   | ForwardControlError;
 
 // ── Handler ─────────────────────────────────────────────────────────
@@ -134,108 +133,66 @@ export async function handleClassifiedWebhook(
   if (classified.kind === "ignore") {
     return { _tag: "Ok", value: { kind: "ignored", reason: classified.reason } };
   }
-  if (classified.kind === "mention_command") {
-    return handleMention(classified, ctx);
+  if (classified.kind === "mention_request") {
+    return handleMentionRequest(classified.request, ctx);
   }
   return absurd(classified);
 }
 
-async function handleMention(
-  c: Extract<ClassifiedWebhook, { kind: "mention_command" }>,
+async function handleMentionRequest(
+  request: Extract<ClassifiedWebhook, { kind: "mention_request" }>["request"],
   ctx: BridgeHandlerContext
 ): Promise<Result<HandleOutcome, BridgeHotPathError>> {
   // Eyes reaction for immediate UX feedback (best-effort; log on failure, never bubble).
-  void ctx.gh.addReaction(c.repo, c.commentId as unknown as number, "eyes");
+  void ctx.gh.addReaction(
+    request.placement.repo,
+    request.placement.commentId as unknown as number,
+    "eyes",
+  );
 
-  const permResult = await ctx.gh.getUserPermission(c.repo, c.triggeredBy);
+  const permResult = await ctx.gh.getUserPermission(
+    request.placement.repo,
+    request.triggeredBy,
+  );
   if (permResult._tag === "Err") {
     void ctx.gh.postComment(
-      c.repo,
-      c.issue,
-      `Sorry @${c.triggeredBy}, I couldn't verify your permissions right now. Please try again in a moment.`
+      request.placement.repo,
+      request.placement.issue,
+      `Sorry @${request.triggeredBy}, I couldn't verify your permissions right now. Please try again in a moment.`
     );
-    return ok({ kind: "unauthorized", actor: c.triggeredBy, reason: "permission_check_failed" });
+    return ok({ kind: "unauthorized", actor: request.triggeredBy, reason: "permission_check_failed" });
   }
   if (!WRITE_PERMISSIONS.has(permResult.value)) {
     void ctx.gh.postComment(
-      c.repo,
-      c.issue,
-      `Sorry @${c.triggeredBy}, you need write access to this repo to use commands.`
+      request.placement.repo,
+      request.placement.issue,
+      `Sorry @${request.triggeredBy}, you need write access to this repo to use zapbot.`
     );
-    return ok({ kind: "unauthorized", actor: c.triggeredBy, reason: "insufficient_permission" });
+    return ok({ kind: "unauthorized", actor: request.triggeredBy, reason: "insufficient_permission" });
   }
 
-  const cmd = c.command;
-  switch (cmd.kind) {
-    case "plan_this":
-    case "investigate_this": {
-      const route = ctx.config.repos.get(c.repo);
-      if (route === undefined) {
-        return err({ _tag: "ProjectNotConfigured", repo: c.repo });
-      }
-      const controlEvent: OrchestratorControlEvent = {
-        _tag: "GitHubControlEvent",
-        repo: c.repo,
-        projectName: route.projectName,
-        issue: c.issue,
-        commentId: c.commentId,
-        deliveryId: c.deliveryId,
-        commentBody: c.commentBody,
-        triggeredBy: c.triggeredBy,
-      };
-      const prompt = toOrchestratorControlPrompt(controlEvent);
-      if (prompt._tag === "Err") {
-        return err(prompt.error);
-      }
-      const forwarded = await forwardControlPrompt(route.projectName, prompt.value, ctx.aoControlHost);
-      if (forwarded._tag === "Err") {
-        return err(forwarded.error);
-      }
-      const session = forwarded.value.session;
-      await postDurableStatusComment(
-        { repo: c.repo, issue: c.issue },
-        {
-          source: "bridge",
-          body: `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`,
-        },
-        ctx,
-      );
-      return ok({ kind: "dispatched", repo: c.repo, session });
-    }
-    case "status": {
-      const summary = await summarizeIssue(c.repo, c.issue);
-      await postDurableStatusComment(
-        { repo: c.repo, issue: c.issue },
-        { source: "bridge", body: summary },
-        ctx,
-      );
-      return ok({ kind: "replied", command: "status" });
-    }
-    case "unknown_command": {
-      void ctx.gh.postComment(
-        c.repo,
-        c.issue,
-        `@${c.triggeredBy} I don't recognize the command \`${cmd.raw}\`. Try \`plan this\`, \`investigate this\`, or \`status\`.`
-      );
-      return ok({ kind: "replied", command: "unknown_command" });
-    }
-    default:
-      return absurd(cmd);
+  const prompt = toOrchestratorControlPrompt(request);
+  if (prompt._tag === "Err") {
+    return err(prompt.error);
   }
-}
-
-async function summarizeIssue(repo: RepoFullName, issue: IssueNumber): Promise<string> {
-  const snap = await getIssue(repo, issue);
-  if (snap._tag === "Err") {
-    return `Could not fetch issue state (${snap.error._tag}).`;
+  const forwarded = await forwardControlPrompt(
+    request.placement.projectName,
+    prompt.value,
+    ctx.aoControlHost,
+  );
+  if (forwarded._tag === "Err") {
+    return err(forwarded.error);
   }
-  const { state, labels, assignees } = snap.value;
-  const lines = [
-    `**Status for #${issue as unknown as number}**`,
-    `State: \`${state}\`; labels: ${labels.length ? labels.map((l) => `\`${l}\``).join(", ") : "_(none)_"}`,
-    `Assignees: ${assignees.length ? assignees.map((a) => `@${a}`).join(", ") : "_(none)_"}`,
-  ];
-  return lines.join("\n");
+  const session = forwarded.value.session;
+  await postDurableStatusComment(
+    { repo: request.placement.repo, issue: request.placement.issue },
+    {
+      source: "bridge",
+      body: `Forwarded control event for @${request.triggeredBy}. Session: \`${session as unknown as string}\`.`,
+    },
+    ctx,
+  );
+  return ok({ kind: "dispatched", repo: request.placement.repo, session });
 }
 
 async function postDurableStatusComment(
@@ -383,6 +340,7 @@ export function buildFetchHandler(
       const classified = await verifyAndClassify(
         envelope,
         (r) => resolveSecret(r, current),
+        (r) => current.repos.get(r)?.projectName ?? null,
         current.botUsername
       );
 
@@ -397,6 +355,8 @@ export function buildFetchHandler(
             return errorResponse(401, "signature_error", "Webhook signature verification failed.");
           case "PayloadShapeInvalid":
             return errorResponse(400, "invalid_request", `Malformed issue_comment payload: ${e.reason}.`);
+          case "ProjectNotConfigured":
+            return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' not routed.`);
           default:
             return absurd(e);
         }
@@ -414,10 +374,9 @@ export function buildFetchHandler(
             return errorResponse(503, "dispatch_unavailable", `Orchestrator for ${e.projectName as unknown as string} is not ready: ${e.reason}.`);
           case "AoSendFailed":
             return errorResponse(502, "dispatch_failed", `ao send failed: ${e.cause}.`);
+          case "PlacementMissing":
           case "PromptShapeInvalid":
             return errorResponse(400, "invalid_request", `Orchestrator prompt invalid: ${e.reason}.`);
-          case "ProjectNotConfigured":
-            return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' not routed.`);
           default:
             return absurd(e);
         }

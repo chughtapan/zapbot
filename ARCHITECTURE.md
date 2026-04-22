@@ -12,10 +12,10 @@ orchestrator control loop.
 ```text
 GitHub issue_comment webhook
   -> HMAC verify
-  -> mention classification
+  -> eligible direct-mention detection
   -> permission check
   -> ensure orchestrator session exists (`ao start` / `ao status`)
-  -> ao send raw GitHub control prompt
+  -> ao send raw GitHub control prompt with placement context
   -> orchestrator decides whether to spawn workers via
      `bun run bin/ao-spawn-with-moltzap.ts <issue-number>`
   -> worker plugin boots Claude + local MoltZap channel runtime
@@ -35,9 +35,10 @@ Plain-language boundary split:
 | Path | Purpose |
 |---|---|
 | `src/gateway.ts` | gateway registration + webhook verification/classification |
-| `src/mention-parser.ts` | parse literal `@zapbot ...` commands from issue comments |
+| `src/mention-detection.ts` | detect eligible direct `@zapbot` mentions outside quoted/code content |
+| `src/github-control-request.ts` | canonical raw GitHub control envelope with placement context |
 | `src/bridge.ts` | HTTP request handling and orchestrator forwarding |
-| `src/orchestrator/control-event.ts` | render GitHub control input into the orchestrator prompt |
+| `src/orchestrator/github-control-prompt.ts` | render raw GitHub control input into the orchestrator prompt |
 | `src/orchestrator/runtime.ts` | ensure the persistent orchestrator exists and forward prompts via `ao send` |
 | `src/lifecycle/` | managed-session registry, ownership controller, GC planning, lifecycle command model |
 | `bin/resolve-managed-startup-retry.ts` | startup helper that decides whether duplicate-session retry is allowed |

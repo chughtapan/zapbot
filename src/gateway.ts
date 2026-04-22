@@ -8,24 +8,23 @@
  */
 
 import { verifySignature } from "./http/verify-signature.ts";
-import { parseMention } from "./mention-parser.ts";
+import { buildEligibleMentionRequest, type EligibleMentionRequest } from "./github-control-request.ts";
 import {
   asCommentId,
   asIssueNumber,
   err,
   ok,
+  type ProjectName,
 } from "./types.ts";
 import type {
   BotUsername,
-  CommentId,
   DeliveryId,
   GatewayError,
-  IssueNumber,
-  MentionCommand,
   RepoFullName,
   Result,
   WebhookIntakeError,
 } from "./types.ts";
+import { detectEligibleBotMention } from "./mention-detection.ts";
 
 // ── Bridge → gateway registration ───────────────────────────────────
 
@@ -119,23 +118,19 @@ export interface GatewayWebhookEnvelope {
 
 export type ClassifiedWebhook =
   | { readonly kind: "ignore"; readonly reason: string }
-  | {
-      readonly kind: "mention_command";
-      readonly repo: RepoFullName;
-      readonly issue: IssueNumber;
-      readonly commentId: CommentId;
-      readonly commentBody: string;
-      readonly deliveryId: DeliveryId;
-      readonly command: MentionCommand;
-      readonly triggeredBy: string;
-    };
+  | { readonly kind: "mention_request"; readonly request: EligibleMentionRequest };
 
 // ── Boundary schema: issue_comment payload ──────────────────────────
 
 interface IssueCommentPayload {
   readonly action: string;
-  readonly comment: { readonly id: number; readonly body: string };
-  readonly issue: { readonly number: number; readonly isPullRequest: boolean };
+  readonly comment: { readonly id: number; readonly body: string; readonly htmlUrl: string | null };
+  readonly issue: {
+    readonly number: number;
+    readonly isPullRequest: boolean;
+    readonly title: string | null;
+    readonly htmlUrl: string | null;
+  };
   readonly sender: { readonly login: string };
 }
 
@@ -191,6 +186,9 @@ function decodeIssueCommentPayload(
   if (!isNumber(comment.id) || !isString(comment.body)) {
     return { kind: "invalid", reason: "comment.id/body malformed" };
   }
+  if (comment.html_url !== undefined && comment.html_url !== null && !isString(comment.html_url)) {
+    return { kind: "invalid", reason: "comment.html_url malformed" };
+  }
 
   const issue = payload.issue;
   if (!isJsonObject(issue)) {
@@ -198,6 +196,12 @@ function decodeIssueCommentPayload(
   }
   if (!isNumber(issue.number)) {
     return { kind: "invalid", reason: "issue.number malformed" };
+  }
+  if (issue.title !== undefined && issue.title !== null && !isString(issue.title)) {
+    return { kind: "invalid", reason: "issue.title malformed" };
+  }
+  if (issue.html_url !== undefined && issue.html_url !== null && !isString(issue.html_url)) {
+    return { kind: "invalid", reason: "issue.html_url malformed" };
   }
 
   const sender = payload.sender;
@@ -212,10 +216,16 @@ function decodeIssueCommentPayload(
     kind: "decoded",
     value: {
       action,
-      comment: { id: comment.id, body: comment.body },
+      comment: {
+        id: comment.id,
+        body: comment.body,
+        htmlUrl: isString(comment.html_url) ? comment.html_url : null,
+      },
       issue: {
         number: issue.number,
         isPullRequest: issue.pull_request !== undefined && issue.pull_request !== null,
+        title: isString(issue.title) ? issue.title : null,
+        htmlUrl: isString(issue.html_url) ? issue.html_url : null,
       },
       sender: { login: sender.login },
     },
@@ -224,13 +234,13 @@ function decodeIssueCommentPayload(
 
 /**
  * Verify HMAC, then classify the envelope into either `ignore` or a
- * `mention_command`. Only issue-thread `issue_comment.created` events whose
- * body mentions the bot can become `mention_command`; PR-thread comments are
- * canonical-issue misses and are ignored.
+ * `mention_request`. The gateway owns eligibility and placement shaping; AO
+ * owns interpretation of the raw message body.
  */
 export async function verifyAndClassify(
   envelope: GatewayWebhookEnvelope,
   resolveSecret: (repo: RepoFullName) => string | null,
+  resolveProjectName: (repo: RepoFullName) => ProjectName | null,
   botUsername: BotUsername
 ): Promise<Result<ClassifiedWebhook, WebhookIntakeError>> {
   const secret = resolveSecret(envelope.repo);
@@ -247,26 +257,42 @@ export async function verifyAndClassify(
   }
 
   const p = decoded.value;
-  if (p.issue.isPullRequest) {
-    return ok({ kind: "ignore", reason: "pull_request_thread" });
-  }
   if (p.sender.login === (botUsername as unknown as string)) {
     return ok({ kind: "ignore", reason: "self-mention" });
   }
 
-  const command = parseMention(p.comment.body, botUsername);
-  if (command === null) {
+  const mention = detectEligibleBotMention(p.comment.body, botUsername);
+  if (mention._tag === "Err") {
+    return err({ _tag: "PayloadShapeInvalid", reason: mention.error.reason });
+  }
+  if (mention.value === null) {
     return ok({ kind: "ignore", reason: "no bot mention" });
+  }
+  const projectName = resolveProjectName(envelope.repo);
+  if (projectName === null) {
+    return err({ _tag: "ProjectNotConfigured", repo: envelope.repo });
+  }
+  const request = buildEligibleMentionRequest({
+    placement: {
+      repo: envelope.repo,
+      projectName,
+      issue: asIssueNumber(p.issue.number),
+      issueThreadKind: p.issue.isPullRequest ? "pull_request" : "issue",
+      issueTitle: p.issue.title,
+      issueUrl: p.issue.htmlUrl,
+      commentId: asCommentId(p.comment.id),
+      commentUrl: p.comment.htmlUrl,
+      deliveryId: envelope.deliveryId,
+    },
+    rawCommentBody: p.comment.body,
+    triggeredBy: p.sender.login,
+  });
+  if (request._tag === "Err") {
+    return err({ _tag: "PayloadShapeInvalid", reason: request.error.reason });
   }
 
   return ok({
-    kind: "mention_command",
-    repo: envelope.repo,
-    issue: asIssueNumber(p.issue.number),
-    commentId: asCommentId(p.comment.id),
-    commentBody: p.comment.body,
-    deliveryId: envelope.deliveryId,
-    command,
-    triggeredBy: p.sender.login,
+    kind: "mention_request",
+    request: request.value,
   });
 }
