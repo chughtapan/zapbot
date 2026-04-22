@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { loadPrivateKey, createGitHubClient } from "../v2/github/client.js";
+import { loadPrivateKey, createGitHubClient } from "../src/github/client.js";
 import { generateKeyPairSync } from "crypto";
 import { writeFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";

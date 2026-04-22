@@ -42,10 +42,11 @@ Plain-language boundary split:
 | `src/lifecycle/` | managed-session registry, ownership controller, GC planning, lifecycle command model |
 | `bin/resolve-managed-startup-retry.ts` | startup helper that decides whether duplicate-session retry is allowed |
 | `bin/ao-spawn-with-moltzap.ts` | worker spawn helper that preserves MoltZap control linkage |
+| `bin/moltzap-claude-channel.ts` | worker entrypoint that boots the Claude-side MoltZap channel loop |
+| `src/claude-channel/` | local Claude channel server primitives used by the worker runtime |
 | `worker/ao-plugin-agent-claude-moltzap/` | repo-local Claude/MoltZap AO agent plugin |
 | `src/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
-| `src/moltzap/session-client.ts` | load worker-side MoltZap env inside AO sessions |
-| `src/moltzap/channel-runtime.ts` | bind the MoltZap session client to the Claude channel runtime |
+| `src/moltzap/identity-allowlist.ts` | enforce optional sender allowlists on inbound MoltZap events |
 | `src/github-state.ts` | GitHub-native issue state reads |
 | `bin/webhook-bridge.ts` | entrypoint: load config, boot bridge, install reload/shutdown hooks |
 
