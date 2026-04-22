@@ -101,6 +101,9 @@ Example requests:
 Zapbot provisions MoltZap credentials for orchestrator and worker sessions by
 registering fresh runtime identities.
 
+The MoltZap Claude launcher path is Bun/TypeScript-owned. Worker bring-up does
+not require a separate `python3` shim.
+
 | Env | Meaning |
 |---|---|
 | `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for each spawned worker and orchestrator session |

@@ -7,7 +7,9 @@ import { promisify } from "node:util";
 
 const builtinModule = await import(pathToFileURL(resolveBuiltinClaudePluginPath()).href);
 const builtin = builtinModule.create();
-const launchWrapperPath = fileURLToPath(new URL("./launch-claude-moltzap.py", import.meta.url));
+const autoConfirmScriptPath = fileURLToPath(
+  new URL("../../bin/confirm-claude-channel.ts", import.meta.url),
+);
 const execFileAsync = promisify(execFile);
 
 export const manifest = {
@@ -20,20 +22,8 @@ export function create() {
   return {
     ...builtin,
     name: "claude-moltzap",
-    processName: "bash",
     getLaunchCommand(config) {
-      const command = [
-        builtin.getLaunchCommand(config),
-        "--mcp-config",
-        shellEscape(relativeMcpConfigPath()),
-        "--dangerously-load-development-channels",
-        "server:moltzap",
-      ].join(" ");
-      return [
-        "python3",
-        shellEscape(launchWrapperPath),
-        shellEscape(command),
-      ].join(" ");
+      return withClaudeChannelFlags(builtin.getLaunchCommand(config));
     },
     getEnvironment(config) {
       const baseEnv = sanitizeClaudeChannelEnv(builtin.getEnvironment(config));
@@ -56,6 +46,9 @@ export function create() {
       if (session?.workspacePath) {
         ensureChannelMcpConfig(session.workspacePath);
       }
+      if (session?.runtimeHandle?.runtimeName === "tmux" && session.runtimeHandle.id) {
+        await runChannelPromptAutoConfirm(session.runtimeHandle.id);
+      }
     },
     async getRestoreCommand(session, project) {
       if (typeof builtin.getRestoreCommand !== "function") {
@@ -68,13 +61,7 @@ export function create() {
       if (session?.workspacePath) {
         ensureChannelMcpConfig(session.workspacePath);
       }
-      return wrapClaudeCommand(baseCommand);
-    },
-    async isProcessRunning(handle) {
-      if (typeof builtin.isProcessRunning === "function" && (await builtin.isProcessRunning(handle))) {
-        return true;
-      }
-      return isWrapperProcessRunning(handle);
+      return withClaudeChannelFlags(baseCommand);
     },
   };
 }
@@ -235,73 +222,20 @@ function shellEscape(value) {
   return "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
 }
 
-function wrapClaudeCommand(command) {
-  const withChannel = [
+function withClaudeChannelFlags(command) {
+  return [
     command,
     "--mcp-config",
     shellEscape(relativeMcpConfigPath()),
     "--dangerously-load-development-channels",
     "server:moltzap",
   ].join(" ");
-  return [
-    "python3",
-    shellEscape(launchWrapperPath),
-    shellEscape(withChannel),
-  ].join(" ");
 }
 
-async function isWrapperProcessRunning(handle) {
-  if (handle?.runtimeName !== "tmux" || !handle.id) {
-    return false;
-  }
-
-  let ttyOutput = "";
-  try {
-    const { stdout } = await execFileAsync(
-      "tmux",
-      ["list-panes", "-t", handle.id, "-F", "#{pane_tty}"],
-      { timeout: 5_000 },
-    );
-    ttyOutput = stdout;
-  } catch {
-    return false;
-  }
-
-  const ttys = ttyOutput
-    .trim()
-    .split("\n")
-    .map((tty) => tty.trim())
-    .filter(Boolean)
-    .map((tty) => tty.replace(/^\/dev\//, ""));
-
-  if (ttys.length === 0) {
-    return false;
-  }
-
-  try {
-    const { stdout } = await execFileAsync(
-      "ps",
-      ["-eo", "tty=,args="],
-      { timeout: 5_000, maxBuffer: 1024 * 1024 },
-    );
-    const ttySet = new Set(ttys);
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .some((line) => {
-        if (line.length === 0) {
-          return false;
-        }
-        const [tty, ...rest] = line.split(/\s+/);
-        if (tty === undefined || !ttySet.has(tty)) {
-          return false;
-        }
-        const args = rest.join(" ");
-        return args.includes("launch-claude-moltzap.py");
-      });
-  } catch {
-    return false;
-  }
+async function runChannelPromptAutoConfirm(tmuxTarget) {
+  await execFileAsync("bun", [autoConfirmScriptPath, "--tmux-target", tmuxTarget], {
+    timeout: 20_000,
+  });
 }
 
 export default { manifest, create, detect };
