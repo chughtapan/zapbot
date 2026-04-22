@@ -30,6 +30,8 @@ GitHub issue_comment webhook
 | `src/bridge.ts` | HTTP request handling and orchestrator forwarding |
 | `src/orchestrator/control-event.ts` | render GitHub control input into the orchestrator prompt |
 | `src/orchestrator/runtime.ts` | ensure the persistent orchestrator exists and forward prompts via `ao send` |
+| `src/lifecycle/` | managed-session registry, ownership controller, GC planning, lifecycle command model |
+| `bin/resolve-managed-startup-retry.ts` | startup helper that decides whether duplicate-session retry is allowed |
 | `bin/ao-spawn-with-moltzap.ts` | worker spawn helper that preserves MoltZap control linkage |
 | `worker/ao-plugin-agent-claude-moltzap/` | repo-local Claude/MoltZap AO agent plugin |
 | `src/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
@@ -72,8 +74,29 @@ runtime. Its responsibility is narrower:
 The worker plugin and local Claude channel runtime are responsible for actually
 using those credentials.
 
+## Managed session ownership
+
+Lifecycle ownership is explicit, not inferred from names.
+
+- Each project keeps a local `.zapbot-managed-sessions.json` registry beside
+  `agent-orchestrator.yaml`.
+- `src/orchestrator/runtime.ts` only resolves a reusable orchestrator session if
+  there is a matching zapbot-managed orchestrator record in that registry.
+- `bin/ao-spawn-with-moltzap.ts` upserts worker records with `scope: "worker"`
+  and `origin: "ao-spawn-with-moltzap.ts"` once worker metadata exposes the
+  `worktree` and `tmuxName`.
+- `src/lifecycle/gc.ts` only plans or removes stale records that are explicitly
+  tagged `managed: true` and `owner: "zapbot"`.
+- Manual or pre-existing tmux sessions that are not in the registry are out of
+  scope for automation.
+
 ## Reload and shutdown
 
 - `SIGHUP` re-reads `.env` and `agent-orchestrator.yaml`, rebuilds `BridgeConfig`,
   and re-registers bridge routes with the gateway.
 - `SIGINT` / `SIGTERM` stop the HTTP server and deregister bridge routes.
+- `start.sh` duplicate-session retry is lifecycle-gated: it may stop only a
+  matching managed orchestrator record, never a session chosen by tmux-name
+  heuristic.
+- The current operator floor is: use the registry to decide what is safe to
+  inspect or clean up, and leave anything outside that registry alone.

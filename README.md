@@ -217,6 +217,39 @@ If `ZAPBOT_GATEWAY_URL` is unset or blank, the receipt switches to
 markers. If the readiness lines do not appear earlier in the shell output,
 check `/tmp/zapbot-ao.log` and `/tmp/zapbot-bridge.log`.
 
+## Managed session lifecycle
+
+Lifecycle ownership is explicit and project-local. Zapbot writes a registry
+file named `.zapbot-managed-sessions.json` beside `agent-orchestrator.yaml`,
+and only the sessions recorded there are eligible for automation.
+
+Current lifecycle behavior:
+
+- `start.sh` retries after a duplicate orchestrator only when the duplicate
+  matches a zapbot-managed orchestrator record in the project registry.
+- `bin/ao-spawn-with-moltzap.ts` records each spawned worker in that same
+  registry once the worker metadata exposes `worktree` and `tmuxName`.
+- `Ctrl+C` in the `start.sh` shell stops only the bridge and AO parent
+  processes it launched. It does not scan tmux names and does not kill sessions
+  by heuristic.
+- Manual or pre-existing tmux sessions are out of scope. If a session is not in
+  `.zapbot-managed-sessions.json`, zapbot must not stop or garbage-collect it.
+
+Useful inspection commands from the project checkout:
+
+```bash
+jq '.records[] | {session: .tag.sessionName, scope: .tag.scope, phase: .phase, tmux: .tmuxName, worktree: .worktree}' \
+  .zapbot-managed-sessions.json
+
+ao status --json | jq '.[] | {name, role, status}'
+```
+
+Safe manual cleanup rule:
+
+- Start from `.zapbot-managed-sessions.json`, not from guessed tmux names.
+- If you inspect a live session, use the `tmuxName` recorded in that registry.
+- If a session is manual or absent from the registry, leave it alone.
+
 ## Dummy-project demo
 
 This demo assumes you want `github-demo` mode with a reachable public bridge
@@ -272,7 +305,26 @@ gh issue comment "$ISSUE_B" --repo owner/zapbot-demo --body '@zapbot investigate
 - the orchestrator talking to each worker over MoltZap, then writing durable
   output back to GitHub
 
-5. A simple communication sketch:
+5. Confirm the local lifecycle state from the project checkout:
+
+```bash
+jq '.records[] | {session: .tag.sessionName, scope: .tag.scope, phase: .phase, tmux: .tmuxName}' \
+  .zapbot-managed-sessions.json
+
+ORCH_TMUX="$(jq -r '.records[] | select(.tag.scope==\"orchestrator\") | .tmuxName' .zapbot-managed-sessions.json)"
+tmux attach -t "$ORCH_TMUX"
+```
+
+You should see exactly one orchestrator record and two worker records in the
+managed-session registry. If you want to inspect the workers too, use the
+registry values instead of guessing session names:
+
+```bash
+jq -r '.records[] | select(.tag.scope=="worker") | .tmuxName' \
+  .zapbot-managed-sessions.json
+```
+
+6. A simple communication sketch:
 
 ```text
 orchestrator -> worker #1: inspect src/ and report the risky path
@@ -281,6 +333,14 @@ worker #1 -> orchestrator: findings for src/
 worker #2 -> orchestrator: findings for test/
 orchestrator -> GitHub: consolidated summary
 ```
+
+7. Clean shutdown:
+
+- Stop the demo by pressing `Ctrl+C` in the `start.sh` shell that launched it.
+- If you inspect any leftovers manually, compare them against
+  `.zapbot-managed-sessions.json` first.
+- Do not kill a tmux session because the name "looks like zapbot"; only
+  sessions explicitly recorded as managed are in scope.
 
 ## Add another repo later
 
