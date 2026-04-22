@@ -21,6 +21,15 @@ GitHub issue_comment webhook
   -> worker plugin boots Claude + local MoltZap channel runtime
 ```
 
+Plain-language boundary split:
+
+- The bridge verifies GitHub input and forwards only allowed control events.
+- The orchestrator is the one persistent per-project session that decides
+  whether more work is needed.
+- Workers are disposable task sessions; they do not own project lifecycle.
+- The lifecycle registry is the ownership ledger that decides which sessions
+  zapbot may reuse, stop, or garbage-collect.
+
 ## Key modules
 
 | Path | Purpose |
@@ -89,6 +98,9 @@ Lifecycle ownership is explicit, not inferred from names.
   tagged `managed: true` and `owner: "zapbot"`.
 - Manual or pre-existing tmux sessions that are not in the registry are out of
   scope for automation.
+- The registry is a local operator ledger, not an authentication boundary. Use
+  it to decide what zapbot owns, then confirm live runtime state with `ao
+  status` before touching a session by hand.
 
 ## Reload and shutdown
 
@@ -100,3 +112,5 @@ Lifecycle ownership is explicit, not inferred from names.
   heuristic.
 - The current operator floor is: use the registry to decide what is safe to
   inspect or clean up, and leave anything outside that registry alone.
+- GitHub comment intake is still permission-gated at the bridge layer before a
+  control event reaches the orchestrator.

@@ -223,6 +223,17 @@ Lifecycle ownership is explicit and project-local. Zapbot writes a registry
 file named `.zapbot-managed-sessions.json` beside `agent-orchestrator.yaml`,
 and only the sessions recorded there are eligible for automation.
 
+Terms used in this section:
+
+- A session is a live AO runtime session.
+- A registry record is one JSON row in `.zapbot-managed-sessions.json`.
+- An orchestrator session is the long-lived AO session for one project.
+- A worker session is a short-lived AO session spawned for one issue or task.
+- A managed session is a registry record tagged `managed: true` and owned by
+  `zapbot`.
+- `github-demo` mode means `start.sh` is running with public GitHub ingress,
+  not `local-only` mode.
+
 Current lifecycle behavior:
 
 - `start.sh` retries after a duplicate orchestrator only when the duplicate
@@ -234,6 +245,11 @@ Current lifecycle behavior:
   by heuristic.
 - Manual or pre-existing tmux sessions are out of scope. If a session is not in
   `.zapbot-managed-sessions.json`, zapbot must not stop or garbage-collect it.
+- Only GitHub users with write access to the repo can drive the `@zapbot ...`
+  control path. Random issue commenters are not part of the control boundary.
+- Bridge secrets such as `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`, and
+  `GITHUB_APP_PRIVATE_KEY` stay on the bridge host and are not forwarded into
+  AO child sessions.
 
 Useful inspection commands from the project checkout:
 
@@ -250,11 +266,22 @@ Safe manual cleanup rule:
 - If you inspect a live session, use the `tmuxName` recorded in that registry.
 - If a session is manual or absent from the registry, leave it alone.
 
+Registry field meanings:
+
+- `tag.sessionName` is the AO session identity.
+- `tag.scope` tells you whether the record is for the orchestrator, a worker,
+  or another managed surface.
+- `phase` is zapbot's lifecycle view of the record, not a promise that the
+  session is still live.
+- `tmuxName` is the attach target when zapbot knows one.
+- `worktree` is the checkout path that session was launched from.
+
 ## Dummy-project demo
 
 This demo assumes you want `github-demo` mode with a reachable public bridge
 URL and a reachable MoltZap server. It fails closed if the bridge URL is
-missing or unreachable.
+missing or unreachable. Use a throwaway private repo for this demo; the final
+cleanup step deletes it.
 
 1. Create a dummy project checkout, initialize zapbot, and start the stack:
 
@@ -281,10 +308,21 @@ runtime:
   `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` in the project `.env`.
 - If `ZAPBOT_GATEWAY_URL` trims to empty, `start.sh` stays `local-only` and
   will not run the GitHub-backed demo path.
+- If you use `ZAPBOT_GITHUB_TOKEN`, it should be a token that can create the
+  throwaway repo and comment on its issues. If you use GitHub App env instead,
+  those values come from the App you configured for this demo repo.
 
 ```bash
 /path/to/zapbot/start.sh .
 ```
+
+Expected startup receipts:
+
+- success: the shell receipt shows `Mode: github-demo`
+- missing public URL: `start.sh` exits with `ZAPBOT_BRIDGE_URL is missing`
+- unreachable public URL: `start.sh` exits with `ZAPBOT_BRIDGE_URL is unreachable`
+- after successful startup, `curl -fsS "${ZAPBOT_BRIDGE_URL%/}/healthz"` should
+  return `ok`
 
 3. Open two issues in that repo, then comment on each one:
 
@@ -304,6 +342,8 @@ gh issue comment "$ISSUE_B" --repo owner/zapbot-demo --body '@zapbot investigate
 - one MoltZap-linked worker session for `ISSUE_B`
 - the orchestrator talking to each worker over MoltZap, then writing durable
   output back to GitHub
+- only comments from GitHub users with write access to the repo should drive
+  this path
 
 5. Confirm the local lifecycle state from the project checkout:
 
@@ -324,6 +364,14 @@ jq -r '.records[] | select(.tag.scope=="worker") | .tmuxName' \
   .zapbot-managed-sessions.json
 ```
 
+If the counts do not match:
+
+- no orchestrator record: inspect `/tmp/zapbot-ao.log`
+- orchestrator exists but no workers: inspect the orchestrator session and
+  `/tmp/zapbot-bridge.log`
+- `Mode: local-only` in the startup receipt: your gateway/public URL demo env
+  did not activate
+
 6. A simple communication sketch:
 
 ```text
@@ -337,10 +385,20 @@ orchestrator -> GitHub: consolidated summary
 7. Clean shutdown:
 
 - Stop the demo by pressing `Ctrl+C` in the `start.sh` shell that launched it.
+- `Ctrl+C` stops the bridge and AO parent processes from that shell. It is not
+  a global garbage-collect command for every managed session record.
 - If you inspect any leftovers manually, compare them against
   `.zapbot-managed-sessions.json` first.
+- If a registry record remains after shutdown, check whether it still appears in
+  `ao status --json` before you touch it. A stale record is not the same thing
+  as a live session.
 - Do not kill a tmux session because the name "looks like zapbot"; only
   sessions explicitly recorded as managed are in scope.
+- When you are done with the throwaway demo, delete the repo you created:
+
+```bash
+gh repo delete owner/zapbot-demo --yes
+```
 
 ## Add another repo later
 
