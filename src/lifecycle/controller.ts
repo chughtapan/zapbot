@@ -4,7 +4,9 @@ import type {
   ManagedSessionLifecycleError,
   ManagedSessionLifecycleReport,
   ManagedSessionRecord,
+  ManagedSessionRegistryError,
   ManagedSessionRegistry,
+  ManagedSessionRuntimeError,
   ManagedSessionRuntime,
 } from "./contracts.ts";
 
@@ -197,11 +199,9 @@ function isManagedRecord(record: ManagedSessionClaimRequest["record"]): boolean 
   return record.tag.managed && record.tag.owner === "zapbot";
 }
 
-function mapRegistryError(error: ManagedSessionRegistry["put"] extends (
-  ...args: never[]
-) => Promise<Result<never, infer E>>
-  ? E
-  : never): ManagedSessionLifecycleError {
+function mapRegistryError(
+  error: ManagedSessionRegistryError,
+): ManagedSessionLifecycleError {
   switch (error._tag) {
     case "ManagedSessionNotFound":
       return {
@@ -220,16 +220,12 @@ function mapRegistryError(error: ManagedSessionRegistry["put"] extends (
         _tag: "ManagedSessionRegistryFailed",
         cause: "reason" in error ? error.reason : error.cause,
       };
-    default:
-      return error;
   }
 }
 
-function mapRuntimeError(error: ManagedSessionRuntime["start"] extends (
-  ...args: never[]
-) => Promise<Result<never, infer E>>
-  ? E
-  : never): ManagedSessionLifecycleError {
+function mapRuntimeError(
+  error: ManagedSessionRuntimeError,
+): ManagedSessionLifecycleError {
   switch (error._tag) {
     case "ManagedSessionStartFailed":
     case "ManagedSessionStopFailed":
@@ -239,7 +235,5 @@ function mapRuntimeError(error: ManagedSessionRuntime["start"] extends (
         _tag: "ManagedSessionRuntimeFailed",
         cause: error.cause,
       };
-    default:
-      return error;
   }
 }

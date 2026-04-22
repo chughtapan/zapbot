@@ -1,6 +1,14 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { asAoSessionName, err, ok, type AoSessionName, type ProjectName, type Result } from "../types.ts";
+import {
+  asAoSessionName,
+  asProjectName,
+  err,
+  ok,
+  type AoSessionName,
+  type ProjectName,
+  type Result,
+} from "../types.ts";
 
 export type ManagedSessionId = string & { readonly __brand: "ManagedSessionId" };
 export type ManagedSessionScope = "orchestrator" | "worker" | "bridge";
@@ -420,7 +428,7 @@ function decodeManagedSessionTag(
   return ok({
     managed: true,
     owner: "zapbot",
-    projectName: tag.projectName,
+    projectName: asProjectName(tag.projectName),
     sessionName: asAoSessionName(tag.sessionName),
     scope: tag.scope,
     origin: tag.origin,

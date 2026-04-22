@@ -7,10 +7,18 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  createManagedSessionFileRegistry,
+  isManagedSessionRecord,
+  managedSessionIdFromSessionName,
+  resolveManagedSessionRegistryPath,
+  type ManagedSessionRegistryError,
+  type ManagedSessionRecord,
+} from "../lifecycle/contracts.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
-import { err, ok } from "../types.ts";
+import { asAoSessionName, err, ok } from "../types.ts";
 import type { OrchestratorControlPrompt } from "./control-event.ts";
 
 export interface OrchestratorReady {
@@ -288,22 +296,39 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
     if (sessions._tag === "Err") {
       return err(sessions.error);
     }
-    const found = sessions.value.find((session) => isOrchestratorSession(session, projectName));
-    if (!found) {
-      return err({ _tag: "OrchestratorNotFound", projectName });
-    }
-    const name = found.name ?? found.id ?? sessionNameFor(projectName);
-    if (isNotReadyStatus(found.status)) {
+    const registry = createManagedSessionFileRegistry({
+      registryPath: resolveManagedSessionRegistryPath({
+        configPath: options.configPath,
+      }),
+    });
+    const managed = await registry.listByProject(projectName);
+    if (managed._tag === "Err") {
       return err({
         _tag: "OrchestratorNotReady",
         projectName,
-        reason: `orchestrator session ${name} is ${found.status ?? "not ready"}`,
+        reason: stringifyRegistryError(managed.error),
+      });
+    }
+
+    const found = resolveManagedOrchestratorSession(
+      projectName,
+      sessions.value,
+      managed.value,
+    );
+    if (!found) {
+      return err({ _tag: "OrchestratorNotFound", projectName });
+    }
+    if (isNotReadyStatus(found.session.status)) {
+      return err({
+        _tag: "OrchestratorNotReady",
+        projectName,
+        reason: `orchestrator session ${found.record.tag.sessionName as string} is ${found.session.status ?? "not ready"}`,
       });
     }
     return ok({
-      session: name as AoSessionName,
-      senderId: resolveSenderId(projectName, found),
-      mode: found.status ? "reused" : "started",
+      session: found.record.tag.sessionName,
+      senderId: resolveSenderId(projectName, found.session),
+      mode: found.record.phase === "claimed" ? "started" : "reused",
     });
   }
 
@@ -317,6 +342,9 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
         cause: started.error.stderr.trim().length > 0 ? started.error.stderr.trim() : started.error.cause,
       });
     }
+
+    await claimManagedOrchestratorSession(projectName, options);
+
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const ready = await resolveReadySession(projectName);
       if (ready._tag === "Ok") {
@@ -368,4 +396,95 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
     resolveReady: resolveReadySession,
     sendPrompt,
   };
+}
+
+async function claimManagedOrchestratorSession(
+  projectName: ProjectName,
+  options: AoCliOptions,
+): Promise<void> {
+  const sessions = await runAoCommand(options, ["status", "--project", projectName as string, "--json"]);
+  if (sessions._tag === "Err") {
+    return;
+  }
+  const parsed = parseStatusSessions(sessions.value.stdout);
+  if (parsed._tag === "Err") {
+    return;
+  }
+
+  const statusSession = parsed.value.find((session) => isOrchestratorSession(session, projectName));
+  if (statusSession === undefined) {
+    return;
+  }
+
+  const sessionName = asAoSessionName(
+    statusSession.name ?? statusSession.id ?? sessionNameFor(projectName),
+  );
+  const registry = createManagedSessionFileRegistry({
+    registryPath: resolveManagedSessionRegistryPath({
+      configPath: options.configPath,
+    }),
+  });
+  await registry.put({
+    id: managedSessionIdFromSessionName(sessionName),
+    tag: {
+      managed: true,
+      owner: "zapbot",
+      projectName,
+      sessionName,
+      scope: "orchestrator",
+      origin: "start.sh",
+      claimedAtMs: Date.now(),
+    },
+    tmuxName: statusSession.name ?? statusSession.id ?? null,
+    worktree: null,
+    processId: null,
+    phase: "active",
+    lastHeartbeatAtMs: Date.now(),
+  });
+}
+
+function resolveManagedOrchestratorSession(
+  projectName: ProjectName,
+  sessions: readonly AoStatusSession[],
+  managedRecords: ReadonlyArray<ManagedSessionRecord>,
+): { readonly session: AoStatusSession; readonly record: ManagedSessionRecord } | null {
+  const managed = managedRecords.filter(
+    (record) =>
+      isManagedSessionRecord(record) &&
+      record.tag.projectName === projectName &&
+      record.tag.scope === "orchestrator",
+  );
+  for (const record of managed) {
+    const found = sessions.find((session) => matchesManagedSessionRecord(session, record));
+    if (found !== undefined) {
+      return {
+        session: found,
+        record,
+      };
+    }
+  }
+  return null;
+}
+
+function matchesManagedSessionRecord(
+  session: AoStatusSession,
+  record: ManagedSessionRecord,
+): boolean {
+  const name = session.name ?? session.id;
+  if (typeof name !== "string" || name.length === 0) {
+    return false;
+  }
+  return managedSessionIdFromSessionName(asAoSessionName(name)) === record.id;
+}
+
+function stringifyRegistryError(error: ManagedSessionRegistryError): string {
+  switch (error._tag) {
+    case "ManagedSessionRegistryUnavailable":
+      return error.cause;
+    case "ManagedSessionRecordCorrupt":
+      return error.reason;
+    case "ManagedSessionAlreadyOwned":
+    case "ManagedSessionNotFound":
+      return error.sessionId;
+  }
 }

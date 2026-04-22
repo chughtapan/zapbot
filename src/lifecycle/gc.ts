@@ -5,7 +5,9 @@ import type {
   ManagedSessionGcPolicy,
   ManagedSessionGcReport,
   ManagedSessionRecord,
+  ManagedSessionRegistryError,
   ManagedSessionRegistry,
+  ManagedSessionRuntimeError,
   ManagedSessionRuntime,
 } from "./contracts.ts";
 
@@ -29,7 +31,7 @@ export async function planManagedSessionGc(
   if (managed._tag === "Err") {
     return err({
       _tag: "ManagedSessionGcRegistryFailed",
-      cause: "reason" in managed.error ? managed.error.reason : managed.error.cause,
+      cause: stringifyRegistryError(managed.error),
     });
   }
 
@@ -63,7 +65,15 @@ export async function runManagedSessionGc(
     return plan;
   }
 
-  const liveIds = new Set(plan.value.candidates.map((record) => record.id));
+  const live = await request.runtime.list(request.policy.projectName);
+  if (live._tag === "Err") {
+    return err({
+      _tag: "ManagedSessionGcRuntimeFailed",
+      cause: stringifyRuntimeError(live.error),
+    });
+  }
+
+  const liveIds = new Set(live.value.map((record) => record.id));
   const stopped: ManagedSessionRecord["id"][] = [];
   for (const record of plan.value.stale) {
     if (liveIds.has(record.id)) {
@@ -79,7 +89,7 @@ export async function runManagedSessionGc(
     if (deleted._tag === "Err") {
       return err({
         _tag: "ManagedSessionGcRegistryFailed",
-        cause: "reason" in deleted.error ? deleted.error.reason : deleted.error.cause,
+        cause: stringifyRegistryError(deleted.error),
       });
     }
     stopped.push(record.id);
@@ -122,4 +132,20 @@ function isStaleManagedSession(
     return false;
   }
   return now - record.lastHeartbeatAtMs >= policy.maxIdleMs;
+}
+
+function stringifyRegistryError(error: ManagedSessionRegistryError): string {
+  switch (error._tag) {
+    case "ManagedSessionRegistryUnavailable":
+      return error.cause;
+    case "ManagedSessionRecordCorrupt":
+      return error.reason;
+    case "ManagedSessionAlreadyOwned":
+    case "ManagedSessionNotFound":
+      return error.sessionId;
+  }
+}
+
+function stringifyRuntimeError(error: ManagedSessionRuntimeError): string {
+  return error.cause;
 }
