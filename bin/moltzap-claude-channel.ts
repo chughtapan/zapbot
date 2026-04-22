@@ -3,7 +3,6 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import type { Message as MoltzapMessage } from "@moltzap/protocol";
 import { MoltZapService } from "@moltzap/client";
 import { toClaudeChannelNotification } from "../src/claude-channel/event.ts";
 import {
@@ -421,7 +420,7 @@ interface ConversationListResult {
 }
 
 interface MessageListResult {
-  readonly messages: ReadonlyArray<MoltzapMessage>;
+  readonly messages: ReadonlyArray<MoltzapMessageLike>;
 }
 
 async function sweepUnreadConversations(options: {
@@ -460,7 +459,7 @@ async function sweepUnreadConversations(options: {
       left.createdAt.localeCompare(right.createdAt),
     );
     for (const message of ordered) {
-      const senderId = extractSenderId(message as MoltzapMessageLike);
+      const senderId = extractSenderId(message);
       if (senderId === (options.localSenderId as string)) {
         continue;
       }
