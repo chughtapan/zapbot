@@ -99,12 +99,11 @@ Zapbot does not splice raw comment text into a shell command.
 
 Zapbot can provision MoltZap credentials for orchestrator and worker sessions.
 
-Supported modes:
+Operator env:
 
 | Env | Meaning |
 |---|---|
-| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for each spawned worker; this takes precedence over a static API key if both are set |
-| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_API_KEY` | pass through a pre-provisioned MoltZap agent key to the runtime |
+| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for each spawned worker and let the session runtime persist its session-local `MOLTZAP_API_KEY` for resume |
 | `ZAPBOT_MOLTZAP_ALLOWED_SENDERS` | optional comma-separated sender allowlist forwarded to the session runtime |
 
 If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap.
@@ -118,7 +117,9 @@ Worker env posture:
   the repo. That token stays inside the local trust boundary: the bridge
   process and its AO child processes on the operator machine. It is not meant
   to cross into GitHub, MoltZap messages, or published artifacts.
-- Zapbot forwards `MOLTZAP_*` only when MoltZap is configured.
+- Zapbot forwards `MOLTZAP_*` only when MoltZap is configured. Operators set
+  `ZAPBOT_*`; the session-local `MOLTZAP_API_KEY` is minted during
+  registration and reused only for session resume.
 - Zapbot does **not** forward `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`, or
   `GITHUB_APP_PRIVATE_KEY` into AO child processes.
 
@@ -182,7 +183,6 @@ GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
 
 # Optional: MoltZap
 # ZAPBOT_MOLTZAP_SERVER_URL=wss://moltzap.example/ws
-# ZAPBOT_MOLTZAP_API_KEY=...
 # ZAPBOT_MOLTZAP_REGISTRATION_SECRET=...
 # ZAPBOT_MOLTZAP_ALLOWED_SENDERS=agent-a,agent-b
 ```
@@ -361,7 +361,7 @@ Demo env checklist:
 | `ZAPBOT_GATEWAY_URL` | yes for `github-demo` | `https://gateway.example.com` | your public gateway/proxy URL | startup stays `local-only` or demo cannot ingress |
 | `ZAPBOT_BRIDGE_URL` | yes for `github-demo` | `https://bridge.example.com` | the public URL that reaches this bridge host | startup exits `missing` or `unreachable` |
 | `ZAPBOT_MOLTZAP_SERVER_URL` | yes for this demo | `wss://moltzap.example/ws` | your MoltZap server | workers come up without live MoltZap coordination |
-| `ZAPBOT_MOLTZAP_API_KEY` or `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | yes for this demo | `mz_...` or shared registration secret | your MoltZap deployment | worker provisioning fails |
+| `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | yes for this demo | shared registration secret | your MoltZap deployment | worker provisioning fails |
 
 ```bash
 "$ZAPBOT_DIR/start.sh" .

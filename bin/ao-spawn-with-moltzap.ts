@@ -15,13 +15,6 @@ import {
 } from "../src/lifecycle/contracts.ts";
 import { asAoSessionName, asProjectName } from "../src/types.ts";
 
-const MOLTZAP_ENV_FALLBACKS = {
-  MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
-  MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
-  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
-  MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
-} as const;
-
 interface WorkerSessionMetadata {
   readonly worktree: string;
   readonly tmuxName: string;
@@ -43,9 +36,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number> | --prompt <text>");
   }
 
-  const moltzapEnvFile = readZapbotEnvFile();
-  const sessionDataDir = requireEnv("AO_DATA_DIR", moltzapEnvFile);
-  const currentSession = requireEnv("AO_SESSION", moltzapEnvFile);
+  const runtimeEnvFile = readZapbotEnvFile();
+  const sessionDataDir = requireEnv("AO_DATA_DIR", runtimeEnvFile);
+  const currentSession = requireEnv("AO_SESSION", runtimeEnvFile);
   const projectId = trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
   const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
   const orchestratorSenderId = resolveMetadataValue(
@@ -53,10 +46,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     "moltzap_sender_id",
     sessionDataDir,
   ) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
-  const serverUrl = requireEnv("MOLTZAP_SERVER_URL", moltzapEnvFile);
+  const serverUrl = requireEnv("MOLTZAP_SERVER_URL", runtimeEnvFile);
   const registrationSecret = requireEnv(
     "MOLTZAP_REGISTRATION_SECRET",
-    moltzapEnvFile,
+    runtimeEnvFile,
   );
   const beforeSessions = new Set(listSessionNames(sessionDataDir));
 
@@ -70,7 +63,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   };
   delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
-  const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS", moltzapEnvFile);
+  const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS", runtimeEnvFile);
   if (allowedSenders !== null) {
     childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
   }
@@ -502,8 +495,8 @@ async function runCommand(
   });
 }
 
-function requireEnv(name: string, moltzapEnvFile: Record<string, string>): string {
-  const value = resolveRuntimeEnv(name, moltzapEnvFile);
+function requireEnv(name: string, runtimeEnvFile: Record<string, string>): string {
+  const value = resolveRuntimeEnv(name, runtimeEnvFile);
   if (value === null) {
     fatal(`${name} is required`);
   }
@@ -512,33 +505,17 @@ function requireEnv(name: string, moltzapEnvFile: Record<string, string>): strin
 
 function resolveRuntimeEnv(
   name: string,
-  moltzapEnvFile: Record<string, string>,
+  runtimeEnvFile: Record<string, string>,
 ): string | null {
   const direct = trimEnv(process.env[name]);
   if (direct !== null) {
     return direct;
   }
 
-  const fallbackKey = MOLTZAP_ENV_FALLBACKS[name as keyof typeof MOLTZAP_ENV_FALLBACKS];
-  if (fallbackKey !== undefined) {
-    const mappedProcessValue = trimEnv(process.env[fallbackKey]);
-    if (mappedProcessValue !== null) {
-      return mappedProcessValue;
-    }
-  }
-
-  const fileValue = trimEnv(moltzapEnvFile[name]);
+  const fileValue = trimEnv(runtimeEnvFile[name]);
   if (fileValue !== null) {
     return fileValue;
   }
-
-  if (fallbackKey !== undefined) {
-    const mappedFileValue = trimEnv(moltzapEnvFile[fallbackKey]);
-    if (mappedFileValue !== null) {
-      return mappedFileValue;
-    }
-  }
-
   return null;
 }
 

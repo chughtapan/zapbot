@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { upsertManagedWorkerRegistration } from "../bin/ao-spawn-with-moltzap.ts";
+import process from "node:process";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { main, upsertManagedWorkerRegistration } from "../bin/ao-spawn-with-moltzap.ts";
 import {
   createManagedSessionFileRegistry,
   managedSessionIdFromSessionName,
@@ -11,11 +12,14 @@ import {
 import { asAoSessionName, asProjectName } from "../src/types.ts";
 
 const tempDirs: string[] = [];
+const originalEnv = { ...process.env };
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
+  process.env = { ...originalEnv };
+  vi.restoreAllMocks();
 });
 
 describe("upsertManagedWorkerRegistration", () => {
@@ -100,5 +104,36 @@ describe("upsertManagedWorkerRegistration", () => {
       _tag: "Ok",
       value: updated,
     });
+  });
+
+  it("does not treat ZAPBOT_* MoltZap vars as runtime env inputs", async () => {
+    const sessionDataDir = mkdtempSync(join(tmpdir(), "zapbot-worker-runtime-env-"));
+    tempDirs.push(sessionDataDir);
+    const sessionName = "orch-1";
+    writeFileSync(
+      join(sessionDataDir, sessionName),
+      "moltzap_sender_id=orch-1\n",
+      "utf8",
+    );
+
+    process.env = { ...originalEnv };
+    process.env.ZAPBOT_ENV_PATH = join(sessionDataDir, ".env");
+    process.env.AO_DATA_DIR = sessionDataDir;
+    process.env.AO_SESSION = sessionName;
+    process.env.ZAPBOT_MOLTZAP_SERVER_URL = "wss://moltzap.example/ws";
+    process.env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET = "reg-secret";
+    delete process.env.MOLTZAP_SERVER_URL;
+    delete process.env.MOLTZAP_REGISTRATION_SECRET;
+    delete process.env.MOLTZAP_ALLOWED_SENDERS;
+
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code ?? 0}`);
+    }) as never);
+
+    await expect(main(["--prompt", "hello"])).rejects.toThrow("process.exit:1");
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("[ao-spawn-with-moltzap] MOLTZAP_SERVER_URL is required"),
+    );
   });
 });

@@ -30,13 +30,6 @@ export interface MoltzapSpawnContext {
 export type MoltzapRuntimeConfig =
   | { readonly _tag: "MoltzapDisabled" }
   | {
-      readonly _tag: "MoltzapStatic";
-      readonly serverUrl: string;
-      readonly apiKey: string;
-      readonly allowlistCsv: string | null;
-      readonly allowlist: SenderAllowlist;
-    }
-  | {
       readonly _tag: "MoltzapRegistration";
       readonly serverUrl: string;
       readonly registrationSecret: string;
@@ -58,45 +51,44 @@ export function loadMoltzapRuntimeConfig(
   env: Record<string, string | undefined>,
 ): Result<MoltzapRuntimeConfig, MoltzapConfigError> {
   const serverUrl = normalizeEnvVar(env.ZAPBOT_MOLTZAP_SERVER_URL);
-  const apiKey = normalizeEnvVar(env.ZAPBOT_MOLTZAP_API_KEY);
   const registrationSecret = normalizeEnvVar(env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET);
   const allowlistCsv = normalizeCsv(env.ZAPBOT_MOLTZAP_ALLOWED_SENDERS);
   const allowlist = fromSenderIds(parseAllowlist(allowlistCsv));
+  const hasLegacyApiKey = hasNonEmptyEnvVar(env.ZAPBOT_MOLTZAP_API_KEY);
+
+  if (hasLegacyApiKey) {
+    return err({
+      _tag: "MoltzapConfigInvalid",
+      reason:
+        "ZAPBOT_MOLTZAP_API_KEY is no longer supported. Set ZAPBOT_MOLTZAP_SERVER_URL and ZAPBOT_MOLTZAP_REGISTRATION_SECRET to enable MoltZap.",
+    });
+  }
 
   if (serverUrl === null) {
-    if (apiKey !== null || registrationSecret !== null) {
+    if (registrationSecret !== null) {
       return err({
         _tag: "MoltzapConfigInvalid",
-        reason: "ZAPBOT_MOLTZAP_SERVER_URL is required when MoltZap auth is configured.",
+        reason:
+          "Set ZAPBOT_MOLTZAP_SERVER_URL and ZAPBOT_MOLTZAP_REGISTRATION_SECRET together to enable MoltZap.",
       });
     }
     return ok({ _tag: "MoltzapDisabled" });
   }
 
-  if (registrationSecret !== null) {
-    return ok({
-      _tag: "MoltzapRegistration",
-      serverUrl,
-      registrationSecret,
-      allowlistCsv,
-      allowlist,
+  if (registrationSecret === null) {
+    return err({
+      _tag: "MoltzapConfigInvalid",
+      reason:
+        "ZAPBOT_MOLTZAP_REGISTRATION_SECRET is required when ZAPBOT_MOLTZAP_SERVER_URL is configured.",
     });
   }
 
-  if (apiKey !== null) {
-    return ok({
-      _tag: "MoltzapStatic",
-      serverUrl,
-      apiKey,
-      allowlistCsv,
-      allowlist,
-    });
-  }
-
-  return err({
-    _tag: "MoltzapConfigInvalid",
-    reason:
-      "Set either ZAPBOT_MOLTZAP_API_KEY or ZAPBOT_MOLTZAP_REGISTRATION_SECRET when ZAPBOT_MOLTZAP_SERVER_URL is configured.",
+  return ok({
+    _tag: "MoltzapRegistration",
+    serverUrl,
+    registrationSecret,
+    allowlistCsv,
+    allowlist,
   });
 }
 
@@ -107,8 +99,6 @@ export async function buildMoltzapSpawnEnv(
   switch (config._tag) {
     case "MoltzapDisabled":
       return ok({});
-    case "MoltzapStatic":
-      return ok(toSpawnEnv(config.serverUrl, config.apiKey, config.allowlistCsv));
     case "MoltzapRegistration":
       return registerSessionAgent(config, ctx);
     default:
@@ -127,14 +117,6 @@ export function buildMoltzapProcessEnv(
   switch (config._tag) {
     case "MoltzapDisabled":
       return {};
-    case "MoltzapStatic":
-      return {
-        MOLTZAP_SERVER_URL: config.serverUrl,
-        MOLTZAP_API_KEY: config.apiKey,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
-      };
     case "MoltzapRegistration":
       return {
         MOLTZAP_SERVER_URL: config.serverUrl,
@@ -257,6 +239,10 @@ function normalizeEnvVar(raw: string | undefined): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function hasNonEmptyEnvVar(raw: string | undefined): boolean {
+  return normalizeEnvVar(raw) !== null;
 }
 
 function normalizeCsv(raw: string | undefined): string | null {
