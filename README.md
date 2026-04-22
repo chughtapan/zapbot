@@ -286,12 +286,15 @@ cleanup step deletes it.
 1. Create a dummy project checkout, initialize zapbot, and start the stack:
 
 ```bash
+ZAPBOT_DIR=/absolute/path/to/zapbot
+DEMO_OWNER="$(gh api user -q .login)"
+DEMO_REPO="$DEMO_OWNER/zapbot-demo"
 mkdir -p /tmp/zapbot-demo
 cd /tmp/zapbot-demo
 git init -b main
 git commit --allow-empty -m 'chore: bootstrap demo repo'
-gh repo create owner/zapbot-demo --private --source=. --remote=origin --push
-/path/to/zapbot/bin/zapbot-team-init owner/zapbot-demo
+gh repo create "$DEMO_REPO" --private --source=. --remote=origin --push
+"$ZAPBOT_DIR/bin/zapbot-team-init" "$DEMO_REPO"
 ```
 
 2. Before `start.sh .`, make sure the generated `.env` is ready for the
@@ -313,7 +316,7 @@ runtime:
   those values come from the App you configured for this demo repo.
 
 ```bash
-/path/to/zapbot/start.sh .
+"$ZAPBOT_DIR/start.sh" .
 ```
 
 Expected startup receipts:
@@ -327,12 +330,12 @@ Expected startup receipts:
 3. Open two issues in that repo, then comment on each one:
 
 ```bash
-ISSUE_A_URL="$(gh issue create --repo owner/zapbot-demo --title 'agent A' --body 'dummy')"
-ISSUE_B_URL="$(gh issue create --repo owner/zapbot-demo --title 'agent B' --body 'dummy')"
+ISSUE_A_URL="$(gh issue create --repo "$DEMO_REPO" --title 'agent A' --body 'dummy')"
+ISSUE_B_URL="$(gh issue create --repo "$DEMO_REPO" --title 'agent B' --body 'dummy')"
 ISSUE_A="${ISSUE_A_URL##*/issues/}"
 ISSUE_B="${ISSUE_B_URL##*/issues/}"
-gh issue comment "$ISSUE_A" --repo owner/zapbot-demo --body '@zapbot plan this'
-gh issue comment "$ISSUE_B" --repo owner/zapbot-demo --body '@zapbot investigate this'
+gh issue comment "$ISSUE_A" --repo "$DEMO_REPO" --body '@zapbot plan this'
+gh issue comment "$ISSUE_B" --repo "$DEMO_REPO" --body '@zapbot investigate this'
 ```
 
 4. What you should see:
@@ -364,6 +367,10 @@ jq -r '.records[] | select(.tag.scope=="worker") | .tmuxName' \
   .zapbot-managed-sessions.json
 ```
 
+If `tmuxName` is missing for a record, do not guess. Treat that as a signal to
+inspect `ao status --json` and `/tmp/zapbot-ao.log` instead of attaching by
+hand.
+
 If the counts do not match:
 
 - no orchestrator record: inspect `/tmp/zapbot-ao.log`
@@ -392,12 +399,15 @@ orchestrator -> GitHub: consolidated summary
 - If a registry record remains after shutdown, check whether it still appears in
   `ao status --json` before you touch it. A stale record is not the same thing
   as a live session.
+- There is not yet a single \"clean up every managed session\" operator command.
+  The safe fallback is inspection plus exact session targeting, not broad tmux
+  cleanup.
 - Do not kill a tmux session because the name "looks like zapbot"; only
   sessions explicitly recorded as managed are in scope.
 - When you are done with the throwaway demo, delete the repo you created:
 
 ```bash
-gh repo delete owner/zapbot-demo --yes
+gh repo delete "$DEMO_REPO" --yes
 ```
 
 ## Add another repo later
