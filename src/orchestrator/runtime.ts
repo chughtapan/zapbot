@@ -20,7 +20,7 @@ import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
 import { asAoSessionName, asProjectName, err, ok } from "../types.ts";
-import type { OrchestratorControlPrompt } from "./control-event.ts";
+import type { OrchestratorControlPrompt } from "./github-control-prompt.ts";
 
 export interface OrchestratorReady {
   readonly session: AoSessionName;

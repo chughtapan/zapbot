@@ -193,7 +193,7 @@ esac
 
     const forwarded = await forwardControlPrompt(
       asProjectName("app"),
-      { title: "GitHub control", body: "github_comment_body:\n@zapbot plan this" },
+      { title: "GitHub control", body: "github_comment_body:\n@zapbot please decide what to do next" },
       host,
     );
     expect(forwarded).toEqual({
@@ -210,7 +210,7 @@ esac
     expect(log).toContain("send app-orchestrator --file");
     expect(log).toContain("# GitHub control");
     expect(log).toContain("github_comment_body:");
-    expect(log).toContain("@zapbot plan this");
+    expect(log).toContain("@zapbot please decide what to do next");
   });
 
   it("ignores an unregistered orchestrator session even if ao status exposes it by name", async () => {

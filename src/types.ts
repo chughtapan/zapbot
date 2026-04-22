@@ -1,5 +1,5 @@
 /**
- * shared types — branded IDs, discriminated command shapes, typed error tags.
+ * shared types — branded IDs, typed outcomes, and tagged error channels.
  */
 
 // ── Branded identifiers ─────────────────────────────────────────────
@@ -26,18 +26,8 @@ export function err<E>(error: E): Err<E> {
   return { _tag: "Err", error };
 }
 
-// ── Mention command (discriminated union) ───────────────────────────
-
-export type MentionCommand =
-  | { readonly kind: "plan_this" }
-  | { readonly kind: "investigate_this" }
-  | { readonly kind: "status" }
-  | { readonly kind: "unknown_command"; readonly raw: string };
-
 /**
  * Typed outcome for `handleClassifiedWebhook` — one tag per observable branch.
- * `replied` covers status and unknown_command (bridge posted a comment, no
- * dispatch). `ignored` is reserved for classify passthrough.
  */
 export type HandleOutcome =
   | { readonly kind: "ignored"; readonly reason: string }
@@ -46,8 +36,7 @@ export type HandleOutcome =
       readonly repo: RepoFullName;
       readonly session: AoSessionName;
     }
-  | { readonly kind: "unauthorized"; readonly actor: string; readonly reason: string }
-  | { readonly kind: "replied"; readonly command: MentionCommand["kind"] };
+  | { readonly kind: "unauthorized"; readonly actor: string; readonly reason: string };
 
 // ── Errors surfaced across module boundaries ────────────────────────
 
@@ -59,7 +48,8 @@ export type GatewayError =
 export type WebhookIntakeError =
   | { readonly _tag: "SignatureMismatch" }
   | { readonly _tag: "PayloadShapeInvalid"; readonly reason: string }
-  | { readonly _tag: "SecretMissing"; readonly repo: RepoFullName };
+  | { readonly _tag: "SecretMissing"; readonly repo: RepoFullName }
+  | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName };
 
 export type DispatchError =
   | { readonly _tag: "TokenMintFailed"; readonly cause: string }

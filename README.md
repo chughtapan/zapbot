@@ -18,7 +18,7 @@ session for each configured project.
 ## Runtime flow
 
 1. GitHub sends `issue_comment` webhooks to `/api/webhooks/github`.
-2. Zapbot verifies the HMAC and parses a literal `@zapbot ...` command.
+2. Zapbot verifies the HMAC and detects an eligible direct `@zapbot` mention.
 3. Zapbot checks that the commenter has write access.
 4. Zapbot ensures the project's AO orchestrator session is running.
 5. Zapbot forwards the GitHub control event into that orchestrator session.
@@ -81,19 +81,20 @@ If `ZAPBOT_GATEWAY_URL` is unset or only whitespace, `start.sh` stays
 `local-only`. In demo mode, set `ZAPBOT_GATEWAY_URL` and `ZAPBOT_BRIDGE_URL`
 before startup.
 
-### Supported GitHub comment commands
+### GitHub comment ingress
 
-Zapbot only reacts to comments that start with the literal `@zapbot` prefix.
+Zapbot only reacts to issue comments that directly mention `@zapbot` outside
+quoted/code-fenced content.
 
-| Comment | Meaning |
-|---|---|
-| `@zapbot plan this` | ask the orchestrator to plan work for the issue |
-| `@zapbot triage this` | alias for `plan this` |
-| `@zapbot investigate this` | ask the orchestrator to investigate the issue |
-| `@zapbot investigate` | alias for `investigate this` |
-| `@zapbot status` | post a GitHub-native issue summary |
+Zapbot forwards the full raw comment body to AO together with repo, issue,
+comment, and delivery context. The bridge does not maintain a command table and
+does not splice raw comment text into a shell command.
 
-Zapbot does not splice raw comment text into a shell command.
+Example requests:
+
+- `@zapbot please plan the next lane for this issue`
+- `@zapbot investigate why signed comments still fail here`
+- `@zapbot summarize what is blocking this PR and decide the next step`
 
 ## MoltZap
 
@@ -386,8 +387,8 @@ ISSUE_A_URL="$(gh issue create --repo "$DEMO_REPO" --title 'agent A' --body 'dum
 ISSUE_B_URL="$(gh issue create --repo "$DEMO_REPO" --title 'agent B' --body 'dummy')"
 ISSUE_A="${ISSUE_A_URL##*/issues/}"
 ISSUE_B="${ISSUE_B_URL##*/issues/}"
-gh issue comment "$ISSUE_A" --repo "$DEMO_REPO" --body '@zapbot plan this'
-gh issue comment "$ISSUE_B" --repo "$DEMO_REPO" --body '@zapbot investigate this'
+gh issue comment "$ISSUE_A" --repo "$DEMO_REPO" --body '@zapbot please plan the next lane for this issue'
+gh issue comment "$ISSUE_B" --repo "$DEMO_REPO" --body '@zapbot investigate why this second issue is still blocked'
 ```
 
 4. What you should see:
