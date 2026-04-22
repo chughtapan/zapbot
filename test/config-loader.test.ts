@@ -1,198 +1,97 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, mkdtempSync, rmSync, readFileSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
-import {
-  readConfigFiles,
-  parseProjectConfig,
-  type ConfigDiskReader,
-} from "../src/config/disk.js";
-import { resolveRuntimeEnv } from "../src/config/env.js";
-import {
-  deriveConfigSourcePaths,
-  loadBridgeRuntimeConfig,
-} from "../src/config/load.js";
-import type { IngressPolicy } from "../src/config/ingress.js";
-import type { ConfigDiskError } from "../src/config/types.js";
-import type { Result } from "../src/types.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Effect } from "effect";
+import { initializeProjectConfig } from "../src/config/bootstrap.ts";
+import { asRepoCheckoutPath } from "../src/config/home.ts";
+import { createConfigService } from "../src/config/service.ts";
 
-function expectOk<T, E>(result: Result<T, E>): T {
-  if (result._tag === "Err") {
-    throw new Error(JSON.stringify(result.error));
-  }
-  return result.value;
-}
-
-const localOnlyIngress: IngressPolicy = {
-  _tag: "LocalOnly",
-  mode: "local-only",
-  gatewayUrl: null,
-  publicUrl: null,
-  requiresReachablePublicUrl: false,
-};
-
-const nodeDiskReader: ConfigDiskReader = {
-  readText(path) {
-    try {
-      return { _tag: "Ok", value: readFileSync(path, "utf-8") };
-    } catch (cause) {
-      return {
-        _tag: "Err",
-        error: {
-          _tag: "ConfigFileUnreadable",
-          path,
-          cause: String(cause),
-        } satisfies ConfigDiskError,
-      };
-    }
-  },
-};
-
-describe("config load pipeline", () => {
-  let tmpDir: string;
+describe("canonical config service", () => {
+  let fakeHome: string;
+  let checkoutPath: string;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "zapbot-config-test-"));
+    fakeHome = mkdtempSync(join(tmpdir(), "zapbot-home-"));
+    checkoutPath = mkdtempSync(join(tmpdir(), "zapbot-checkout-"));
+    process.env.HOME = fakeHome;
   });
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
+    rmSync(checkoutPath, { recursive: true, force: true });
+    delete process.env.HOME;
   });
 
-  it("parses a valid agent-orchestrator.yaml into bridge runtime routes", () => {
-    const yaml = `
-port: 3000
-projects:
-  zapbot:
-    repo: chughtapan/zapbot
-    path: /home/user/zapbot
-    defaultBranch: main
-    scm:
-      plugin: github
-      webhook:
-        path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
-        signatureHeader: x-hub-signature-256
-        eventHeader: x-github-event
-`;
-    const configPath = join(tmpDir, "agent-orchestrator.yaml");
-    writeFileSync(configPath, yaml);
+  it("loads runtime from ~/.zapbot only", async () => {
+    await Effect.runPromise(initializeProjectConfig({
+      checkoutPath,
+      repo: "chughtapan/zapbot",
+    }));
+    const runtime = await Effect.runPromise(createConfigService().loadProjectRuntime({
+      checkoutPath: asRepoCheckoutPath(checkoutPath),
+    }));
 
-    const document = expectOk(parseProjectConfig(configPath, yaml));
-    const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
-      ZAPBOT_CONFIG: configPath,
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document, localOnlyIngress));
-
-    expect(runtime.routes.size).toBe(1);
+    expect(runtime.projectHome.checkoutPath).toBe(checkoutPath);
     expect(runtime.routes.has("chughtapan/zapbot")).toBe(true);
-    expect(runtime.routes.get("chughtapan/zapbot")!.projectName).toBe("zapbot");
-    expect(runtime.aoConfigPath).toBe(configPath);
+    expect(runtime.apiKey.length).toBeGreaterThan(10);
+    expect(runtime.ingress.mode).toBe("local-only");
   });
 
-  it("builds runtime routes for multiple projects", () => {
-    const yaml = `
-projects:
-  zapbot:
-    repo: chughtapan/zapbot
-    path: /home/user/zapbot
-    defaultBranch: main
-    scm:
-      plugin: github
-      webhook:
-        path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
-        signatureHeader: x-hub-signature-256
-        eventHeader: x-github-event
-  frontend:
-    repo: chughtapan/frontend-app
-    path: /home/user/frontend
-    defaultBranch: trunk
-    scm:
-      plugin: github
-      webhook:
-        path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_WEBHOOK_SECRET_FRONTEND
-        signatureHeader: x-hub-signature-256
-        eventHeader: x-github-event
-`;
+  it("fails closed when repo-local legacy config artifacts are present", async () => {
+    await Effect.runPromise(initializeProjectConfig({
+      checkoutPath,
+      repo: "chughtapan/zapbot",
+    }));
+    writeFileSync(join(checkoutPath, ".env"), "ZAPBOT_API_KEY=legacy\n", "utf8");
 
-    const document = expectOk(parseProjectConfig("agent-orchestrator.yaml", yaml));
-    const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document, localOnlyIngress));
-
-    expect(runtime.routes.size).toBe(2);
-    expect(runtime.routes.get("chughtapan/zapbot")!.projectName).toBe("zapbot");
-    expect(runtime.routes.get("chughtapan/frontend-app")!.projectName).toBe("frontend");
-    expect(runtime.routes.get("chughtapan/frontend-app")!.defaultBranch).toBe("trunk");
-  });
-
-  it("retains the single-repo fallback when no project config is present", () => {
-    const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
-      ZAPBOT_REPO: "owner/my-repo",
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null, localOnlyIngress));
-
-    expect(runtime.routes.size).toBe(1);
-    expect(runtime.routes.has("owner/my-repo")).toBe(true);
-    expect(runtime.routes.get("owner/my-repo")!.projectName).toBe("my-repo");
-  });
-
-  it("returns empty routes when neither project config nor ZAPBOT_REPO is provided", () => {
-    const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null, localOnlyIngress));
-
-    expect(runtime.routes.size).toBe(0);
-  });
-
-  it("derives .env next to the config path", () => {
-    const paths = deriveConfigSourcePaths("/tmp/project/agent-orchestrator.yaml");
-    expect(paths.projectConfigPath).toBe("/tmp/project/agent-orchestrator.yaml");
-    expect(paths.envFilePath).toBe("/tmp/project/.env");
-  });
-
-  it("returns a disk error when the project config path is unreadable", () => {
-    const result = readConfigFiles(
-      deriveConfigSourcePaths("/nonexistent/path/agent-orchestrator.yaml"),
-      nodeDiskReader,
-    );
-
-    expect(result._tag).toBe("Err");
-    if (result._tag === "Err") {
-      expect(result.error._tag).toBe("ConfigFileUnreadable");
+    const result = await Effect.runPromise(Effect.either(createConfigService().loadProjectRuntime({
+      checkoutPath: asRepoCheckoutPath(checkoutPath),
+    })));
+    expect(result._tag).toBe("Left");
+    if (result._tag === "Left") {
+      expect(result.left).toMatchObject({
+        _tag: "LegacyRepoLocalConfigUnsupported",
+        path: join(checkoutPath, ".env"),
+      });
     }
   });
 
-  it("rejects configs that still use ZAPBOT_API_KEY as the webhook secret env var", () => {
-    const yaml = `
-projects:
-  zapbot:
-    repo: chughtapan/zapbot
-    path: /home/user/zapbot
-    defaultBranch: main
-    scm:
-      plugin: github
-      webhook:
-        path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_API_KEY
-        signatureHeader: x-hub-signature-256
-        eventHeader: x-github-event
-`;
-
-    const result = parseProjectConfig("agent-orchestrator.yaml", yaml);
-    expect(result._tag).toBe("Err");
-    if (result._tag === "Err") {
-      expect(result.error._tag).toBe("DeprecatedSecretBinding");
+  it("fails when the canonical home is missing", async () => {
+    rmSync(fakeHome, { recursive: true, force: true });
+    const result = await Effect.runPromise(Effect.either(createConfigService().loadProjectRuntime({
+      checkoutPath: asRepoCheckoutPath(checkoutPath),
+    })));
+    expect(result._tag).toBe("Left");
+    if (result._tag === "Left") {
+      expect(result.left).toMatchObject({
+        _tag: "ZapbotHomeMissing",
+      });
     }
+  });
+
+  it("loads hosted bridge runtime from env via the typed boundary", async () => {
+    process.env.ZAPBOT_CHECKOUT_PATH = checkoutPath;
+    process.env.ZAPBOT_PORT = "3000";
+    process.env.ZAPBOT_AO_PORT = "3001";
+    process.env.ZAPBOT_API_KEY = "api-key";
+    process.env.ZAPBOT_REPO = "owner/repo";
+    process.env.ZAPBOT_WEBHOOK_SECRET = "webhook-secret";
+    process.env.ZAPBOT_GITHUB_TOKEN = "gh-token";
+
+    const runtime = await Effect.runPromise(createConfigService().loadHostedBridgeRuntime());
+    expect(runtime.routes.has("owner/repo")).toBe(true);
+    expect(runtime.githubAuth._tag).toBe("GitHubPat");
+  });
+
+  it("bootstrap stores project config under ~/.zapbot/projects/<key>/project.json", async () => {
+    const receipt = await Effect.runPromise(initializeProjectConfig({
+      checkoutPath,
+      repo: "owner/repo",
+    }));
+
+    mkdirSync(join(fakeHome, ".zapbot"), { recursive: true });
+    expect(receipt.projectHomePath.startsWith(join(fakeHome, ".zapbot", "projects"))).toBe(true);
+    expect(receipt.configPath.endsWith("/project.json")).toBe(true);
   });
 });

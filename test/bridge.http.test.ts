@@ -16,6 +16,7 @@ import {
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import type { AoControlHost } from "../src/orchestrator/runtime.ts";
 import type { RepoFullName } from "../src/types.ts";
+import { createLogger } from "../src/logger.ts";
 
 // Routes covered here are the HTTP-layer routing of the bridge fetch
 // handler — method + path + pre-auth responses. `handleClassifiedWebhook`
@@ -45,7 +46,7 @@ function makeConfig(
   const defaultRepos = new Map<RepoFullName, RepoRoute>();
   defaultRepos.set(asRepoFullName("acme/app"), {
     projectName: asProjectName("app"),
-    webhookSecretEnvVar: "ZAPBOT_WEBHOOK_SECRET",
+    webhookSecret: overrides.webhookSecret ?? WEBHOOK_SECRET,
     defaultBranch: "main",
   });
   return {
@@ -56,7 +57,6 @@ function makeConfig(
     botUsername: asBotUsername("zapbot[bot]"),
     aoConfigPath: "",
     apiKey: overrides.apiKey ?? API_KEY,
-    webhookSecret: overrides.webhookSecret ?? WEBHOOK_SECRET,
     moltzap: { _tag: "MoltzapDisabled" },
     repos: overrides.repos ?? defaultRepos,
   };
@@ -87,8 +87,22 @@ function makeHandler(cfg: BridgeConfig = makeConfig()): (req: Request) => Promis
   const ctx: BridgeHandlerContext = {
     mintToken: async () => null,
     gh: fakeGh(),
+    githubState: {
+      postComment: async () => ok(1 as never),
+      getIssue: async () => ok({
+        repo: asRepoFullName("acme/app"),
+        number: 1 as never,
+        state: "open",
+        labels: [],
+        assignees: [],
+        body: "",
+        author: "alice",
+      }),
+      getLinkedPullRequest: async () => ok(null),
+    },
     aoControlHost: fakeAo(),
     config: cfg,
+    log: createLogger("bridge-http-test", "info"),
   };
   return buildFetchHandler(() => cfg, ctx);
 }
@@ -332,8 +346,22 @@ describe("bridge fetch handler — installation token broker", () => {
         {
           mintToken: async () => minted,
           gh: fakeGh(),
+          githubState: {
+            postComment: async () => ok(1 as never),
+            getIssue: async () => ok({
+              repo: asRepoFullName("acme/app"),
+              number: 1 as never,
+              state: "open",
+              labels: [],
+              assignees: [],
+              body: "",
+              author: "alice",
+            }),
+            getLinkedPullRequest: async () => ok(null),
+          },
           aoControlHost: fakeAo(),
           config: makeConfig(),
+          log: createLogger("bridge-http-test", "info"),
         }
       );
       const r = await get(h, "/api/tokens/installation", {

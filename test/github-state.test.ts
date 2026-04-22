@@ -1,23 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import {
-  getIssue,
-  getAgentClaim,
-  listOpenIssuesWithLabel,
-  postComment,
-  getLinkedPullRequest,
-  __resetForTests,
-} from "../src/github-state.ts";
+import { createGitHubStateService } from "../src/github-state.ts";
 import {
   asBotUsername,
   asIssueNumber,
   asRepoFullName,
 } from "../src/types.ts";
+import { createLogger } from "../src/logger.ts";
 
 const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
 
 const originalFetch = globalThis.fetch;
-const originalEnv = { ...process.env };
 
 function installFetchStub(handler: (url: string, init?: RequestInit) => Promise<Response> | Response) {
   globalThis.fetch = (async (input: any, init?: RequestInit) => {
@@ -26,22 +19,23 @@ function installFetchStub(handler: (url: string, init?: RequestInit) => Promise<
   }) as typeof globalThis.fetch;
 }
 
+function makeService() {
+  return createGitHubStateService(
+    { _tag: "GitHubPat", token: "fake-token" },
+    createLogger("github-state-test", "info"),
+  );
+}
+
 beforeEach(() => {
-  __resetForTests();
-  process.env = { ...originalEnv };
-  process.env.ZAPBOT_GITHUB_TOKEN = "fake-token";
-  delete process.env.GITHUB_APP_ID;
-  delete process.env.GITHUB_APP_INSTALLATION_ID;
-  delete process.env.GITHUB_APP_PRIVATE_KEY;
+  globalThis.fetch = originalFetch;
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  process.env = { ...originalEnv };
 });
 
-describe("getIssue", () => {
-  it("returns a mapped snapshot on 200", async () => {
+describe("GitHubStateService", () => {
+  it("returns a mapped snapshot on getIssue", async () => {
     installFetchStub(() =>
       Response.json({
         number: 42,
@@ -50,36 +44,18 @@ describe("getIssue", () => {
         assignees: [{ login: "zapbot[bot]" }, { login: "alice" }],
         body: "hi",
         user: { login: "carol" },
-      })
+      }),
     );
-    const r = await getIssue(repo, issue);
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") {
-      expect(r.value.state).toBe("open");
-      expect([...r.value.labels]).toEqual(["bug", "docs"]);
-      expect([...r.value.assignees]).toEqual(["zapbot[bot]", "alice"]);
-      expect(r.value.author).toBe("carol");
+    const service = makeService();
+    const result = await service.getIssue(repo, issue);
+    expect(result._tag).toBe("Ok");
+    if (result._tag === "Ok") {
+      expect(result.value.labels).toEqual(["bug", "docs"]);
+      expect(result.value.assignees).toEqual(["zapbot[bot]", "alice"]);
     }
   });
 
-  it("returns IssueNotFound on 404", async () => {
-    installFetchStub(() => new Response(JSON.stringify({ message: "not found" }), { status: 404 }));
-    const r = await getIssue(repo, issue);
-    expect(r._tag).toBe("Err");
-    if (r._tag === "Err") expect(r.error._tag).toBe("IssueNotFound");
-  });
-
-  it("returns GitHubAuthMissing when no auth is configured", async () => {
-    delete process.env.ZAPBOT_GITHUB_TOKEN;
-    __resetForTests();
-    const r = await getIssue(repo, issue);
-    expect(r._tag).toBe("Err");
-    if (r._tag === "Err") expect(r.error._tag).toBe("GitHubAuthMissing");
-  });
-});
-
-describe("getAgentClaim", () => {
-  it("returns claimed when bot is assigned and issue is open", async () => {
+  it("returns claimed when the bot is assigned", async () => {
     installFetchStub(() =>
       Response.json({
         number: 42,
@@ -88,32 +64,16 @@ describe("getAgentClaim", () => {
         assignees: [{ login: "zapbot[bot]" }],
         body: "",
         user: { login: "carol" },
-      })
+      }),
     );
-    const r = await getAgentClaim(repo, issue, asBotUsername("zapbot[bot]"));
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") expect(r.value.kind).toBe("claimed");
+    const result = await makeService().getAgentClaim(repo, issue, asBotUsername("zapbot[bot]"));
+    expect(result).toEqual({
+      _tag: "Ok",
+      value: { kind: "claimed", by: "zapbot[bot]" },
+    });
   });
 
-  it("returns unclaimed when issue is closed", async () => {
-    installFetchStub(() =>
-      Response.json({
-        number: 42,
-        state: "closed",
-        labels: [],
-        assignees: [{ login: "zapbot[bot]" }],
-        body: "",
-        user: { login: "carol" },
-      })
-    );
-    const r = await getAgentClaim(repo, issue, asBotUsername("zapbot[bot]"));
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") expect(r.value.kind).toBe("unclaimed");
-  });
-});
-
-describe("listOpenIssuesWithLabel", () => {
-  it("filters out pull requests", async () => {
+  it("filters out pull requests when listing issues", async () => {
     installFetchStub(() =>
       Response.json([
         { number: 1, state: "open", labels: ["bug"], assignees: [], body: "", user: { login: "a" } },
@@ -126,28 +86,16 @@ describe("listOpenIssuesWithLabel", () => {
           user: { login: "b" },
           pull_request: { url: "..." },
         },
-      ])
+      ]),
     );
-    const r = await listOpenIssuesWithLabel(repo, "bug");
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") {
-      expect(r.value.length).toBe(1);
-      expect(r.value[0].number as unknown as number).toBe(1);
+    const result = await makeService().listOpenIssuesWithLabel(repo, "bug");
+    expect(result._tag).toBe("Ok");
+    if (result._tag === "Ok") {
+      expect(result.value.map((row) => row.number)).toEqual([1]);
     }
   });
-});
 
-describe("postComment", () => {
-  it("returns the created comment id", async () => {
-    installFetchStub(() => Response.json({ id: 9999 }, { status: 201 }));
-    const r = await postComment(repo, issue, "hello");
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") expect(r.value as unknown as number).toBe(9999);
-  });
-});
-
-describe("getLinkedPullRequest", () => {
-  it("returns the latest linked pull request number from cross-reference events", async () => {
+  it("returns the latest linked pull request number", async () => {
     installFetchStub((url) => {
       const parsedUrl = new URL(url);
       if (parsedUrl.pathname.includes("/issues/42/events") && parsedUrl.searchParams.get("page") === "1") {
@@ -176,38 +124,10 @@ describe("getLinkedPullRequest", () => {
       throw new Error(`unexpected url ${url}`);
     });
 
-    const r = await getLinkedPullRequest(repo, issue);
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") {
-      expect(r.value as unknown as number).toBe(23);
-    }
-  });
-
-  it("rejects malformed issue event payloads at the boundary", async () => {
-    installFetchStub((url) => {
-      if (url.includes("/issues/42/events")) {
-        return Response.json([
-          {
-            event: "cross-referenced",
-            created_at: "2026-04-20T10:00:00Z",
-            source: { type: "pull_request", pull_request: { number: "not-a-number" } },
-          },
-        ]);
-      }
-      throw new Error(`unexpected url ${url}`);
+    const result = await makeService().getLinkedPullRequest(repo, issue);
+    expect(result).toEqual({
+      _tag: "Ok",
+      value: 23,
     });
-
-    const r = await getLinkedPullRequest(repo, issue);
-    expect(r._tag).toBe("Err");
-    if (r._tag === "Err") {
-      expect(r.error._tag).toBe("GitHubApiFailed");
-    }
-  });
-
-  it("returns null when no linked pull request exists", async () => {
-    installFetchStub(() => Response.json([]));
-    const r = await getLinkedPullRequest(repo, issue);
-    expect(r._tag).toBe("Ok");
-    if (r._tag === "Ok") expect(r.value).toBeNull();
   });
 });

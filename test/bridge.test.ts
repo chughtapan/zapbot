@@ -10,6 +10,7 @@ import type { ClassifiedWebhook } from "../src/gateway.ts";
 import { buildEligibleMentionRequest } from "../src/github-control-request.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import type { AoControlHost } from "../src/orchestrator/runtime.ts";
+import { createLogger } from "../src/logger.ts";
 import {
   asAoSessionName,
   asBotUsername,
@@ -100,7 +101,7 @@ function makeConfig(withRoute = true): BridgeConfig {
   if (withRoute) {
     repos.set(repo, {
       projectName: asProjectName("app"),
-      webhookSecretEnvVar: "ZAPBOT_WEBHOOK_SECRET",
+      webhookSecret: "test-webhook-secret",
       defaultBranch: "main",
     });
   }
@@ -112,7 +113,6 @@ function makeConfig(withRoute = true): BridgeConfig {
     botUsername: bot,
     aoConfigPath: "",
     apiKey: "test-broker-key",
-    webhookSecret: "test-webhook-secret",
     moltzap: { _tag: "MoltzapDisabled" },
     repos,
   };
@@ -124,13 +124,31 @@ function makeCtx(
     mintToken?: () => Promise<MintedInstallationToken | null>;
     withRoute?: boolean;
     aoControlHost?: AoControlHost;
+    durableComments?: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }>;
   } = {}
 ): BridgeHandlerContext {
   return {
     mintToken: opts.mintToken ?? (async () => null),
     gh,
+    githubState: {
+      postComment: async (repo, issue, body) => {
+        opts.durableComments?.push({ repo, issue, body });
+        return ok(asCommentId(99));
+      },
+      getIssue: async () => ok({
+        repo,
+        number: issue,
+        state: "open",
+        labels: [],
+        assignees: [],
+        body: "",
+        author: "carol",
+      }),
+      getLinkedPullRequest: async () => ok(null),
+    },
     aoControlHost: opts.aoControlHost ?? makeAoHost().host,
     config: makeConfig(opts.withRoute ?? true),
+    log: createLogger("bridge-test", "info"),
   };
 }
 
@@ -222,9 +240,10 @@ describe("handleClassifiedWebhook — mention_request", () => {
   it("forwards control to the persistent orchestrator and preserves raw metadata", async () => {
     const { gh, calls: ghCalls } = makeGh({});
     const { host, calls } = makeAoHost();
+    const durableComments: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }> = [];
     const out = await handleClassifiedWebhook(
       asMentionRequest("@zapbot please investigate this failure"),
-      makeCtx(gh, { aoControlHost: host }),
+      makeCtx(gh, { aoControlHost: host, durableComments }),
     );
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
@@ -241,18 +260,22 @@ describe("handleClassifiedWebhook — mention_request", () => {
     expect(calls.sendPrompt[0].body).toContain("issue_thread_kind: issue");
     expect(calls.sendPrompt[0].body).toContain("github_comment_body:");
     expect(calls.sendPrompt[0].body).toContain("please investigate this failure");
-    expect(ghCalls.postComment[0].body).toContain("Forwarded control event");
+    expect(ghCalls.postComment).toHaveLength(0);
+    expect(durableComments).toHaveLength(1);
+    expect(durableComments[0].body).toContain("Forwarded control event");
   });
 
   it("accepts pull-request issue threads and forwards their placement context", async () => {
     const { gh, calls } = makeGh({});
     const { host, calls: aoCalls } = makeAoHost();
+    const durableComments: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }> = [];
     const out = await handleClassifiedWebhook(
       asMentionRequest("@zapbot please summarize the current PR state", "pull_request"),
-      makeCtx(gh, { aoControlHost: host }),
+      makeCtx(gh, { aoControlHost: host, durableComments }),
     );
     expect(out._tag).toBe("Ok");
-    expect(calls.postComment).toHaveLength(1);
+    expect(calls.postComment).toHaveLength(0);
+    expect(durableComments).toHaveLength(1);
     expect(aoCalls.sendPrompt).toHaveLength(1);
     expect(aoCalls.sendPrompt[0].body).toContain("issue_thread_kind: pull_request");
     expect(aoCalls.sendPrompt[0].body).toContain("please summarize the current PR state");
@@ -261,16 +284,18 @@ describe("handleClassifiedWebhook — mention_request", () => {
   it("does not emit a bridge-side help fallback for arbitrary raw text", async () => {
     const { gh, calls } = makeGh({});
     const { host, calls: aoCalls } = makeAoHost();
+    const durableComments: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }> = [];
     const out = await handleClassifiedWebhook(
       asMentionRequest("@zapbot frobnicate the lane and decide what this means"),
-      makeCtx(gh, { aoControlHost: host }),
+      makeCtx(gh, { aoControlHost: host, durableComments }),
     );
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
       expect(out.value.kind).toBe("dispatched");
     }
-    expect(calls.postComment.length).toBe(1);
-    expect(calls.postComment[0].body).toContain("Forwarded control event");
+    expect(calls.postComment.length).toBe(0);
+    expect(durableComments).toHaveLength(1);
+    expect(durableComments[0].body).toContain("Forwarded control event");
     expect(aoCalls.sendPrompt[0].body).toContain("frobnicate the lane");
   });
 });

@@ -6,8 +6,6 @@ set -euo pipefail
 # updates a GitHub issue with the plan content; nothing more.
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-[ -f "$HOME/.zapbot/.env" ] && set -a && source "$HOME/.zapbot/.env" && set +a
-[ -f ".env" ] && set -a && source ".env" && set +a
 
 PLAN_FILE="${1:-}"
 

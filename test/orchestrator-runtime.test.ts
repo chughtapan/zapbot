@@ -151,7 +151,7 @@ esac
     chmodSync(fakeAo, 0o755);
 
     const registry = createManagedSessionFileRegistry({
-      registryPath: resolveManagedSessionRegistryPath({ configPath }),
+      registryPath: resolveManagedSessionRegistryPath({ projectDir: workdir }),
     });
     await registry.put({
       id: managedSessionIdFromSessionName(asAoSessionName("app-orchestrator")),
@@ -174,6 +174,7 @@ esac
     const host = createAoCliControlHost({
       aoBinary: fakeAo,
       configPath,
+      registryPath: resolveManagedSessionRegistryPath({ projectDir: workdir }),
       env: {
         FAKE_AO_LOG: logFile,
         FAKE_AO_STATUS_JSON: statusJson,
@@ -238,6 +239,7 @@ exit 1
     const host = createAoCliControlHost({
       aoBinary: fakeAo,
       configPath: join(workdir, "agent-orchestrator.yaml"),
+      registryPath: resolveManagedSessionRegistryPath({ projectDir: workdir }),
       env: {
         FAKE_AO_LOG: logFile,
       },

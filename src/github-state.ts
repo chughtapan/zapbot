@@ -1,12 +1,10 @@
 /**
  * github-state — read durable workflow state from GitHub via Octokit.
- *
- * Architect Open Question 2 default B: Octokit directly, not the `gh` CLI.
  */
 
 import { Octokit } from "@octokit/rest";
 import { createAppAuth } from "@octokit/auth-app";
-import { readFileSync } from "fs";
+import type { GitHubAuthConfig } from "./config/schema.ts";
 import {
   asCommentId,
   asIssueNumber,
@@ -21,6 +19,7 @@ import type {
   RepoFullName,
   Result,
 } from "./types.ts";
+import type { Logger } from "./logger.ts";
 
 export type IssueState = "open" | "closed";
 
@@ -34,11 +33,33 @@ export interface IssueSnapshot {
   readonly author: string;
 }
 
-export interface CommentSnapshot {
-  readonly id: CommentId;
-  readonly author: string;
-  readonly body: string;
-  readonly createdAt: string;
+export type Claim =
+  | { readonly kind: "unclaimed" }
+  | { readonly kind: "claimed"; readonly by: BotUsername };
+
+export interface GitHubStateService {
+  readonly getIssue: (
+    repo: RepoFullName,
+    issue: IssueNumber,
+  ) => Promise<Result<IssueSnapshot, GithubStateError>>;
+  readonly getAgentClaim: (
+    repo: RepoFullName,
+    issue: IssueNumber,
+    bot: BotUsername,
+  ) => Promise<Result<Claim, GithubStateError>>;
+  readonly listOpenIssuesWithLabel: (
+    repo: RepoFullName,
+    label: string,
+  ) => Promise<Result<ReadonlyArray<IssueSnapshot>, GithubStateError>>;
+  readonly postComment: (
+    repo: RepoFullName,
+    issue: IssueNumber,
+    body: string,
+  ) => Promise<Result<CommentId, GithubStateError>>;
+  readonly getLinkedPullRequest: (
+    repo: RepoFullName,
+    issue: IssueNumber,
+  ) => Promise<Result<IssueNumber | null, GithubStateError>>;
 }
 
 interface IssueEventSourcePullRequest {
@@ -61,25 +82,124 @@ interface JsonObject {
   readonly [key: string]: unknown;
 }
 
-function isJsonObject(value: unknown): value is JsonObject {
-  return value !== null && typeof value === "object";
-}
+export function createGitHubStateService(
+  auth: GitHubAuthConfig,
+  log: Logger,
+): GitHubStateService {
+  const client = buildOctokit(auth);
 
-function isString(value: unknown): value is string {
-  return typeof value === "string";
-}
+  return {
+    async getIssue(repo, issue) {
+      const r = splitRepo(repo);
+      try {
+        const { data } = await client.rest.issues.get({
+          owner: r.owner,
+          repo: r.repo,
+          issue_number: issue as unknown as number,
+        });
+        return ok({
+          repo,
+          number: issue,
+          state: data.state === "closed" ? "closed" : "open",
+          labels: extractLabels(data.labels ?? []),
+          assignees: extractAssignees(data.assignees ?? null),
+          body: data.body ?? "",
+          author: data.user?.login ?? "",
+        });
+      } catch (error) {
+        log.warn("github_state_get_issue_failed", { repo, issue, cause: stringifyError(error) });
+        return err(toError(repo, issue, error));
+      }
+    },
 
-function isNumber(value: unknown): value is number {
-  return typeof value === "number";
-}
+    async getAgentClaim(repo, issue, bot) {
+      const snap = await this.getIssue(repo, issue);
+      if (snap._tag === "Err") return snap;
+      const botStr = bot as unknown as string;
+      const claimed = snap.value.assignees.includes(botStr) && snap.value.state === "open";
+      return ok(claimed ? { kind: "claimed", by: bot } : { kind: "unclaimed" });
+    },
 
-export type Claim =
-  | { readonly kind: "unclaimed" }
-  | { readonly kind: "claimed"; readonly by: BotUsername };
+    async listOpenIssuesWithLabel(repo, label) {
+      const r = splitRepo(repo);
+      try {
+        const { data } = await client.rest.issues.listForRepo({
+          owner: r.owner,
+          repo: r.repo,
+          state: "open",
+          labels: label,
+          per_page: 100,
+        });
+        return ok(
+          data
+            .filter((row) => !row.pull_request)
+            .map((row) => ({
+              repo,
+              number: asIssueNumber(row.number),
+              state: (row.state === "closed" ? "closed" : "open") as IssueState,
+              labels: extractLabels(row.labels ?? []),
+              assignees: extractAssignees(row.assignees ?? null),
+              body: row.body ?? "",
+              author: row.user?.login ?? "",
+            })),
+        );
+      } catch (error) {
+        log.warn("github_state_list_issues_failed", { repo, label, cause: stringifyError(error) });
+        return err(toError(repo, asIssueNumber(-1), error));
+      }
+    },
+
+    async postComment(repo, issue, body) {
+      const r = splitRepo(repo);
+      try {
+        const { data } = await client.rest.issues.createComment({
+          owner: r.owner,
+          repo: r.repo,
+          issue_number: issue as unknown as number,
+          body,
+        });
+        return ok(asCommentId(data.id));
+      } catch (error) {
+        log.warn("github_state_post_comment_failed", { repo, issue, cause: stringifyError(error) });
+        return err(toError(repo, issue, error));
+      }
+    },
+
+    async getLinkedPullRequest(repo, issue) {
+      const r = splitRepo(repo);
+      try {
+        const events = await listAllIssueEvents(client, r.owner, r.repo, issue as unknown as number);
+        if (events._tag === "Err") return err(events.error);
+        return ok(findLinkedPullRequest(events.value));
+      } catch (error) {
+        log.warn("github_state_linked_pr_failed", { repo, issue, cause: stringifyError(error) });
+        return err(toError(repo, issue, error));
+      }
+    },
+  };
+}
 
 function splitRepo(repo: RepoFullName): { owner: string; repo: string } {
   const [owner, name] = (repo as unknown as string).split("/");
   return { owner, repo: name };
+}
+
+function buildOctokit(auth: GitHubAuthConfig): Octokit {
+  switch (auth._tag) {
+    case "GitHubPat":
+      return new Octokit({ auth: auth.token });
+    case "GitHubApp":
+      return new Octokit({
+        authStrategy: createAppAuth,
+        auth: {
+          appId: auth.appId,
+          installationId: auth.installationId,
+          privateKey: auth.privateKeyPem,
+        },
+      });
+    default:
+      return absurd(auth);
+  }
 }
 
 function toError(repo: RepoFullName, issue: IssueNumber, e: unknown): GithubStateError {
@@ -98,115 +218,6 @@ function extractAssignees(assignees: Array<{ login: string } | null> | null): st
   return (assignees ?? [])
     .map((a) => a?.login ?? "")
     .filter((s) => s !== "");
-}
-
-export async function getIssue(
-  repo: RepoFullName,
-  issue: IssueNumber
-): Promise<Result<IssueSnapshot, GithubStateError>> {
-  const client = getOctokit();
-  if (client === null) return err({ _tag: "GitHubAuthMissing" });
-  const r = splitRepo(repo);
-  try {
-    const { data } = await client.rest.issues.get({
-      owner: r.owner,
-      repo: r.repo,
-      issue_number: issue as unknown as number,
-    });
-    return ok({
-      repo,
-      number: issue,
-      state: data.state === "closed" ? "closed" : "open",
-      labels: extractLabels(data.labels ?? []),
-      assignees: extractAssignees(data.assignees ?? null),
-      body: data.body ?? "",
-      author: data.user?.login ?? "",
-    });
-  } catch (e) {
-    return err(toError(repo, issue, e));
-  }
-}
-
-export async function getAgentClaim(
-  repo: RepoFullName,
-  issue: IssueNumber,
-  bot: BotUsername
-): Promise<Result<Claim, GithubStateError>> {
-  const snap = await getIssue(repo, issue);
-  if (snap._tag === "Err") return snap;
-  const botStr = bot as unknown as string;
-  const claimed = snap.value.assignees.includes(botStr) && snap.value.state === "open";
-  if (claimed) return ok({ kind: "claimed", by: bot });
-  return ok({ kind: "unclaimed" });
-}
-
-export async function listOpenIssuesWithLabel(
-  repo: RepoFullName,
-  label: string
-): Promise<Result<ReadonlyArray<IssueSnapshot>, GithubStateError>> {
-  const client = getOctokit();
-  if (client === null) return err({ _tag: "GitHubAuthMissing" });
-  const r = splitRepo(repo);
-  try {
-    const { data } = await client.rest.issues.listForRepo({
-      owner: r.owner,
-      repo: r.repo,
-      state: "open",
-      labels: label,
-      per_page: 100,
-    });
-    const snaps: IssueSnapshot[] = data
-      .filter((row) => !row.pull_request)
-      .map((row) => ({
-        repo,
-        number: asIssueNumber(row.number),
-        state: (row.state === "closed" ? "closed" : "open") as IssueState,
-        labels: extractLabels(row.labels ?? []),
-        assignees: extractAssignees(row.assignees ?? null),
-        body: row.body ?? "",
-        author: row.user?.login ?? "",
-      }));
-    return ok(snaps);
-  } catch (e) {
-    return err(toError(repo, asIssueNumber(-1), e));
-  }
-}
-
-export async function postComment(
-  repo: RepoFullName,
-  issue: IssueNumber,
-  body: string
-): Promise<Result<CommentId, GithubStateError>> {
-  const client = getOctokit();
-  if (client === null) return err({ _tag: "GitHubAuthMissing" });
-  const r = splitRepo(repo);
-  try {
-    const { data } = await client.rest.issues.createComment({
-      owner: r.owner,
-      repo: r.repo,
-      issue_number: issue as unknown as number,
-      body,
-    });
-    return ok(asCommentId(data.id));
-  } catch (e) {
-    return err(toError(repo, issue, e));
-  }
-}
-
-export async function getLinkedPullRequest(
-  repo: RepoFullName,
-  issue: IssueNumber
-): Promise<Result<IssueNumber | null, GithubStateError>> {
-  const client = getOctokit();
-  if (client === null) return err({ _tag: "GitHubAuthMissing" });
-  const r = splitRepo(repo);
-  try {
-    const events = await listAllIssueEvents(client, r.owner, r.repo, issue as unknown as number);
-    if (events._tag === "Err") return err(events.error);
-    return ok(findLinkedPullRequest(events.value));
-  } catch (e) {
-    return err(toError(repo, issue, e));
-  }
 }
 
 async function listAllIssueEvents(
@@ -305,7 +316,7 @@ function decodeOptionalString(
   message: string,
 ): Result<string | null | undefined, GithubStateError> {
   if (value === undefined || value === null) return ok(value);
-  if (isString(value)) return ok(value);
+  if (typeof value === "string") return ok(value);
   return err({ _tag: "GitHubApiFailed", status: -1, message });
 }
 
@@ -314,7 +325,7 @@ function decodeOptionalNumber(
   message: string,
 ): Result<number | null | undefined, GithubStateError> {
   if (value === undefined || value === null) return ok(value);
-  if (isNumber(value)) return ok(value);
+  if (typeof value === "number") return ok(value);
   return err({ _tag: "GitHubApiFailed", status: -1, message });
 }
 
@@ -345,47 +356,14 @@ function extractPullRequestNumber(source: IssueEventSource | null | undefined): 
   return asIssueNumber(number);
 }
 
-// ── Octokit wiring ──────────────────────────────────────────────────
-
-let _client: Octokit | null = null;
-
-function getOctokit(): Octokit | null {
-  if (_client !== null) return _client;
-  _client = buildOctokit();
-  return _client;
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object";
 }
 
-function buildOctokit(): Octokit | null {
-  const appId = process.env.GITHUB_APP_ID;
-  if (appId) {
-    const installationId = process.env.GITHUB_APP_INSTALLATION_ID;
-    if (!installationId) return null;
-    const privateKey = loadPrivateKey();
-    if (privateKey === null) return null;
-    return new Octokit({
-      authStrategy: createAppAuth,
-      auth: { appId, privateKey, installationId },
-    });
-  }
-  const pat = process.env.ZAPBOT_GITHUB_TOKEN;
-  if (pat) return new Octokit({ auth: pat });
-  return null;
+function stringifyError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function loadPrivateKey(): string | null {
-  const keyOrPath = process.env.GITHUB_APP_PRIVATE_KEY;
-  if (!keyOrPath) return null;
-  if (keyOrPath.startsWith("-----BEGIN")) return keyOrPath;
-  try {
-    return readFileSync(keyOrPath, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Test-only: reset the memoized client. Not part of the public API.
- */
-export function __resetForTests(): void {
-  _client = null;
+function absurd(x: never): never {
+  throw new Error(`unreachable: ${JSON.stringify(x)}`);
 }

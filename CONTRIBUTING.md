@@ -42,7 +42,7 @@ bin/
 
 src/
   bridge.ts                webhook handling + orchestrator forwarding
-  config/                  YAML + .env load/reload support
+  config/                  canonical Effect-native config service
   github/                  GitHub auth/API wrapper
   http/                    HMAC verification and JSON error helpers
   orchestrator/            persistent AO orchestrator control path

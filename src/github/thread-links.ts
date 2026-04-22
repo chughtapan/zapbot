@@ -3,8 +3,8 @@
  * durable mirror target set.
  */
 
-import { getIssue, getLinkedPullRequest } from "../github-state.ts";
 import { err, ok } from "../types.ts";
+import type { GitHubStateService } from "../github-state.ts";
 import type { GithubStateError, IssueNumber, RepoFullName, Result } from "../types.ts";
 
 export interface IssueThreadAnchor {
@@ -18,11 +18,12 @@ export interface ThreadMirrorTargets extends IssueThreadAnchor {
 
 export async function resolveThreadMirrorTargets(
   anchor: IssueThreadAnchor,
+  state: Pick<GitHubStateService, "getIssue" | "getLinkedPullRequest">,
 ): Promise<Result<ThreadMirrorTargets, GithubStateError>> {
-  const issue = await getIssue(anchor.repo, anchor.issue);
+  const issue = await state.getIssue(anchor.repo, anchor.issue);
   if (issue._tag === "Err") return err(issue.error);
 
-  const linkedPullRequest = await getLinkedPullRequest(anchor.repo, anchor.issue);
+  const linkedPullRequest = await state.getLinkedPullRequest(anchor.repo, anchor.issue);
   if (linkedPullRequest._tag === "Err") return err(linkedPullRequest.error);
 
   return ok({

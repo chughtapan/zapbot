@@ -13,7 +13,6 @@ import {
 import {
   createManagedSessionFileRegistry,
   managedSessionIdFromSessionName,
-  resolveManagedSessionRegistryPath,
   type ManagedSessionRecord,
   type ManagedSessionRegistryError,
 } from "../src/lifecycle/contracts.ts";
@@ -29,7 +28,7 @@ interface WorkerSessionMetadata {
 export interface ManagedWorkerRegistrationOptions {
   readonly sessionName: string;
   readonly projectId: string;
-  readonly configPath: string;
+  readonly registryPath: string;
   readonly worktree: string;
   readonly tmuxName: string;
   readonly now?: () => number;
@@ -40,21 +39,18 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number> | --prompt <text>");
   }
 
-  const moltzapEnvFile = readZapbotEnvFile();
-  const sessionDataDir = requireEnv("AO_DATA_DIR", moltzapEnvFile);
-  const currentSession = requireEnv("AO_SESSION", moltzapEnvFile);
+  const sessionDataDir = requireEnv("AO_DATA_DIR");
+  const currentSession = requireEnv("AO_SESSION");
   const projectId = trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
   const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
+  const registryPath = requireEnv("ZAPBOT_MANAGED_SESSION_REGISTRY_PATH");
   const orchestratorSenderId = resolveMetadataValue(
     currentSession,
     "moltzap_sender_id",
     sessionDataDir,
   ) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
-  const serverUrl = requireEnv("MOLTZAP_SERVER_URL", moltzapEnvFile);
-  const registrationSecret = requireEnv(
-    "MOLTZAP_REGISTRATION_SECRET",
-    moltzapEnvFile,
-  );
+  const serverUrl = requireEnv("MOLTZAP_SERVER_URL");
+  const registrationSecret = requireEnv("MOLTZAP_REGISTRATION_SECRET");
   const beforeSessions = new Set(listSessionNames(sessionDataDir));
 
   const childEnv: Record<string, string> = {
@@ -67,7 +63,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   };
   delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
-  const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS", moltzapEnvFile);
+  const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS");
   if (allowedSenders !== null) {
     childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
   }
@@ -82,6 +78,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     sessionDataDir,
     projectId,
     configPath,
+    registryPath,
     orchestratorSenderId,
     serverUrl,
   });
@@ -94,9 +91,7 @@ export async function upsertManagedWorkerRegistration(
   const sessionName = asAoSessionName(options.sessionName);
   const sessionId = managedSessionIdFromSessionName(sessionName);
   const registry = createManagedSessionFileRegistry({
-    registryPath: resolveManagedSessionRegistryPath({
-      configPath: options.configPath,
-    }),
+    registryPath: options.registryPath,
   });
 
   const existing = await registry.get(sessionId);
@@ -213,6 +208,7 @@ async function ensureWorkerChannelsReady(options: {
   readonly sessionDataDir: string;
   readonly projectId: string;
   readonly configPath: string;
+  readonly registryPath: string;
   readonly orchestratorSenderId: string;
   readonly serverUrl: string;
 }): Promise<void> {
@@ -223,7 +219,7 @@ async function ensureWorkerChannelsReady(options: {
   const managedRecord = await upsertManagedWorkerRegistration({
     sessionName: options.sessionName,
     projectId: options.projectId,
-    configPath: options.configPath,
+    registryPath: options.registryPath,
     worktree: metadata.worktree,
     tmuxName: metadata.tmuxName,
   }).catch((cause) => {
@@ -495,28 +491,19 @@ async function runCommand(
   });
 }
 
-function requireEnv(name: string, moltzapEnvFile: Record<string, string>): string {
-  const value = resolveRuntimeEnv(name, moltzapEnvFile);
+function requireEnv(name: string): string {
+  const value = resolveRuntimeEnv(name);
   if (value === null) {
     fatal(`${name} is required`);
   }
   return value;
 }
 
-function resolveRuntimeEnv(
-  name: string,
-  moltzapEnvFile: Record<string, string>,
-): string | null {
+function resolveRuntimeEnv(name: string): string | null {
   const direct = trimEnv(process.env[name]);
   if (direct !== null) {
     return direct;
   }
-
-  const fileValue = trimEnv(moltzapEnvFile[name]);
-  if (fileValue !== null) {
-    return fileValue;
-  }
-
   return null;
 }
 
@@ -538,42 +525,6 @@ function stringifyCause(cause: unknown): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function readZapbotEnvFile(): Record<string, string> {
-  const path = trimEnv(process.env.ZAPBOT_ENV_PATH) ?? join(homedir(), ".zapbot", ".env");
-  if (!existsSync(path)) {
-    return {};
-  }
-
-  const env: Record<string, string> = {};
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) {
-      continue;
-    }
-    const normalized = trimmed.startsWith("export ") ? trimmed.slice(7).trim() : trimmed;
-    const index = normalized.indexOf("=");
-    if (index <= 0) {
-      continue;
-    }
-    const key = normalized.slice(0, index).trim();
-    const value = stripWrappingQuotes(normalized.slice(index + 1).trim());
-    if (key.length > 0 && value.length > 0) {
-      env[key] = value;
-    }
-  }
-  return env;
-}
-
-function stripWrappingQuotes(value: string): string {
-  if (
-    (value.startsWith("\"") && value.endsWith("\"")) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
 
 function fatal(message: string): never {

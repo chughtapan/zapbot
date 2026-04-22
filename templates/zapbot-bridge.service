@@ -5,8 +5,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=__PROJECT_DIR__
-EnvironmentFile=__PROJECT_DIR__/.env
-ExecStart=/usr/bin/env bun __ZAPBOT_DIR__/bin/webhook-bridge.ts
+ExecStart=/usr/bin/env bun __ZAPBOT_DIR__/bin/zapbot-launch.ts --checkout __PROJECT_DIR__
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5

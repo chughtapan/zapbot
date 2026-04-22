@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const TEMPLATE_PATH = path.join(__dirname, "../templates/zapbot-bridge.service");
 
@@ -16,10 +16,11 @@ describe("systemd service template", () => {
     expect(content).toContain("[Install]");
   });
 
-  it("uses placeholder variables for paths", () => {
+  it("uses the typed launcher and does not reference checkout-local env files", () => {
     const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("__PROJECT_DIR__");
-    expect(content).toContain("__ZAPBOT_DIR__");
+    expect(content).toContain("bun __ZAPBOT_DIR__/bin/zapbot-launch.ts --checkout __PROJECT_DIR__");
+    expect(content).not.toContain("EnvironmentFile=");
+    expect(content).not.toContain("webhook-bridge.ts");
   });
 
   it("supports SIGHUP reload via ExecReload", () => {
@@ -32,24 +33,13 @@ describe("systemd service template", () => {
     expect(content).toContain("Restart=always");
   });
 
-  it("loads env file from project directory", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("EnvironmentFile=__PROJECT_DIR__/.env");
-  });
-
-  it("runs webhook-bridge.ts via bun", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("bun __ZAPBOT_DIR__/bin/webhook-bridge.ts");
-  });
-
   it("placeholders can be replaced to produce valid paths", () => {
     const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
     const resolved = content
       .replace(/__PROJECT_DIR__/g, "/home/user/project")
       .replace(/__ZAPBOT_DIR__/g, "/home/user/.claude/skills/zapbot");
     expect(resolved).toContain("WorkingDirectory=/home/user/project");
-    expect(resolved).toContain("EnvironmentFile=/home/user/project/.env");
-    expect(resolved).toContain("bun /home/user/.claude/skills/zapbot/bin/webhook-bridge.ts");
+    expect(resolved).toContain("bun /home/user/.claude/skills/zapbot/bin/zapbot-launch.ts --checkout /home/user/project");
     expect(resolved).not.toContain("__");
   });
 });

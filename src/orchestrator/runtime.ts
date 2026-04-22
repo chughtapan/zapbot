@@ -181,8 +181,10 @@ export async function resolveManagedStartupRetry(
 interface AoCliOptions {
   readonly aoBinary?: string;
   readonly configPath: string | null;
-  readonly env?: Record<string, string | undefined>;
+  readonly registryPath: string;
+  readonly env: Record<string, string | undefined>;
   readonly timeoutMs?: number;
+  readonly orchestratorSenderId?: MoltzapSenderId;
 }
 
 interface AoStatusSession {
@@ -275,7 +277,7 @@ function buildCliEnv(base: Record<string, string | undefined>, configPath: strin
 }
 
 function aoBinaryPath(options: AoCliOptions): string {
-  return options.aoBinary ?? normalizeEnvValue(process.env.AO_BINARY) ?? "ao";
+  return options.aoBinary ?? "ao";
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -286,7 +288,7 @@ async function runAoCommand(
   options: AoCliOptions,
   args: readonly string[],
 ): Promise<Result<SpawnResult, SpawnFailure>> {
-  const env = buildCliEnv(options.env ?? process.env, options.configPath);
+  const env = buildCliEnv(options.env, options.configPath);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const ao = aoBinaryPath(options);
   return await new Promise((resolve) => {
@@ -380,7 +382,6 @@ function resolveSenderId(projectName: ProjectName, session: AoStatusSession): Mo
   const raw =
     normalizeEnvValue(session.metadata?.senderId as string | undefined) ??
     normalizeEnvValue(session.metadata?.localSenderId as string | undefined) ??
-    normalizeEnvValue(process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID) ??
     sessionNameFor(projectName);
   return asMoltzapSenderId(raw);
 }
@@ -423,9 +424,7 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
       return err(sessions.error);
     }
     const registry = createManagedSessionFileRegistry({
-      registryPath: resolveManagedSessionRegistryPath({
-        configPath: options.configPath,
-      }),
+      registryPath: options.registryPath,
     });
     const managed = await registry.listByProject(projectName);
     if (managed._tag === "Err") {
@@ -453,7 +452,7 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
     }
     return ok({
       session: found.record.tag.sessionName,
-      senderId: resolveSenderId(projectName, found.session),
+      senderId: options.orchestratorSenderId ?? resolveSenderId(projectName, found.session),
       mode: found.record.phase === "claimed" ? "started" : "reused",
     });
   }
@@ -546,9 +545,7 @@ async function claimManagedOrchestratorSession(
     statusSession.name ?? statusSession.id ?? sessionNameFor(projectName),
   );
   const registry = createManagedSessionFileRegistry({
-    registryPath: resolveManagedSessionRegistryPath({
-      configPath: options.configPath,
-    }),
+    registryPath: options.registryPath,
   });
   await registry.put({
     id: managedSessionIdFromSessionName(sessionName),
