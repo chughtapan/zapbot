@@ -1,18 +1,20 @@
 #!/usr/bin/env bun
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+import {
+  createManagedSessionFileRegistry,
+  managedSessionIdFromSessionName,
+  resolveManagedSessionRegistryPath,
+  type ManagedSessionRecord,
+  type ManagedSessionRegistryError,
+} from "../src/lifecycle/contracts.ts";
+import { asAoSessionName, asProjectName } from "../src/types.ts";
 
-const spawnArgs = process.argv.slice(2);
-if (spawnArgs.length === 0) {
-  fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number> | --prompt <text>");
-}
-
-const moltzapEnvFile = readZapbotEnvFile();
 const MOLTZAP_ENV_FALLBACKS = {
   MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
   MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
@@ -20,42 +22,120 @@ const MOLTZAP_ENV_FALLBACKS = {
   MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
 } as const;
 
-const sessionDataDir = requireEnv("AO_DATA_DIR");
-const currentSession = requireEnv("AO_SESSION");
-const projectId = trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
-const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
-const orchestratorSenderId = resolveMetadataValue(
-  currentSession,
-  "moltzap_sender_id",
-) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
-const serverUrl = requireEnv("MOLTZAP_SERVER_URL");
-const registrationSecret = requireEnv("MOLTZAP_REGISTRATION_SECRET");
-const beforeSessions = new Set(listSessionNames(sessionDataDir));
-
-const childEnv: Record<string, string> = {
-  ...process.env,
-  AO_CONFIG_PATH: configPath,
-  AO_PROJECT_ID: projectId,
-  MOLTZAP_SERVER_URL: serverUrl,
-  MOLTZAP_REGISTRATION_SECRET: registrationSecret,
-  MOLTZAP_ORCHESTRATOR_SENDER_ID: orchestratorSenderId,
-};
-delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
-
-const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS");
-if (allowedSenders !== null) {
-  childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
+interface WorkerSessionMetadata {
+  readonly worktree: string;
+  readonly tmuxName: string;
+  readonly apiKey: string | null;
+  readonly localSenderId: string | null;
 }
 
-const spawnedSession = await runAoSpawn(spawnArgs, childEnv);
-await ensureWorkerChannelsReady({
-  sessionName: spawnedSession,
-  sessionDataDir,
-  projectId,
-  configPath,
-  orchestratorSenderId,
-  serverUrl,
-});
+export interface ManagedWorkerRegistrationOptions {
+  readonly sessionName: string;
+  readonly projectId: string;
+  readonly configPath: string;
+  readonly worktree: string;
+  readonly tmuxName: string;
+  readonly now?: () => number;
+}
+
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  if (argv.length === 0) {
+    fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number> | --prompt <text>");
+  }
+
+  const moltzapEnvFile = readZapbotEnvFile();
+  const sessionDataDir = requireEnv("AO_DATA_DIR", moltzapEnvFile);
+  const currentSession = requireEnv("AO_SESSION", moltzapEnvFile);
+  const projectId = trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
+  const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
+  const orchestratorSenderId = resolveMetadataValue(
+    currentSession,
+    "moltzap_sender_id",
+    sessionDataDir,
+  ) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
+  const serverUrl = requireEnv("MOLTZAP_SERVER_URL", moltzapEnvFile);
+  const registrationSecret = requireEnv(
+    "MOLTZAP_REGISTRATION_SECRET",
+    moltzapEnvFile,
+  );
+  const beforeSessions = new Set(listSessionNames(sessionDataDir));
+
+  const childEnv: Record<string, string> = {
+    ...process.env,
+    AO_CONFIG_PATH: configPath,
+    AO_PROJECT_ID: projectId,
+    MOLTZAP_SERVER_URL: serverUrl,
+    MOLTZAP_REGISTRATION_SECRET: registrationSecret,
+    MOLTZAP_ORCHESTRATOR_SENDER_ID: orchestratorSenderId,
+  };
+  delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
+
+  const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS", moltzapEnvFile);
+  if (allowedSenders !== null) {
+    childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
+  }
+
+  const spawnedSession = await runAoSpawn(argv, childEnv, {
+    sessionDataDir,
+    currentSession,
+    beforeSessions,
+  });
+  await ensureWorkerChannelsReady({
+    sessionName: spawnedSession,
+    sessionDataDir,
+    projectId,
+    configPath,
+    orchestratorSenderId,
+    serverUrl,
+  });
+}
+
+export async function upsertManagedWorkerRegistration(
+  options: ManagedWorkerRegistrationOptions,
+): Promise<ManagedSessionRecord> {
+  const projectName = asProjectName(options.projectId);
+  const sessionName = asAoSessionName(options.sessionName);
+  const sessionId = managedSessionIdFromSessionName(sessionName);
+  const registry = createManagedSessionFileRegistry({
+    registryPath: resolveManagedSessionRegistryPath({
+      configPath: options.configPath,
+    }),
+  });
+
+  const existing = await registry.get(sessionId);
+  if (existing._tag === "Err") {
+    throw new Error(stringifyRegistryError(existing.error));
+  }
+
+  const now = options.now?.() ?? Date.now();
+  const claimedAtMs =
+    existing.value !== null && existing.value.tag.projectName === projectName
+      ? existing.value.tag.claimedAtMs
+      : now;
+  const record: ManagedSessionRecord = {
+    id: sessionId,
+    tag: {
+      managed: true,
+      owner: "zapbot",
+      projectName,
+      sessionName,
+      scope: "worker",
+      origin: "ao-spawn-with-moltzap.ts",
+      claimedAtMs,
+    },
+    tmuxName: options.tmuxName,
+    worktree: options.worktree,
+    processId: existing.value?.processId ?? null,
+    phase: "active",
+    lastHeartbeatAtMs: now,
+  };
+
+  const stored = await registry.put(record);
+  if (stored._tag === "Err") {
+    throw new Error(stringifyRegistryError(stored.error));
+  }
+  return stored.value;
+}
 
 function listSessionNames(dataDir: string): string[] {
   if (!existsSync(dataDir)) return [];
@@ -63,8 +143,13 @@ function listSessionNames(dataDir: string): string[] {
 }
 
 async function runAoSpawn(
-  args: string[],
+  args: readonly string[],
   env: Record<string, string>,
+  options: {
+    readonly sessionDataDir: string;
+    readonly currentSession: string;
+    readonly beforeSessions: ReadonlySet<string>;
+  },
 ): Promise<string> {
   const child = spawn("ao", ["spawn", ...args], {
     env,
@@ -113,9 +198,9 @@ async function runAoSpawn(
   }
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const after = listSessionNames(sessionDataDir);
+    const after = listSessionNames(options.sessionDataDir);
     const found = after.find(
-      (name) => !beforeSessions.has(name) && name !== currentSession,
+      (name) => !options.beforeSessions.has(name) && name !== options.currentSession,
     );
     if (found !== undefined) {
       return found;
@@ -134,31 +219,38 @@ async function ensureWorkerChannelsReady(options: {
   readonly orchestratorSenderId: string;
   readonly serverUrl: string;
 }): Promise<void> {
-  const initialOutcome = await waitForChannelOutcome(options.sessionName);
+  const metadata = await waitForWorkerSessionMetadata(
+    options.sessionName,
+    options.sessionDataDir,
+  );
+  const managedRecord = await upsertManagedWorkerRegistration({
+    sessionName: options.sessionName,
+    projectId: options.projectId,
+    configPath: options.configPath,
+    worktree: metadata.worktree,
+    tmuxName: metadata.tmuxName,
+  }).catch((cause) => {
+    fatal(
+      `worker ${options.sessionName} managed-session registration failed: ${stringifyCause(cause)}`,
+    );
+  });
+  const worktree = managedRecord.worktree ?? metadata.worktree;
+  const tmuxName = managedRecord.tmuxName ?? metadata.tmuxName;
+
+  const initialOutcome = await waitForChannelOutcome(worktree);
   if (initialOutcome === "registered") {
     return;
   }
   if (initialOutcome !== "skipped") {
     fatal(`worker ${options.sessionName} MoltZap channel did not come up`);
   }
-
-  const metadata = readMetadata(options.sessionName);
-  const worktree = metadata.get("worktree");
-  const tmuxName = metadata.get("tmuxName");
-  const apiKey = metadata.get("moltzap_api_key");
-  const localSenderId = metadata.get("moltzap_sender_id");
-  if (
-    worktree === undefined ||
-    tmuxName === undefined ||
-    apiKey === undefined ||
-    localSenderId === undefined
-  ) {
+  if (metadata.apiKey === null || metadata.localSenderId === null) {
     fatal(
       `worker ${options.sessionName} metadata missing worktree/tmuxName/moltzap_api_key/moltzap_sender_id`,
     );
   }
 
-  const latestLog = readLatestChannelLog(options.sessionName);
+  const latestLog = readLatestChannelLog(worktree);
   if (latestLog === null) {
     fatal(`worker ${options.sessionName} MoltZap log could not be located`);
   }
@@ -175,13 +267,13 @@ async function ensureWorkerChannelsReady(options: {
     configPath: options.configPath,
     sessionDataDir: options.sessionDataDir,
     serverUrl: options.serverUrl,
-    apiKey,
-    localSenderId,
+    apiKey: metadata.apiKey,
+    localSenderId: metadata.localSenderId,
     orchestratorSenderId: options.orchestratorSenderId,
     claudeSessionId,
   });
 
-  const resumedOutcome = await waitForChannelOutcome(options.sessionName);
+  const resumedOutcome = await waitForChannelOutcome(worktree);
   if (resumedOutcome !== "registered") {
     fatal(
       `worker ${options.sessionName} MoltZap channel failed to register after resume (${resumedOutcome})`,
@@ -275,10 +367,10 @@ async function restartWorkerWithResume(options: {
 }
 
 async function waitForChannelOutcome(
-  sessionName: string,
+  worktree: string,
 ): Promise<"registered" | "skipped" | "failed" | "timeout"> {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    const content = readLatestChannelLog(sessionName);
+    const content = readLatestChannelLog(worktree);
     if (content !== null) {
       if (content.includes("Channel notifications registered")) {
         return "registered";
@@ -298,12 +390,7 @@ async function waitForChannelOutcome(
   return "timeout";
 }
 
-function readLatestChannelLog(sessionName: string): string | null {
-  const metadata = readMetadata(sessionName);
-  const worktree = metadata.get("worktree");
-  if (worktree === undefined) {
-    return null;
-  }
+function readLatestChannelLog(worktree: string): string | null {
   const cacheKey = worktree.replace(/[^A-Za-z0-9]/g, "-");
   const logDir = join(
     homedir(),
@@ -324,7 +411,46 @@ function readLatestChannelLog(sessionName: string): string | null {
   return readFileSync(join(logDir, latest), "utf8");
 }
 
-function readMetadata(sessionName: string): Map<string, string> {
+async function waitForWorkerSessionMetadata(
+  sessionName: string,
+  sessionDataDir: string,
+): Promise<WorkerSessionMetadata> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const metadata = tryReadWorkerSessionMetadata(sessionName, sessionDataDir);
+    if (metadata !== null) {
+      return metadata;
+    }
+    await sleep(250);
+  }
+  fatal(`worker ${sessionName} metadata missing worktree/tmuxName`);
+}
+
+function tryReadWorkerSessionMetadata(
+  sessionName: string,
+  sessionDataDir: string,
+): WorkerSessionMetadata | null {
+  try {
+    const metadata = readMetadata(sessionName, sessionDataDir);
+    const worktree = metadata.get("worktree");
+    const tmuxName = metadata.get("tmuxName");
+    if (worktree === undefined || tmuxName === undefined) {
+      return null;
+    }
+    return {
+      worktree,
+      tmuxName,
+      apiKey: metadata.get("moltzap_api_key") ?? null,
+      localSenderId: metadata.get("moltzap_sender_id") ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readMetadata(
+  sessionName: string,
+  sessionDataDir: string,
+): Map<string, string> {
   const content = readFileSync(join(sessionDataDir, sessionName), "utf8");
   const entries = new Map<string, string>();
   for (const line of content.split("\n")) {
@@ -342,9 +468,10 @@ function readMetadata(sessionName: string): Map<string, string> {
 function resolveMetadataValue(
   sessionName: string,
   key: string,
+  sessionDataDir: string,
 ): string | null {
   try {
-    return readMetadata(sessionName).get(key) ?? null;
+    return readMetadata(sessionName, sessionDataDir).get(key) ?? null;
   } catch {
     return null;
   }
@@ -375,15 +502,18 @@ async function runCommand(
   });
 }
 
-function requireEnv(name: string): string {
-  const value = resolveRuntimeEnv(name);
+function requireEnv(name: string, moltzapEnvFile: Record<string, string>): string {
+  const value = resolveRuntimeEnv(name, moltzapEnvFile);
   if (value === null) {
     fatal(`${name} is required`);
   }
   return value;
 }
 
-function resolveRuntimeEnv(name: string): string | null {
+function resolveRuntimeEnv(
+  name: string,
+  moltzapEnvFile: Record<string, string>,
+): string | null {
   const direct = trimEnv(process.env[name]);
   if (direct !== null) {
     return direct;
@@ -471,4 +601,29 @@ function stripWrappingQuotes(value: string): string {
 function fatal(message: string): never {
   console.error(`[ao-spawn-with-moltzap] ${message}`);
   process.exit(1);
+}
+
+function stringifyRegistryError(error: ManagedSessionRegistryError): string {
+  switch (error._tag) {
+    case "ManagedSessionRegistryUnavailable":
+      return error.cause;
+    case "ManagedSessionRecordCorrupt":
+      return error.reason;
+    case "ManagedSessionAlreadyOwned":
+    case "ManagedSessionNotFound":
+      return error.sessionId;
+  }
+}
+
+function isMainModule(moduleUrl: string, entryPoint: string | undefined): boolean {
+  if (typeof entryPoint !== "string" || entryPoint.length === 0) {
+    return false;
+  }
+  return resolve(entryPoint) === fileURLToPath(moduleUrl);
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
+  await main().catch((cause) => {
+    fatal(stringifyCause(cause));
+  });
 }

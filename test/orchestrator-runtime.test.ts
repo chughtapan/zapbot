@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  createManagedSessionFileRegistry,
+  managedSessionIdFromSessionName,
+  resolveManagedSessionRegistryPath,
+} from "../src/lifecycle/contracts.ts";
+import {
   ensureProjectOrchestrator,
   forwardControlPrompt,
   createAoCliControlHost,
@@ -90,10 +95,11 @@ describe("forwardControlPrompt", () => {
 });
 
 describe("createAoCliControlHost", () => {
-  it("starts, resolves, and forwards control via the AO CLI", async () => {
+  it("starts, claims, resolves, and forwards control via the managed registry", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "zapbot-ao-host-"));
     const logFile = join(workdir, "ao.log");
     const fakeAo = join(workdir, "ao");
+    const configPath = join(workdir, "agent-orchestrator.yaml");
     const statusJson = JSON.stringify([
       {
         name: "app-orchestrator",
@@ -144,9 +150,30 @@ esac
     );
     chmodSync(fakeAo, 0o755);
 
+    const registry = createManagedSessionFileRegistry({
+      registryPath: resolveManagedSessionRegistryPath({ configPath }),
+    });
+    await registry.put({
+      id: managedSessionIdFromSessionName(asAoSessionName("app-orchestrator")),
+      tag: {
+        managed: true,
+        owner: "zapbot",
+        projectName: asProjectName("app"),
+        sessionName: asAoSessionName("app-orchestrator"),
+        scope: "orchestrator",
+        origin: "start.sh",
+        claimedAtMs: Date.now(),
+      },
+      tmuxName: "app-orchestrator",
+      worktree: workdir,
+      processId: null,
+      phase: "active",
+      lastHeartbeatAtMs: Date.now(),
+    });
+
     const host = createAoCliControlHost({
       aoBinary: fakeAo,
-      configPath: "/tmp/agent-orchestrator.yaml",
+      configPath,
       env: {
         FAKE_AO_LOG: logFile,
         FAKE_AO_STATUS_JSON: statusJson,
@@ -184,5 +211,46 @@ esac
     expect(log).toContain("# GitHub control");
     expect(log).toContain("github_comment_body:");
     expect(log).toContain("@zapbot plan this");
+  });
+
+  it("ignores an unregistered orchestrator session even if ao status exposes it by name", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "zapbot-ao-unmanaged-"));
+    const logFile = join(workdir, "ao.log");
+    const fakeAo = join(workdir, "ao");
+    writeFileSync(
+      fakeAo,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s %s\\n' "$1" "$*" >> "\${FAKE_AO_LOG:?}"
+if [ "$1" = "status" ]; then
+  printf '%s' '[{"name":"app-orchestrator","role":"orchestrator","status":"running","metadata":{"senderId":"orch-1"}}]'
+  exit 0
+fi
+if [ "$1" = "start" ]; then
+  exit 0
+fi
+exit 1
+`,
+      "utf8",
+    );
+    chmodSync(fakeAo, 0o755);
+
+    const host = createAoCliControlHost({
+      aoBinary: fakeAo,
+      configPath: join(workdir, "agent-orchestrator.yaml"),
+      env: {
+        FAKE_AO_LOG: logFile,
+      },
+      timeoutMs: 5_000,
+    });
+
+    const ready = await host.resolveReady(asProjectName("app"));
+    expect(ready).toEqual({
+      _tag: "Err",
+      error: {
+        _tag: "OrchestratorNotFound",
+        projectName: "app",
+      },
+    });
   });
 });
