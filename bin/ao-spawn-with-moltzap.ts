@@ -7,6 +7,10 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
+  autoConfirmClaudeChannelPrompt,
+  buildClaudeChannelLaunchCommand,
+} from "../src/claude-channel-launch.ts";
+import {
   createManagedSessionFileRegistry,
   managedSessionIdFromSessionName,
   resolveManagedSessionRegistryPath,
@@ -289,22 +293,14 @@ async function restartWorkerWithResume(options: {
 }): Promise<void> {
   await runCommand("tmux", ["kill-session", "-t", options.tmuxName], true);
 
-  const wrapperPath = fileURLToPath(
-    new URL(
-      "../worker/ao-plugin-agent-claude-moltzap/launch-claude-moltzap.py",
-      import.meta.url,
-    ),
+  const launchCommand = buildClaudeChannelLaunchCommand(
+    [
+      "claude",
+      "--resume",
+      shellSingleQuote(options.claudeSessionId),
+      "--dangerously-skip-permissions",
+    ].join(" "),
   );
-  const launchCommand = [
-    "claude",
-    "--resume",
-    shellSingleQuote(options.claudeSessionId),
-    "--dangerously-skip-permissions",
-    "--mcp-config",
-    ".claude/moltzap-channel.mcp.json",
-    "--dangerously-load-development-channels",
-    "server:moltzap",
-  ].join(" ");
 
   const env: Record<string, string> = {
     ...process.env,
@@ -320,11 +316,7 @@ async function restartWorkerWithResume(options: {
   };
   delete env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
-  const command = [
-    "python3",
-    shellSingleQuote(wrapperPath),
-    shellSingleQuote(launchCommand),
-  ].join(" ");
+  const command = launchCommand;
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
@@ -356,6 +348,14 @@ async function restartWorkerWithResume(options: {
     });
   }).catch((cause) => {
     fatal(`failed to relaunch worker ${options.sessionName}: ${stringifyCause(cause)}`);
+  });
+
+  await autoConfirmClaudeChannelPrompt({
+    tmuxTarget: options.tmuxName,
+  }).catch((cause) => {
+    fatal(
+      `failed to confirm Claude development channels for ${options.sessionName}: ${stringifyCause(cause)}`,
+    );
   });
 }
 
