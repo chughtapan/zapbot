@@ -15,13 +15,6 @@ import {
 } from "../src/lifecycle/contracts.ts";
 import { asAoSessionName, asProjectName } from "../src/types.ts";
 
-const MOLTZAP_ENV_FALLBACKS = {
-  MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
-  MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
-  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
-  MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
-} as const;
-
 interface WorkerSessionMetadata {
   readonly worktree: string;
   readonly tmuxName: string;
@@ -519,24 +512,9 @@ function resolveRuntimeEnv(
     return direct;
   }
 
-  const fallbackKey = MOLTZAP_ENV_FALLBACKS[name as keyof typeof MOLTZAP_ENV_FALLBACKS];
-  if (fallbackKey !== undefined) {
-    const mappedProcessValue = trimEnv(process.env[fallbackKey]);
-    if (mappedProcessValue !== null) {
-      return mappedProcessValue;
-    }
-  }
-
   const fileValue = trimEnv(moltzapEnvFile[name]);
   if (fileValue !== null) {
     return fileValue;
-  }
-
-  if (fallbackKey !== undefined) {
-    const mappedFileValue = trimEnv(moltzapEnvFile[fallbackKey]);
-    if (mappedFileValue !== null) {
-      return mappedFileValue;
-    }
   }
 
   return null;
