@@ -9,12 +9,6 @@ const builtinModule = await import(pathToFileURL(resolveBuiltinClaudePluginPath(
 const builtin = builtinModule.create();
 const launchWrapperPath = fileURLToPath(new URL("./launch-claude-moltzap.py", import.meta.url));
 const execFileAsync = promisify(execFile);
-const MOLTZAP_ENV_FALLBACKS = Object.freeze({
-  MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
-  MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
-  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
-  MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
-});
 
 export const manifest = {
   ...builtinModule.manifest,
@@ -178,24 +172,9 @@ function resolveEnvValue(key, fileEnv) {
     return direct;
   }
 
-  const fallbackKey = MOLTZAP_ENV_FALLBACKS[key];
-  if (typeof fallbackKey === "string") {
-    const mappedProcessValue = normalizeEnvValue(process.env[fallbackKey]);
-    if (mappedProcessValue !== null) {
-      return mappedProcessValue;
-    }
-  }
-
   const fileValue = normalizeEnvValue(fileEnv[key]);
   if (fileValue !== null) {
     return fileValue;
-  }
-
-  if (typeof fallbackKey === "string") {
-    const mappedFileValue = normalizeEnvValue(fileEnv[fallbackKey]);
-    if (mappedFileValue !== null) {
-      return mappedFileValue;
-    }
   }
 
   return null;

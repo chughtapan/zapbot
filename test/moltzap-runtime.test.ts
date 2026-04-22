@@ -3,7 +3,6 @@ import {
   buildMoltzapProcessEnv,
   buildMoltzapSpawnEnv,
   loadMoltzapRuntimeConfig,
-  type MoltzapRuntimeConfig,
 } from "../src/moltzap/runtime.ts";
 import {
   asAoSessionName,
@@ -35,28 +34,13 @@ describe("moltzap runtime / loadMoltzapRuntimeConfig", () => {
     expect(result).toEqual({ _tag: "Ok", value: { _tag: "MoltzapDisabled" } });
   });
 
-  it("rejects auth config without a server URL", () => {
+  it("rejects registration config without a server URL", () => {
     const result = loadMoltzapRuntimeConfig({
-      ZAPBOT_MOLTZAP_API_KEY: "mz-key",
+      ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "reg-secret",
     });
     expect(result._tag).toBe("Err");
     if (result._tag !== "Err") return;
     expect(result.error.reason).toContain("ZAPBOT_MOLTZAP_SERVER_URL");
-  });
-
-  it("loads static API-key mode", () => {
-    const result = loadMoltzapRuntimeConfig({
-      ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-    });
-    expect(result._tag).toBe("Ok");
-    if (result._tag !== "Ok") return;
-    expect(result.value).toMatchObject({
-      _tag: "MoltzapStatic",
-      serverUrl: "wss://moltzap.example/ws",
-      apiKey: "mz-key",
-      allowlistCsv: null,
-    });
   });
 
   it("loads registration mode and builds a sender allowlist from CSV", () => {
@@ -79,46 +63,21 @@ describe("moltzap runtime / loadMoltzapRuntimeConfig", () => {
     });
     expect(gate._tag).toBe("Ok");
   });
+
+  it("requires a registration secret when a MoltZap server URL is configured", () => {
+    const result = loadMoltzapRuntimeConfig({
+      ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+    });
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error.reason).toContain("ZAPBOT_MOLTZAP_REGISTRATION_SECRET");
+  });
 });
 
 describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
   it("returns an empty env map when MoltZap is disabled", async () => {
     const result = await buildMoltzapSpawnEnv({ _tag: "MoltzapDisabled" }, spawnContext);
     expect(result).toEqual({ _tag: "Ok", value: {} });
-  });
-
-  it("returns static MOLTZAP_* env when using a pre-provisioned API key", async () => {
-    const config: MoltzapRuntimeConfig = {
-      _tag: "MoltzapStatic",
-      serverUrl: "wss://moltzap.example/ws",
-      apiKey: "mz-key",
-      allowlistCsv: "agent-a,agent-b",
-      allowlist: loadMoltzapRuntimeConfig({
-        ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-        ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-        ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "agent-a,agent-b",
-      })._tag === "Ok"
-        ? (loadMoltzapRuntimeConfig({
-            ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-            ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-            ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "agent-a,agent-b",
-          }) as Extract<
-            ReturnType<typeof loadMoltzapRuntimeConfig>,
-            { readonly _tag: "Ok" }
-          >).value.allowlist
-        : (() => {
-            throw new Error("unreachable");
-          })(),
-    };
-    const result = await buildMoltzapSpawnEnv(config, spawnContext);
-    expect(result).toEqual({
-      _tag: "Ok",
-      value: {
-        MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-        MOLTZAP_API_KEY: "mz-key",
-        MOLTZAP_ALLOWED_SENDERS: "agent-a,agent-b",
-      },
-    });
   });
 
   it("registers a fresh agent when a registration secret is configured", async () => {
@@ -180,37 +139,6 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
 describe("moltzap runtime / buildMoltzapProcessEnv", () => {
   it("returns an empty env map when MoltZap is disabled", () => {
     expect(buildMoltzapProcessEnv({ _tag: "MoltzapDisabled" })).toEqual({});
-  });
-
-  it("maps static config into parent-process env for ao sessions", () => {
-    expect(
-      buildMoltzapProcessEnv({
-        _tag: "MoltzapStatic",
-        serverUrl: "wss://moltzap.example/ws",
-        apiKey: "mz-key",
-        allowlistCsv: "orch-1,worker-1",
-        allowlist: loadMoltzapRuntimeConfig({
-          ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-          ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-          ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
-        })._tag === "Ok"
-          ? (loadMoltzapRuntimeConfig({
-              ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-              ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-              ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
-            }) as Extract<
-              ReturnType<typeof loadMoltzapRuntimeConfig>,
-              { readonly _tag: "Ok" }
-            >).value.allowlist
-          : (() => {
-              throw new Error("unreachable");
-            })(),
-      }),
-    ).toEqual({
-      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      MOLTZAP_API_KEY: "mz-key",
-      MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
-    });
   });
 
   it("maps registration config into parent-process env for ao sessions", () => {

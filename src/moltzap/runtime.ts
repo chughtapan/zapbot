@@ -30,13 +30,6 @@ export interface MoltzapSpawnContext {
 export type MoltzapRuntimeConfig =
   | { readonly _tag: "MoltzapDisabled" }
   | {
-      readonly _tag: "MoltzapStatic";
-      readonly serverUrl: string;
-      readonly apiKey: string;
-      readonly allowlistCsv: string | null;
-      readonly allowlist: SenderAllowlist;
-    }
-  | {
       readonly _tag: "MoltzapRegistration";
       readonly serverUrl: string;
       readonly registrationSecret: string;
@@ -58,13 +51,12 @@ export function loadMoltzapRuntimeConfig(
   env: Record<string, string | undefined>,
 ): Result<MoltzapRuntimeConfig, MoltzapConfigError> {
   const serverUrl = normalizeEnvVar(env.ZAPBOT_MOLTZAP_SERVER_URL);
-  const apiKey = normalizeEnvVar(env.ZAPBOT_MOLTZAP_API_KEY);
   const registrationSecret = normalizeEnvVar(env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET);
   const allowlistCsv = normalizeCsv(env.ZAPBOT_MOLTZAP_ALLOWED_SENDERS);
   const allowlist = fromSenderIds(parseAllowlist(allowlistCsv));
 
   if (serverUrl === null) {
-    if (apiKey !== null || registrationSecret !== null) {
+    if (registrationSecret !== null) {
       return err({
         _tag: "MoltzapConfigInvalid",
         reason: "ZAPBOT_MOLTZAP_SERVER_URL is required when MoltZap auth is configured.",
@@ -83,20 +75,10 @@ export function loadMoltzapRuntimeConfig(
     });
   }
 
-  if (apiKey !== null) {
-    return ok({
-      _tag: "MoltzapStatic",
-      serverUrl,
-      apiKey,
-      allowlistCsv,
-      allowlist,
-    });
-  }
-
   return err({
     _tag: "MoltzapConfigInvalid",
     reason:
-      "Set either ZAPBOT_MOLTZAP_API_KEY or ZAPBOT_MOLTZAP_REGISTRATION_SECRET when ZAPBOT_MOLTZAP_SERVER_URL is configured.",
+      "Set ZAPBOT_MOLTZAP_REGISTRATION_SECRET when ZAPBOT_MOLTZAP_SERVER_URL is configured.",
   });
 }
 
@@ -107,8 +89,6 @@ export async function buildMoltzapSpawnEnv(
   switch (config._tag) {
     case "MoltzapDisabled":
       return ok({});
-    case "MoltzapStatic":
-      return ok(toSpawnEnv(config.serverUrl, config.apiKey, config.allowlistCsv));
     case "MoltzapRegistration":
       return registerSessionAgent(config, ctx);
     default:
@@ -127,14 +107,6 @@ export function buildMoltzapProcessEnv(
   switch (config._tag) {
     case "MoltzapDisabled":
       return {};
-    case "MoltzapStatic":
-      return {
-        MOLTZAP_SERVER_URL: config.serverUrl,
-        MOLTZAP_API_KEY: config.apiKey,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
-      };
     case "MoltzapRegistration":
       return {
         MOLTZAP_SERVER_URL: config.serverUrl,
