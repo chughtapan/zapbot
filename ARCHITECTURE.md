@@ -37,6 +37,13 @@ Config boundary:
 - Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
   environment, typically materialized from GitHub repository or environment
   secrets.
+- Hosted env names are the env-shaped version of the same contract, for
+  example `bridge.publicUrl` <-> `ZAPBOT_BRIDGE_URL`,
+  `routes[].webhookSecret` <-> `ZAPBOT_WEBHOOK_SECRET`,
+  `github.token` <-> `ZAPBOT_GITHUB_TOKEN`, and the GitHub App JSON triple
+  <-> `GITHUB_APP_*`.
+- Local operator config can route multiple repos under one project key.
+  Hosted env mode is one repo route per process.
 - Checkout-local `.env` and `agent-orchestrator.yaml` are rejected as legacy
   config artifacts.
 
@@ -81,6 +88,15 @@ Worker-side spawn failures remain local to the orchestrator/worker lane:
 |---|---|
 | `AoSpawnFailed` | the helper could not spawn a worker session |
 | `MoltzapProvisionFailed` | zapbot could not provision MoltZap env for the child session |
+
+## GitHub token boundary
+
+- The bridge may inject `GH_TOKEN` into AO child sessions so workers can act on
+  behalf of the repo.
+- The bridge does not itself serialize `GH_TOKEN` into MoltZap env, webhook
+  responses, or bridge-authored GitHub artifacts.
+- Once `GH_TOKEN` is available inside an AO child session, downstream tools and
+  prompts in that session are outside the bridge's enforcement boundary.
 
 ## MoltZap boundary
 

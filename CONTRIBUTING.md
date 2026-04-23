@@ -20,7 +20,12 @@ cd /path/to/zapbot
 
 cd /path/to/your-project
 /path/to/zapbot/bin/zapbot-team-init owner/repo
+# zapbot-team-init prints the canonical project key
+# edit ~/.zapbot/projects/<project-key>/project.json
 /path/to/zapbot/start.sh .
+# then register https://<gateway-url>/api/webhooks/github
+# in github-demo mode, or the direct public bridge URL if you expose it
+# using the matching routes[].webhookSecret
 ```
 
 Config contract:
@@ -30,8 +35,12 @@ Config contract:
 - Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
   environment, typically injected from GitHub repository or environment
   secrets.
+- README owns the local `project.json` <-> hosted env field mapping table and
+  the end-to-end webhook setup steps.
 - Checkout-local `.env` and `agent-orchestrator.yaml` are legacy artifacts and
   should not be recreated.
+- Once zapbot forwards `GH_TOKEN` into an AO child session, behavior inside
+  that session is outside the bridge's enforcement boundary.
 
 ## Core commands
 
