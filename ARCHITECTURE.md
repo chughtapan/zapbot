@@ -11,9 +11,9 @@ orchestrator control loop.
 
 ```text
 GitHub issue_comment webhook
-  -> HMAC verify
+  -> validate configured GitHub webhook signature
   -> eligible direct-mention detection
-  -> permission check
+  -> repo-write invocation gate
   -> ensure orchestrator session exists (`ao start` / `ao status`)
   -> ao send raw GitHub control prompt with placement context
   -> orchestrator decides whether to spawn workers via
@@ -24,11 +24,34 @@ GitHub issue_comment webhook
 Plain-language boundary split:
 
 - The bridge verifies GitHub input and forwards only allowed control events.
+- GitHub comment bodies remain untrusted input even after signature validation
+  and repo-permission checks.
+- Repo write access is an invocation gate for the control path, not a trust
+  guarantee for comment content or downstream AO child-session behavior.
 - The orchestrator is the one persistent per-project session that decides
   whether more work is needed.
 - Workers are disposable task sessions; they do not own project lifecycle.
 - The lifecycle registry is the ownership ledger that decides which sessions
   zapbot may reuse, stop, or garbage-collect.
+
+Config boundary:
+
+- Local operator mode loads only the canonical project file at
+  `~/.zapbot/projects/<project-key>/project.json`.
+- Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
+  environment, typically materialized from GitHub repository or environment
+  secrets.
+- Hosted/platform mode is deployment-owned and prerequisite-heavy; the docs use
+  local operator mode as the only self-contained first-success path.
+- Hosted env names are the env-shaped version of the same contract, for
+  example `bridge.publicUrl` <-> `ZAPBOT_BRIDGE_URL`,
+  `routes[].webhookSecret` <-> `ZAPBOT_WEBHOOK_SECRET`,
+  `github.token` <-> `ZAPBOT_GITHUB_TOKEN`, and the GitHub App JSON triple
+  <-> `GITHUB_APP_*`.
+- Local operator config can route multiple repos under one project key.
+  Hosted env mode is one repo route per process.
+- Checkout-local `.env` and `agent-orchestrator.yaml` are rejected as legacy
+  config artifacts.
 
 ## Key modules
 
@@ -45,7 +68,7 @@ Plain-language boundary split:
 | `bin/ao-spawn-with-moltzap.ts` | worker spawn helper that preserves MoltZap control linkage |
 | `bin/moltzap-claude-channel.ts` | worker entrypoint that boots the Claude-side MoltZap channel loop |
 | `src/claude-channel/` | local Claude channel server primitives used by the worker runtime |
-| `worker/ao-plugin-agent-claude-moltzap/` | repo-local Claude/MoltZap AO agent plugin |
+| `worker/ao-plugin-agent-claude-moltzap/` | checked-in Claude/MoltZap AO agent plugin |
 | `src/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
 | `src/moltzap/identity-allowlist.ts` | enforce optional sender allowlists on inbound MoltZap events |
 | `src/github-state.ts` | GitHub-native issue state reads |
@@ -71,6 +94,19 @@ Worker-side spawn failures remain local to the orchestrator/worker lane:
 |---|---|
 | `AoSpawnFailed` | the helper could not spawn a worker session |
 | `MoltzapProvisionFailed` | zapbot could not provision MoltZap env for the child session |
+
+## GitHub token boundary
+
+- The bridge may inject `GH_TOKEN` into AO child sessions so workers can act on
+  behalf of the repo.
+- The bridge does not itself serialize `GH_TOKEN` into MoltZap env, webhook
+  responses, or bridge-authored GitHub artifacts.
+- Once `GH_TOKEN` is available inside an AO child session, downstream tools and
+  prompts in that session are outside the bridge's enforcement boundary.
+- Repo writers who trigger the control path remain inside that AO child-session
+  attack surface after signature and permission checks.
+- Use least-privilege GitHub auth for that handoff: narrow PAT scopes or the
+  smallest-installation GitHub App that still satisfies the worker path.
 
 ## MoltZap boundary
 
@@ -106,9 +142,12 @@ Lifecycle ownership is explicit, not inferred from names.
 
 ## Reload and shutdown
 
-- `SIGHUP` re-reads the canonical `~/.zapbot` project config (or hosted env in
-  deployment mode), rebuilds `BridgeConfig`, and re-registers bridge routes
-  with the gateway.
+- `SIGHUP` re-reads the canonical `~/.zapbot` project config in local operator
+  mode, rebuilds `BridgeConfig`, and re-registers bridge routes with the
+  gateway.
+- Hosted deployment env is fixed for the lifetime of the process. After a
+  GitHub secrets or deployment-env change, restart or redeploy instead of
+  relying on `SIGHUP`.
 - `SIGINT` / `SIGTERM` stop the HTTP server and deregister bridge routes.
 - `start.sh` duplicate-session retry is lifecycle-gated: it may stop only a
   matching managed orchestrator record, never a session chosen by tmux-name
