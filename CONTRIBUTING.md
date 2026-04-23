@@ -23,6 +23,16 @@ cd /path/to/your-project
 /path/to/zapbot/start.sh .
 ```
 
+Config contract:
+
+- Local operator mode stores the canonical project config only at
+  `~/.zapbot/projects/<project-key>/project.json`.
+- Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
+  environment, typically injected from GitHub repository or environment
+  secrets.
+- Checkout-local `.env` and `agent-orchestrator.yaml` are legacy artifacts and
+  should not be recreated.
+
 ## Core commands
 
 ```bash
@@ -50,7 +60,7 @@ src/
 
 worker/
   ao-plugin-agent-claude-moltzap/
-                           repo-local Claude/MoltZap AO agent plugin
+                           checked-in Claude/MoltZap AO agent plugin
 
 gateway/
   optional webhook proxy / bridge registry

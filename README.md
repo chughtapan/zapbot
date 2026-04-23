@@ -73,6 +73,10 @@ canonical `~/.zapbot` project config:
 config it needs, then starts AO on `bridge.aoPort` and the webhook bridge on
 `bridge.port`.
 
+Legacy checkout-local config artifacts are unsupported. If the project checkout
+still contains `.env` or `agent-orchestrator.yaml` from an older setup,
+zapbot fails closed until those files are removed.
+
 The README examples use `start.sh` in a foreground shell so you can see the
 readiness receipt and stop local or demo startup with `Ctrl+C`. For always-on
 deployment, keep the same `~/.zapbot` config and run zapbot under your normal
@@ -87,6 +91,11 @@ process supervisor or service manager.
 If `ZAPBOT_GATEWAY_URL` is unset or only whitespace, `start.sh` stays
 `local-only`. In demo mode, set `ZAPBOT_GATEWAY_URL` and `ZAPBOT_BRIDGE_URL`
 before startup.
+
+Hosted/platform deployments use a different config boundary: set `ZAPBOT_*`
+plus GitHub auth env in the deployment environment, typically sourced from
+GitHub repository or environment secrets. Do not create repo-local config
+files in the checkout for hosted deployments.
 
 ### GitHub comment ingress
 
@@ -202,7 +211,7 @@ Switch `github.mode` to `app` and fill `appId`, `installationId`, and
 
 Hosted/platform deployments are different: do not create local project files in
 the checkout. Export `ZAPBOT_*` and GitHub auth env from your deployment
-environment, typically backed by GitHub repo secrets.
+environment, typically backed by GitHub repository or environment secrets.
 
 4. Start the operator stack from the same project checkout in a foreground
    shell:
@@ -242,6 +251,12 @@ If `ZAPBOT_GATEWAY_URL` is unset or blank, the receipt switches to
 `local-only` mode and the `Gateway:` / `Public:` lines show local-only
 markers. If the readiness lines do not appear earlier in the shell output,
 check `/tmp/zapbot-ao.log` and `/tmp/zapbot-bridge.log`.
+
+If you change `~/.zapbot/projects/<project-key>/project.json` while the
+service is running, reload or restart the service so zapbot re-reads that
+canonical local config. If you change hosted deployment env sourced from
+GitHub secrets, update the secrets and restart/redeploy; a process reload
+cannot pick up new external env values by itself.
 
 ## Managed session lifecycle
 
@@ -548,14 +563,14 @@ bun run build
 Useful entrypoints:
 
 - `bun run bridge` - run only the webhook bridge; expects canonical local
-  config or hosted env to already be present
+  config or hosted env from GitHub secrets to already be present
 - `./start.sh .` - run the bridge and AO together from a project checkout
 
 ## Repo map
 
 - `src/` - current runtime: webhook intake, canonical config service, GitHub helpers,
   orchestrator forwarding, MoltZap session support
-- `worker/` - repo-local AO plugin and Claude/MoltZap worker launcher
+- `worker/` - checked-in AO plugin and Claude/MoltZap worker launcher
 - `gateway/` - optional bridge registry / webhook proxy
 - `bin/webhook-bridge.ts` - bridge entrypoint
 - `bin/ao-spawn-with-moltzap.ts` - worker spawn helper that preserves the

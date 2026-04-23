@@ -30,6 +30,16 @@ Plain-language boundary split:
 - The lifecycle registry is the ownership ledger that decides which sessions
   zapbot may reuse, stop, or garbage-collect.
 
+Config boundary:
+
+- Local operator mode loads only the canonical project file at
+  `~/.zapbot/projects/<project-key>/project.json`.
+- Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
+  environment, typically materialized from GitHub repository or environment
+  secrets.
+- Checkout-local `.env` and `agent-orchestrator.yaml` are rejected as legacy
+  config artifacts.
+
 ## Key modules
 
 | Path | Purpose |
@@ -45,7 +55,7 @@ Plain-language boundary split:
 | `bin/ao-spawn-with-moltzap.ts` | worker spawn helper that preserves MoltZap control linkage |
 | `bin/moltzap-claude-channel.ts` | worker entrypoint that boots the Claude-side MoltZap channel loop |
 | `src/claude-channel/` | local Claude channel server primitives used by the worker runtime |
-| `worker/ao-plugin-agent-claude-moltzap/` | repo-local Claude/MoltZap AO agent plugin |
+| `worker/ao-plugin-agent-claude-moltzap/` | checked-in Claude/MoltZap AO agent plugin |
 | `src/moltzap/runtime.ts` | decode zapbot MoltZap config and provision `MOLTZAP_*` child env |
 | `src/moltzap/identity-allowlist.ts` | enforce optional sender allowlists on inbound MoltZap events |
 | `src/github-state.ts` | GitHub-native issue state reads |
@@ -106,9 +116,12 @@ Lifecycle ownership is explicit, not inferred from names.
 
 ## Reload and shutdown
 
-- `SIGHUP` re-reads the canonical `~/.zapbot` project config (or hosted env in
-  deployment mode), rebuilds `BridgeConfig`, and re-registers bridge routes
-  with the gateway.
+- `SIGHUP` re-reads the canonical `~/.zapbot` project config in local operator
+  mode, rebuilds `BridgeConfig`, and re-registers bridge routes with the
+  gateway.
+- Hosted deployment env is fixed for the lifetime of the process. After a
+  GitHub secrets or deployment-env change, restart or redeploy instead of
+  relying on `SIGHUP`.
 - `SIGINT` / `SIGTERM` stop the HTTP server and deregister bridge routes.
 - `start.sh` duplicate-session retry is lifecycle-gated: it may stop only a
   matching managed orchestrator record, never a session chosen by tmux-name

@@ -100,8 +100,12 @@ if $SERVER_MODE; then
   echo "    sudo cp $SERVICE_FILE /etc/systemd/system/zapbot-bridge.service"
   echo "    sudo systemctl enable --now zapbot-bridge"
   echo ""
-  echo "  To reload config without restart (after changing ~/.zapbot project config or hosted env):"
+  echo "  To reload config without restart (after changing ~/.zapbot project config):"
   echo "    sudo systemctl reload zapbot-bridge"
+  echo ""
+  echo "  If your deployment uses ZAPBOT_* and GitHub auth env from GitHub"
+  echo "  repository/environment secrets, update those secrets and restart or"
+  echo "  redeploy the service instead of relying on reload."
 fi
 
 # Claude Code only scans ~/.claude/skills/*/SKILL.md (one level deep).
@@ -168,10 +172,16 @@ if $SERVER_MODE; then
   echo "To onboard a repo:"
   echo "  cd ~/your-project"
   echo "  ~/.claude/skills/zapbot/bin/zapbot-team-init <owner/repo>"
+  echo "  # canonical local config is written to ~/.zapbot/projects/<project-key>/project.json"
+  echo "  # do not create checkout-local .env or agent-orchestrator.yaml"
   echo ""
   echo "To start the server:"
   echo "  cd ~/your-project"
   echo "  ~/.claude/skills/zapbot/start.sh ."
+  echo ""
+  echo "Hosted deployments should inject ZAPBOT_* and GitHub auth env from"
+  echo "GitHub repository/environment secrets and restart or redeploy when"
+  echo "those env values change."
 else
   echo "  Zapbot skill v$(cat "$ZAPBOT_DIR/VERSION") installed!"
   echo "================================================"
