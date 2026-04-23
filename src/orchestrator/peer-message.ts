@@ -5,32 +5,26 @@
  *   Goal 4 (safer-side peer-message primitive), Goal 5 (raw-comment
  *   interpretation); Acceptance (d), (e); Invariants 5, 7, 9.
  *
- * Responsibility: give every raw MoltZap peer-channel event a typed shape
- * the orchestrator prompt can route on deterministically. A worker comment
- * that does not decode is an escalation, NOT a silent drop (Acceptance (e)
- * bullet 2).
- *
  * Invariant 7 enforcement at the type level: `PeerMessageKind` contains no
  * `"vote-tally"`, no `"winner-declaration"`, no `"elimination-signal"`.
  * Convergence selection is orchestrator-only, in prose, not on the wire.
  *
- * This module is the code-side of the primitive. The safer-side CLI wrapper
- * `safer-by-default/bin/safer-peer-message` calls `encodePeerMessage`
- * indirectly via the MoltZap bridge. SKILL.md prompt files never import
- * MoltZap directly (Acceptance (d) bullet 1).
- *
- * Architect phase only: public surface, no implementation.
+ * OQ2 resolution: wire format is JSON — one object per MoltZap body text,
+ * schema-decoded by `decodePeerMessage`. Kept human-readable in GitHub
+ * comments while remaining strictly decodable.
  */
 
 import type { AoSessionName, Result } from "../types.ts";
-import type { PeerChannelKind } from "../moltzap/role-topology.ts";
-import type { SessionRole } from "../moltzap/session-role.ts";
-import type { MoltzapSenderId } from "../moltzap/types.ts";
+import { absurd, asAoSessionName, err, ok } from "../types.ts";
+import {
+  ALL_PEER_CHANNEL_KINDS,
+  decodeChannelKind,
+  type PeerChannelKind,
+} from "../moltzap/role-topology.ts";
+import { decodeSessionRole, type SessionRole } from "../moltzap/session-role.ts";
+import { asMoltzapSenderId, type MoltzapSenderId } from "../moltzap/types.ts";
 
 // ── Kinds ───────────────────────────────────────────────────────────
-//
-// Closed union. Any wire message whose `kind` is outside this set is an
-// escalation (`PeerMessageKindUnknown`).
 
 export type PeerMessageKind =
   | "artifact-published"
@@ -38,6 +32,18 @@ export type PeerMessageKind =
   | "review-request"
   | "architect-peer-ping"
   | "retire-notice";
+
+export const ALL_PEER_MESSAGE_KINDS: readonly PeerMessageKind[] = [
+  "artifact-published",
+  "status-update",
+  "review-request",
+  "architect-peer-ping",
+  "retire-notice",
+];
+
+const PEER_MESSAGE_KIND_SET: ReadonlySet<string> = new Set<string>(
+  ALL_PEER_MESSAGE_KINDS as readonly string[],
+);
 
 // ── Addressing ──────────────────────────────────────────────────────
 
@@ -47,11 +53,6 @@ export interface PeerEndpoint {
   readonly senderId: MoltzapSenderId;
 }
 
-/**
- * Recipient addressing. `senderId` may be null when the caller addresses by
- * role (e.g. "any reviewer"); the roster resolves role-only addresses to a
- * concrete `senderId` at send time.
- */
 export interface PeerRecipient {
   readonly role: SessionRole;
   readonly senderId: MoltzapSenderId | null;
@@ -66,9 +67,6 @@ export interface PeerMessage {
   readonly from: PeerEndpoint;
   readonly to: PeerRecipient;
   readonly body: string;
-  /** Link to the durable GitHub artifact, when applicable. Acceptance (d)
-   *  bullet 4: the primitive does not persist; peer messages reference
-   *  durable state, they do not create it. */
   readonly artifactUrl: string | null;
   readonly correlationId: string;
   readonly sentAtMs: number;
@@ -98,50 +96,258 @@ export type PeerMessageReceipt =
       readonly orchestrator: MoltzapSenderId;
     };
 
+// ── Decode helpers ──────────────────────────────────────────────────
+
+function shapeInvalid<T>(reason: string): Result<T, PeerMessageDecodeError> {
+  return err({ _tag: "PeerMessageShapeInvalid", reason });
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+function requireString(
+  obj: Record<string, unknown>,
+  field: string,
+): Result<string, PeerMessageDecodeError> {
+  const value = obj[field];
+  if (typeof value !== "string") {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}\` must be a string`,
+    });
+  }
+  return ok(value);
+}
+
+function optionalStringOrNull(
+  obj: Record<string, unknown>,
+  field: string,
+): Result<string | null, PeerMessageDecodeError> {
+  const value = obj[field];
+  if (value === null || value === undefined) return ok(null);
+  if (typeof value !== "string") {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}\` must be a string or null`,
+    });
+  }
+  return ok(value);
+}
+
+function requireFiniteNumber(
+  obj: Record<string, unknown>,
+  field: string,
+): Result<number, PeerMessageDecodeError> {
+  const value = obj[field];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}\` must be a finite number`,
+    });
+  }
+  return ok(value);
+}
+
+function decodeEndpoint(
+  raw: unknown,
+  field: "from",
+): Result<PeerEndpoint, PeerMessageDecodeError> {
+  if (!isPlainObject(raw)) {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}\` must be an object`,
+    });
+  }
+  const roleStr = requireString(raw, "role");
+  if (roleStr._tag === "Err") return err(roleStr.error);
+  const role = decodeSessionRole(roleStr.value);
+  if (role._tag === "Err") {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}.role\` has unknown role: ${role.error.raw}`,
+    });
+  }
+  const session = requireString(raw, "session");
+  if (session._tag === "Err") return err(session.error);
+  const senderId = requireString(raw, "senderId");
+  if (senderId._tag === "Err") return err(senderId.error);
+  if (session.value.length === 0) {
+    return shapeInvalid(`field \`${field}.session\` must be non-empty`);
+  }
+  if (senderId.value.length === 0) {
+    return shapeInvalid(`field \`${field}.senderId\` must be non-empty`);
+  }
+  return ok({
+    role: role.value,
+    session: asAoSessionName(session.value),
+    senderId: asMoltzapSenderId(senderId.value),
+  });
+}
+
+function decodeRecipient(
+  raw: unknown,
+  field: "to",
+): Result<PeerRecipient, PeerMessageDecodeError> {
+  if (!isPlainObject(raw)) {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}\` must be an object`,
+    });
+  }
+  const roleStr = requireString(raw, "role");
+  if (roleStr._tag === "Err") return err(roleStr.error);
+  const role = decodeSessionRole(roleStr.value);
+  if (role._tag === "Err") {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `field \`${field}.role\` has unknown role: ${role.error.raw}`,
+    });
+  }
+  const rawSender = raw.senderId;
+  let senderId: MoltzapSenderId | null;
+  if (rawSender === null || rawSender === undefined) {
+    senderId = null;
+  } else if (typeof rawSender === "string") {
+    if (rawSender.length === 0) {
+      return shapeInvalid(`field \`${field}.senderId\` must be non-empty or null`);
+    }
+    senderId = asMoltzapSenderId(rawSender);
+  } else {
+    return shapeInvalid(`field \`${field}.senderId\` must be string or null`);
+  }
+  return ok({ role: role.value, senderId });
+}
+
 // ── Public surface ──────────────────────────────────────────────────
 
-/**
- * Schema-decode a raw MoltZap inbound body-text into a typed `PeerMessage`.
- * Principle 2: this is the boundary where wire bytes become a trusted type.
- *
- * A decode failure returned by this function is the escalation signal
- * referenced by Acceptance (e) bullet 2. The orchestrator prompt must treat
- * `Err` as an `ESCALATED` state, not a silent drop.
- */
 export function decodePeerMessage(
   raw: string,
 ): Result<PeerMessage, PeerMessageDecodeError> {
-  throw new Error("not implemented");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e: unknown) {
+    return err({
+      _tag: "PeerMessageShapeInvalid",
+      reason: `invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+    });
+  }
+  if (!isPlainObject(parsed)) {
+    return shapeInvalid("peer message must be a JSON object");
+  }
+
+  const tag = parsed._tag;
+  if (tag !== "PeerMessage") {
+    return shapeInvalid(`field \`_tag\` must be "PeerMessage"`);
+  }
+
+  const kindStr = requireString(parsed, "kind");
+  if (kindStr._tag === "Err") return err(kindStr.error);
+  if (!PEER_MESSAGE_KIND_SET.has(kindStr.value)) {
+    return err({ _tag: "PeerMessageKindUnknown", raw: kindStr.value });
+  }
+  const kind = kindStr.value as PeerMessageKind;
+
+  const channelStr = requireString(parsed, "channel");
+  if (channelStr._tag === "Err") return err(channelStr.error);
+  const channel = decodeChannelKind(channelStr.value);
+  if (channel._tag === "Err") {
+    return err({ _tag: "PeerMessageChannelUnknown", raw: channelStr.value });
+  }
+
+  const from = decodeEndpoint(parsed.from, "from");
+  if (from._tag === "Err") return err(from.error);
+  const to = decodeRecipient(parsed.to, "to");
+  if (to._tag === "Err") return err(to.error);
+
+  const body = requireString(parsed, "body");
+  if (body._tag === "Err") return err(body.error);
+
+  const artifactUrl = optionalStringOrNull(parsed, "artifactUrl");
+  if (artifactUrl._tag === "Err") return err(artifactUrl.error);
+
+  const correlationId = requireString(parsed, "correlationId");
+  if (correlationId._tag === "Err") return err(correlationId.error);
+  if (correlationId.value.length === 0) {
+    return shapeInvalid("field `correlationId` must be non-empty");
+  }
+
+  const sentAtMs = requireFiniteNumber(parsed, "sentAtMs");
+  if (sentAtMs._tag === "Err") return err(sentAtMs.error);
+
+  return ok({
+    _tag: "PeerMessage",
+    kind,
+    channel: channel.value,
+    from: from.value,
+    to: to.value,
+    body: body.value,
+    artifactUrl: artifactUrl.value,
+    correlationId: correlationId.value,
+    sentAtMs: sentAtMs.value,
+  });
 }
 
-/**
- * Encode a `PeerMessage` into the wire body text. Round-trips with
- * `decodePeerMessage`; a property test in `test/property/peer-message.property.test.ts`
- * gates the round-trip (Principle 1, Corollary §77.1 — algebraic property).
- */
 export function encodePeerMessage(msg: PeerMessage): string {
-  throw new Error("not implemented");
+  // Serialize in a stable, round-trippable shape. JSON.stringify order is
+  // deterministic for literal object keys; we write the keys explicitly so
+  // property tests can assert the key-set.
+  const payload = {
+    _tag: msg._tag,
+    kind: msg.kind,
+    channel: msg.channel,
+    from: {
+      role: msg.from.role,
+      session: msg.from.session as string,
+      senderId: msg.from.senderId as string,
+    },
+    to: {
+      role: msg.to.role,
+      senderId: msg.to.senderId === null ? null : (msg.to.senderId as string),
+    },
+    body: msg.body,
+    artifactUrl: msg.artifactUrl,
+    correlationId: msg.correlationId,
+    sentAtMs: msg.sentAtMs,
+  };
+  return JSON.stringify(payload);
 }
 
-/**
- * Interpret a raw MoltZap inbound comment-body that originated from a
- * worker session. Thin wrapper over `decodePeerMessage` with orchestrator-
- * specific framing: decode errors are rewrapped into the orchestrator's
- * escalation tag (see control-event.ts), which attaches the source session
- * and messageId for the escalation artifact.
- */
 export function interpretWorkerComment(
   raw: string,
   source: PeerEndpoint,
 ): Result<PeerMessage, PeerMessageDecodeError> {
-  throw new Error("not implemented");
+  const decoded = decodePeerMessage(raw);
+  if (decoded._tag === "Err") return decoded;
+  const msg = decoded.value;
+  // Guard: the decoded message must declare `source` as its origin (the
+  // orchestrator otherwise cannot trust an attacker-supplied `from` field).
+  if (msg.from.senderId !== source.senderId) {
+    return shapeInvalid(
+      `from.senderId does not match inbound source (declared ${msg.from.senderId as string}, source ${source.senderId as string})`,
+    );
+  }
+  if (msg.from.session !== source.session) {
+    return shapeInvalid(
+      `from.session does not match inbound source (declared ${msg.from.session as string}, source ${source.session as string})`,
+    );
+  }
+  if (msg.from.role !== source.role) {
+    return shapeInvalid(
+      `from.role does not match inbound source (declared ${msg.from.role}, source ${source.role})`,
+    );
+  }
+  return ok(msg);
 }
 
-/**
- * Classify a peer message's intended effect on the orchestrator's roster
- * state machine. The orchestrator prompt routes on this classification;
- * worker sessions never see it.
- */
+// ── Routing ─────────────────────────────────────────────────────────
+
 export type PeerMessageRouteAction =
   | { readonly _tag: "ConvergenceCandidate"; readonly artifactUrl: string }
   | { readonly _tag: "StatusIngested" }
@@ -152,5 +358,26 @@ export type PeerMessageRouteAction =
 export function classifyForOrchestrator(
   msg: PeerMessage,
 ): PeerMessageRouteAction {
-  throw new Error("not implemented");
+  switch (msg.kind) {
+    case "artifact-published":
+      if (msg.artifactUrl !== null && msg.artifactUrl.length > 0) {
+        return { _tag: "ConvergenceCandidate", artifactUrl: msg.artifactUrl };
+      }
+      // Missing artifact URL on artifact-published is degenerate; treat as
+      // a status update rather than silently dropping. Validator paths
+      // separately produce PeerMessageShapeInvalid if the schema is tightened.
+      return { _tag: "StatusIngested" };
+    case "status-update":
+      return { _tag: "StatusIngested" };
+    case "review-request":
+      return { _tag: "FollowUpDispatch", target: msg.to };
+    case "architect-peer-ping":
+      return { _tag: "PeerCoordination" };
+    case "retire-notice":
+      return { _tag: "RetireNotice", session: msg.from.session };
+    default:
+      return absurd(msg.kind);
+  }
 }
+
+export { ALL_PEER_CHANNEL_KINDS };

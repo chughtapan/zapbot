@@ -116,26 +116,130 @@ function resolveBuiltinClaudePluginPath() {
   );
 }
 
+/**
+ * Boundary decode for an existing `.claude/moltzap-channel.mcp.json`. Principle 2.
+ *
+ * Anchors: SPEC r4.1 Invariant 4 (reserved-key collision fail-fast),
+ *          Invariant 5 (boundary decode for mcpServers merge).
+ *
+ * Returns one of:
+ *   { kind: "absent" }                           — no config; safe to write ours.
+ *   { kind: "ours" }                             — file is a well-formed mcp
+ *                                                   config whose only server is
+ *                                                   "moltzap"; safe to overwrite.
+ *   { kind: "mergeable", existing: {...} }       — file decodes; mcpServers has
+ *                                                   no "moltzap" key; we can
+ *                                                   merge our entry in.
+ *   { kind: "shapeInvalid", reason }             — file fails to decode.
+ *   { kind: "reservedKeyCollision" }             — existing file has a
+ *                                                   "moltzap" mcpServers entry
+ *                                                   we did not author. Fail-fast.
+ */
+function decodeExistingMcpConfig(configPath) {
+  if (!existsSync(configPath)) {
+    return { kind: "absent" };
+  }
+  let rawText;
+  try {
+    rawText = readFileSync(configPath, "utf8");
+  } catch (e) {
+    return { kind: "shapeInvalid", reason: `read failed: ${String(e && e.message ? e.message : e)}` };
+  }
+  if (typeof rawText !== "string" || rawText.trim().length === 0) {
+    return { kind: "shapeInvalid", reason: "config file is empty" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (e) {
+    return { kind: "shapeInvalid", reason: `invalid JSON: ${String(e && e.message ? e.message : e)}` };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "shapeInvalid", reason: "top-level value must be an object" };
+  }
+  const mcpServers = parsed.mcpServers;
+  if (mcpServers === undefined) {
+    return { kind: "mergeable", existing: parsed };
+  }
+  if (mcpServers === null || typeof mcpServers !== "object" || Array.isArray(mcpServers)) {
+    return { kind: "shapeInvalid", reason: "mcpServers must be an object" };
+  }
+  // Enumerate keys in a stable manner so behavior is deterministic across runs.
+  const keys = Object.keys(mcpServers);
+  if (keys.includes("moltzap")) {
+    // Distinguish "ours" from "collision": we mark files we author with a
+    // synthetic `_zapbotAuthored: true` key on the moltzap entry. Absent that
+    // marker, we treat the collision as foreign (Invariant 4 fail-fast).
+    const moltzapEntry = mcpServers.moltzap;
+    if (
+      moltzapEntry !== null &&
+      typeof moltzapEntry === "object" &&
+      moltzapEntry._zapbotAuthored === true
+    ) {
+      return { kind: "ours" };
+    }
+    return { kind: "reservedKeyCollision" };
+  }
+  return { kind: "mergeable", existing: parsed };
+}
+
+function buildMoltzapMcpEntry(workspacePath) {
+  return {
+    command: "bun",
+    args: [join(workspacePath, "bin", "moltzap-claude-channel.ts")],
+    env: resolveMoltzapRuntimeEnv(),
+    _zapbotAuthored: true,
+  };
+}
+
 function ensureChannelMcpConfig(workspacePath) {
   const configPath = join(workspacePath, relativeMcpConfigPath());
   mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(
-    configPath,
-    JSON.stringify(
-      {
-        mcpServers: {
-          moltzap: {
-            command: "bun",
-            args: [join(workspacePath, "bin", "moltzap-claude-channel.ts")],
-            env: resolveMoltzapRuntimeEnv(),
-          },
-        },
-      },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
-  );
+
+  const decoded = decodeExistingMcpConfig(configPath);
+
+  if (decoded.kind === "reservedKeyCollision") {
+    // Invariant 4: the "moltzap" mcpServers key is reserved for this plugin.
+    // Fail-fast with a typed error rather than silently overwriting.
+    const err = new Error(
+      "ReservedMcpKeyCollision: existing .claude/moltzap-channel.mcp.json " +
+        `already defines an mcpServers.moltzap entry at ${configPath} that ` +
+        "was not authored by zapbot. Remove or rename the foreign entry " +
+        "before launching a MoltZap-aware Claude session.",
+    );
+    err.code = "ReservedMcpKeyCollision";
+    err.path = configPath;
+    throw err;
+  }
+
+  if (decoded.kind === "shapeInvalid") {
+    const err = new Error(
+      `McpConfigShapeInvalid: ${configPath} could not be decoded: ${decoded.reason}. ` +
+        "Delete or repair the file before launching.",
+    );
+    err.code = "McpConfigShapeInvalid";
+    err.path = configPath;
+    throw err;
+  }
+
+  // Merge our entry in.
+  const base =
+    decoded.kind === "mergeable" && decoded.existing && typeof decoded.existing === "object"
+      ? decoded.existing
+      : {};
+  const existingServers =
+    base.mcpServers && typeof base.mcpServers === "object" && !Array.isArray(base.mcpServers)
+      ? base.mcpServers
+      : {};
+  const merged = {
+    ...base,
+    mcpServers: {
+      ...existingServers,
+      moltzap: buildMoltzapMcpEntry(workspacePath),
+    },
+  };
+
+  writeFileSync(configPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
 }
 
 function relativeMcpConfigPath() {

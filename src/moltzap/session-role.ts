@@ -12,10 +12,10 @@
  *     cascading churn through every caller,
  * (3) the role taxonomy stays readable without opening the session-client
  *     implementation to find it.
- *
- * Architect phase: this file establishes the closed enum. Implement-staff
- * deletes the binary form in `session-client.ts` and re-exports from here.
  */
+
+import type { Result } from "../types.ts";
+import { err, ok } from "../types.ts";
 
 /**
  * Closed union of every role a live MoltZap session may carry. Acceptance
@@ -35,14 +35,6 @@ export type SessionRoleDecodeError = {
   readonly _tag: "UnknownSessionRole";
   readonly raw: string;
 };
-
-import type { Result } from "../types.ts";
-
-export function decodeSessionRole(
-  raw: string,
-): Result<SessionRole, SessionRoleDecodeError> {
-  throw new Error("not implemented");
-}
 
 /**
  * The non-orchestrator roles a roster may contain. Derived by `Extract` so
@@ -65,3 +57,24 @@ export const ALL_WORKER_ROLES: readonly WorkerRole[] = [
   "implementer",
   "reviewer",
 ];
+
+// Interned set for O(1) membership.
+const SESSION_ROLE_SET: ReadonlySet<string> = new Set<string>(
+  ALL_SESSION_ROLES as readonly string[],
+);
+const WORKER_ROLE_SET: ReadonlySet<string> = new Set<string>(
+  ALL_WORKER_ROLES as readonly string[],
+);
+
+export function decodeSessionRole(
+  raw: string,
+): Result<SessionRole, SessionRoleDecodeError> {
+  if (typeof raw !== "string" || !SESSION_ROLE_SET.has(raw)) {
+    return err({ _tag: "UnknownSessionRole", raw: String(raw) });
+  }
+  return ok(raw as SessionRole);
+}
+
+export function isWorkerRole(role: SessionRole): role is WorkerRole {
+  return WORKER_ROLE_SET.has(role);
+}
