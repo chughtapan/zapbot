@@ -22,23 +22,33 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
   let loaded = await loadBridgeRuntime(ref, args.hosted);
   const running = await startBridge(loaded.config, loaded.dependencies);
 
-  process.on("SIGHUP", () => {
-    void (async () => {
-      const next = await loadBridgeRuntime(ref, args.hosted);
-      await running.reload(next.config, next.dependencies);
-      if (loaded.disposeAo !== null) {
-        await Effect.runPromise(loaded.disposeAo).catch(() => undefined);
-      }
-      loaded = next;
-    })();
-  });
-
   const shutdown = async () => {
     await running.stop();
     if (loaded.disposeAo !== null) {
       await Effect.runPromise(loaded.disposeAo).catch(() => undefined);
     }
   };
+
+  process.on("SIGHUP", () => {
+    void (async () => {
+      let nextLoaded: Awaited<ReturnType<typeof loadBridgeRuntime>> | null = null;
+      try {
+        nextLoaded = await loadBridgeRuntime(ref, args.hosted);
+        await running.reload(nextLoaded.config, nextLoaded.dependencies);
+        if (loaded.disposeAo !== null) {
+          await Effect.runPromise(loaded.disposeAo).catch(() => undefined);
+        }
+        loaded = nextLoaded;
+      } catch (error) {
+        if (nextLoaded !== null && nextLoaded.disposeAo !== null) {
+          await Effect.runPromise(nextLoaded.disposeAo).catch(() => undefined);
+        }
+        console.error(error instanceof Error ? error.message : String(error));
+        await shutdown().catch(() => undefined);
+        process.exit(1);
+      }
+    })();
+  });
 
   process.on("SIGINT", () => void shutdown().finally(() => process.exit(0)));
   process.on("SIGTERM", () => void shutdown().finally(() => process.exit(0)));

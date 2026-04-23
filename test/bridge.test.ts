@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   handleClassifiedWebhook,
   startBridge,
@@ -36,7 +36,6 @@ const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
 const commentId = asCommentId(7);
 const bot = asBotUsername("zapbot[bot]");
-const originalBun = (globalThis as { Bun?: unknown }).Bun;
 
 interface FakeGhCalls {
   addReaction: Array<{ repo: RepoFullName; commentId: number; reaction: string }>;
@@ -211,7 +210,7 @@ function asMentionRequest(
 }
 
 afterEach(() => {
-  (globalThis as { Bun?: unknown }).Bun = originalBun;
+  vi.restoreAllMocks();
 });
 
 describe("handleClassifiedWebhook — ignore passthrough", () => {
@@ -343,110 +342,124 @@ describe("handleClassifiedWebhook — eyes reaction", () => {
 describe("startBridge reload", () => {
   it("refreshes gh, githubState, mintToken, and aoControlHost on reload", async () => {
     let capturedFetch: ((req: Request) => Promise<Response>) | null = null;
-    (globalThis as { Bun?: unknown }).Bun = {
-      serve(input: { readonly fetch: (req: Request) => Promise<Response> }) {
-        capturedFetch = input.fetch;
-        return {
-          stop() {
-            return undefined;
-          },
-        };
-      },
-    };
+    const stdoutWrites: string[] = [];
+    const stdoutWrite = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      stdoutWrites.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(Bun, "serve").mockImplementation((((input: { readonly fetch: (req: Request) => Promise<Response> }) => {
+      capturedFetch = input.fetch;
+      return {
+        stop() {
+          return undefined;
+        },
+      };
+    }) as typeof Bun.serve));
 
-    const callsA = {
-      permissions: [] as string[],
-      durableComments: [] as string[],
-      control: [] as string[],
-      minted: 0,
-    };
-    const callsB = {
-      permissions: [] as string[],
-      durableComments: [] as string[],
-      control: [] as string[],
-      minted: 0,
-    };
+    try {
+      const callsA = {
+        permissions: [] as string[],
+        durableComments: [] as string[],
+        control: [] as string[],
+        minted: 0,
+      };
+      const callsB = {
+        permissions: [] as string[],
+        durableComments: [] as string[],
+        control: [] as string[],
+        minted: 0,
+      };
 
-    const depsA = makeReloadDeps("A", callsA);
-    const depsB = makeReloadDeps("B", callsB);
-    const running = await startBridge(makeConfig() as never, depsA);
-    if (capturedFetch === null) {
-      throw new Error("expected Bun.serve fetch handler");
+      const depsA = makeReloadDeps("A", callsA);
+      const depsB = makeReloadDeps("B", callsB);
+      const running = await startBridge(makeConfig() as never, depsA);
+      if (capturedFetch === null) {
+        throw new Error("expected Bun.serve fetch handler");
+      }
+
+      const firstTokenResponse = await capturedFetch(new Request("http://localhost/api/tokens/installation", {
+        method: "GET",
+        headers: {
+          authorization: "Bearer test-broker-key",
+        },
+      }));
+      expect(firstTokenResponse.status).toBe(200);
+      expect((await firstTokenResponse.json()) as { token: string }).toMatchObject({
+        token: "token-A",
+      });
+      expect(callsA.minted).toBe(1);
+      expect(callsB.minted).toBe(0);
+      expect(stdoutWrites.some((line) => line.includes("[bridge-A] installation_token.request"))).toBe(true);
+
+      const body = JSON.stringify({
+        action: "created",
+        repository: { full_name: "acme/app" },
+        sender: { login: "alice" },
+        issue: {
+          number: 42,
+          title: "Plan the next lane",
+          html_url: "https://github.com/acme/app/issues/42",
+        },
+        comment: { id: 7, body: "@zapbot please plan the next lane" },
+      });
+      const signature = await signPayload(body, "test-webhook-secret");
+      const firstWebhookResponse = await capturedFetch(new Request("http://localhost/api/webhooks/github", {
+        method: "POST",
+        body,
+        headers: {
+          "x-hub-signature-256": signature,
+          "x-github-event": "issue_comment",
+          "x-github-delivery": "delivery-a",
+        },
+      }));
+      expect(firstWebhookResponse.status).toBe(200);
+      expect(callsA.permissions).toEqual(["A"]);
+      expect(callsA.durableComments).toEqual(["A"]);
+      expect(callsA.control).toEqual(["A"]);
+      expect(callsB.permissions).toEqual([]);
+
+      const reloadLogOffset = stdoutWrites.length;
+      await running.reload(makeConfig() as never, depsB);
+
+      const secondTokenResponse = await capturedFetch(new Request("http://localhost/api/tokens/installation", {
+        method: "GET",
+        headers: {
+          authorization: "Bearer test-broker-key",
+        },
+      }));
+      expect(secondTokenResponse.status).toBe(200);
+      expect((await secondTokenResponse.json()) as { token: string }).toMatchObject({
+        token: "token-B",
+      });
+      expect(callsA.minted).toBe(1);
+      expect(callsB.minted).toBe(1);
+      expect(
+        stdoutWrites
+          .slice(reloadLogOffset)
+          .some((line) => line.includes("[bridge-B] installation_token.request")),
+      ).toBe(true);
+
+      const secondWebhookResponse = await capturedFetch(new Request("http://localhost/api/webhooks/github", {
+        method: "POST",
+        body,
+        headers: {
+          "x-hub-signature-256": signature,
+          "x-github-event": "issue_comment",
+          "x-github-delivery": "delivery-b",
+        },
+      }));
+      expect(secondWebhookResponse.status).toBe(200);
+      expect(callsA.permissions).toEqual(["A"]);
+      expect(callsA.durableComments).toEqual(["A"]);
+      expect(callsA.control).toEqual(["A"]);
+      expect(callsB.permissions).toEqual(["B"]);
+      expect(callsB.durableComments).toEqual(["B"]);
+      expect(callsB.control).toEqual(["B"]);
+
+      await running.stop();
+    } finally {
+      stdoutWrite.mockRestore();
     }
-
-    const firstTokenResponse = await capturedFetch(new Request("http://localhost/api/tokens/installation", {
-      method: "GET",
-      headers: {
-        authorization: "Bearer test-broker-key",
-      },
-    }));
-    expect(firstTokenResponse.status).toBe(200);
-    expect((await firstTokenResponse.json()) as { token: string }).toMatchObject({
-      token: "token-A",
-    });
-    expect(callsA.minted).toBe(1);
-    expect(callsB.minted).toBe(0);
-
-    const body = JSON.stringify({
-      action: "created",
-      repository: { full_name: "acme/app" },
-      sender: { login: "alice" },
-      issue: {
-        number: 42,
-        title: "Plan the next lane",
-        html_url: "https://github.com/acme/app/issues/42",
-      },
-      comment: { id: 7, body: "@zapbot please plan the next lane" },
-    });
-    const signature = await signPayload(body, "test-webhook-secret");
-    const firstWebhookResponse = await capturedFetch(new Request("http://localhost/api/webhooks/github", {
-      method: "POST",
-      body,
-      headers: {
-        "x-hub-signature-256": signature,
-        "x-github-event": "issue_comment",
-        "x-github-delivery": "delivery-a",
-      },
-    }));
-    expect(firstWebhookResponse.status).toBe(200);
-    expect(callsA.permissions).toEqual(["A"]);
-    expect(callsA.durableComments).toEqual(["A"]);
-    expect(callsA.control).toEqual(["A"]);
-    expect(callsB.permissions).toEqual([]);
-
-    await running.reload(makeConfig() as never, depsB);
-
-    const secondTokenResponse = await capturedFetch(new Request("http://localhost/api/tokens/installation", {
-      method: "GET",
-      headers: {
-        authorization: "Bearer test-broker-key",
-      },
-    }));
-    expect(secondTokenResponse.status).toBe(200);
-    expect((await secondTokenResponse.json()) as { token: string }).toMatchObject({
-      token: "token-B",
-    });
-    expect(callsA.minted).toBe(1);
-    expect(callsB.minted).toBe(1);
-
-    const secondWebhookResponse = await capturedFetch(new Request("http://localhost/api/webhooks/github", {
-      method: "POST",
-      body,
-      headers: {
-        "x-hub-signature-256": signature,
-        "x-github-event": "issue_comment",
-        "x-github-delivery": "delivery-b",
-      },
-    }));
-    expect(secondWebhookResponse.status).toBe(200);
-    expect(callsA.permissions).toEqual(["A"]);
-    expect(callsA.durableComments).toEqual(["A"]);
-    expect(callsA.control).toEqual(["A"]);
-    expect(callsB.permissions).toEqual(["B"]);
-    expect(callsB.durableComments).toEqual(["B"]);
-    expect(callsB.control).toEqual(["B"]);
-
-    await running.stop();
   });
 });
 

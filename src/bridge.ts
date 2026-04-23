@@ -436,7 +436,7 @@ export async function startBridge(config: BridgeConfig, deps: BridgeDependencies
     );
   }
 
-  const log = deps.loggerFactory.create("bridge");
+  let log = deps.loggerFactory.create("bridge");
   let ghAdapter = buildDefaultGhAdapter(deps.githubClient, log);
   let githubState = deps.githubState;
   let mintToken = deps.mintToken;
@@ -457,7 +457,9 @@ export async function startBridge(config: BridgeConfig, deps: BridgeDependencies
     get config() {
       return current;
     },
-    log,
+    get log() {
+      return log;
+    },
   };
 
   const handler = buildFetchHandler(() => current, ctx);
@@ -478,13 +480,11 @@ export async function startBridge(config: BridgeConfig, deps: BridgeDependencies
       await deregisterAll(current);
       current = nextConfig;
       currentDeps = nextDeps;
+      log = currentDeps.loggerFactory.create("bridge");
       ghAdapter = buildDefaultGhAdapter(currentDeps.githubClient, log);
       githubState = currentDeps.githubState;
       mintToken = currentDeps.mintToken;
-      aoControlHost = currentDeps.createAoControlHost({
-        ...current,
-        moltzap: nextConfig.moltzap,
-      });
+      aoControlHost = currentDeps.createAoControlHost(current);
       await registerAll(current);
     },
   };

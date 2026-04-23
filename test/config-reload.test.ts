@@ -277,6 +277,71 @@ describe("launcher/runtime integration surface", () => {
     await restoredCleanup;
   });
 
+  it("fails reload when a replacement child exits during startup after the old pair is gone", async () => {
+    const currentRuntime = createRuntime();
+    const nextRuntime = createRuntime({
+      projectHomeCheckoutPath: "/srv/worktrees/secondary",
+    });
+    let disposedCurrent = false;
+    let disposedNext = false;
+    const currentAoRuntime = {
+      configPath: "/tmp/zapbot/current.yaml",
+      registryPath: "/tmp/zapbot/current-registry.json",
+      dispose: Effect.sync(() => {
+        disposedCurrent = true;
+      }),
+    };
+    const nextAoRuntime = {
+      configPath: "/tmp/zapbot/next.yaml",
+      registryPath: "/tmp/zapbot/next-registry.json",
+      dispose: Effect.sync(() => {
+        disposedNext = true;
+      }),
+    };
+    const children = Array.from({ length: 4 }, () => new FakeChildProcess());
+    const calls: Array<{ command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = [];
+    const spawnImpl: typeof import("node:child_process").spawn = ((command, args, options) => {
+      calls.push({
+        command,
+        args: [...args],
+        cwd: options?.cwd,
+        env: options?.env as NodeJS.ProcessEnv,
+      });
+      return children[calls.length - 1] as never;
+    }) as never;
+
+    const launched = launchManagedProcesses(currentRuntime, currentAoRuntime, {
+      spawnImpl,
+      bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
+      bunBinary: "/usr/local/bin/bun",
+    });
+    const reloadedPromise = reloadManagedProcesses(launched, {
+      runtime: currentRuntime,
+      aoRuntime: currentAoRuntime,
+    }, {
+      runtime: nextRuntime,
+      aoRuntime: nextAoRuntime,
+    }, {
+      spawnImpl,
+      bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
+      bunBinary: "/usr/local/bin/bun",
+    });
+
+    children[0]?.exit(0);
+    children[1]?.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(4);
+
+    children[3]?.exit(1);
+    await Promise.resolve();
+    children[2]?.exit(0);
+
+    await expect(reloadedPromise).rejects.toThrow("bridge exited during startup with code 1");
+    expect(disposedCurrent).toBe(false);
+    expect(disposedNext).toBe(true);
+    expect(children[2]?.signals).toEqual(["SIGTERM"]);
+  });
+
   it("builds a coherent AO runtime env and generated config for multi-repo projects", async () => {
     const runtime = createRuntime();
     const aoRuntime = await Effect.runPromise(materializeAoRuntime(runtime));

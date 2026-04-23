@@ -46,6 +46,13 @@ interface ReloadedLaunchState {
   readonly active: LoadedLaunchState;
 }
 
+class ManagedProcessStartupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManagedProcessStartupError";
+  }
+}
+
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   const ref: ProjectRef = {
@@ -236,26 +243,41 @@ export async function reloadManagedProcesses(
   options: LaunchSpawnOptions = {},
 ): Promise<ReloadedLaunchState> {
   await current.cleanup();
+  let launched: LaunchProcessTree;
   try {
-    const launched = launchManagedProcesses(next.runtime, next.aoRuntime, options);
-    await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
-    return {
-      launched,
-      active: next,
-    };
+    launched = launchManagedProcesses(next.runtime, next.aoRuntime, options);
   } catch (error) {
     await Effect.runPromise(next.aoRuntime.dispose).catch(() => undefined);
+    let restored: LaunchProcessTree | null = null;
     try {
-      const launched = launchManagedProcesses(currentState.runtime, currentState.aoRuntime, options);
+      restored = launchManagedProcesses(currentState.runtime, currentState.aoRuntime, options);
+      await waitForManagedProcessStartup(restored);
       return {
-        launched,
+        launched: restored,
         active: currentState,
       };
     } catch {
+      if (restored !== null) {
+        await restored.cleanup().catch(() => undefined);
+      }
       await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
       throw error;
     }
   }
+
+  try {
+    await waitForManagedProcessStartup(launched);
+  } catch (error) {
+    await launched.cleanup().catch(() => undefined);
+    await Effect.runPromise(next.aoRuntime.dispose).catch(() => undefined);
+    throw error;
+  }
+
+  await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
+  return {
+    launched,
+    active: next,
+  };
 }
 
 function toRuntimeEnv(runtime: ResolvedProjectRuntime): Record<string, string> {
@@ -300,6 +322,74 @@ function waitForChildExit(child: ReturnType<typeof spawn>): Promise<void> {
     child.once("exit", finish);
     child.once("close", finish);
     child.once("error", finish);
+  });
+}
+
+function waitForManagedProcessStartup(tree: LaunchProcessTree): Promise<void> {
+  const managedChildren = [
+    { name: "ao", child: tree.ao },
+    { name: "bridge", child: tree.bridge },
+  ] as const;
+
+  for (const { name, child } of managedChildren) {
+    if (child.signalCode !== null) {
+      return Promise.reject(
+        new ManagedProcessStartupError(`${name} exited during startup via signal ${child.signalCode}`),
+      );
+    }
+    if (child.exitCode !== null) {
+      return Promise.reject(
+        new ManagedProcessStartupError(`${name} exited during startup with code ${child.exitCode}`),
+      );
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const removers: Array<() => void> = [];
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      for (const remove of removers) {
+        remove();
+      }
+      callback();
+    };
+    const timer = setTimeout(() => {
+      finish(resolve);
+    }, 0);
+
+    for (const { name, child } of managedChildren) {
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        finish(() => {
+          reject(
+            new ManagedProcessStartupError(
+              signal == null
+                ? `${name} exited during startup with code ${code ?? 0}`
+                : `${name} exited during startup via signal ${signal}`,
+            ),
+          );
+        });
+      };
+      const onError = (error: unknown) => {
+        finish(() => {
+          reject(
+            new ManagedProcessStartupError(
+              `${name} failed during startup: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          );
+        });
+      };
+      child.once("exit", onExit);
+      child.once("error", onError);
+      removers.push(() => {
+        child.off("exit", onExit);
+        child.off("error", onError);
+      });
+    }
   });
 }
 
