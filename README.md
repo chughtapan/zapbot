@@ -82,8 +82,6 @@ config it needs, then starts AO on `bridge.aoPort` and the webhook bridge on
 
 In this README, every `start.sh .` example assumes you already `cd`'d into the
 target project checkout first. The `.` is the checkout path zapbot resolves.
-`/path/to/zapbot/start.sh /path/to/your-project` is the same launch with an
-explicit checkout path.
 
 Legacy checkout-local config artifacts are unsupported. If the project checkout
 still contains `.env` or `agent-orchestrator.yaml` from an older setup,
@@ -109,16 +107,23 @@ and `ZAPBOT_BRIDGE_URL` before startup.
 Hosted/platform deployments use a different config boundary: set `ZAPBOT_*`
 plus GitHub auth env in the deployment environment, typically sourced from
 GitHub repository or environment secrets. Do not create repo-local config
-files in the checkout for hosted deployments.
+files in the checkout for hosted deployments. Hosted and `github-demo` are
+advanced, prerequisite-already-exist paths; the only self-contained
+first-success path in this README is `local-only`.
 
 ### GitHub comment ingress
 
 Zapbot only reacts to issue comments that directly mention `@zapbot` outside
 quoted/code-fenced content.
 
-Zapbot forwards the full raw comment body to AO together with repo, issue,
+Zapbot forwards the full untrusted raw comment body to AO together with repo, issue,
 comment, and delivery context. The bridge does not maintain a command table and
 does not splice raw comment text into a shell command.
+
+GitHub comments are untrusted input, including comments from repo writers.
+Signature validation and permission checks establish event provenance and repo
+write access; they do not sanitize the comment body or move that actor outside
+the AO child-session attack surface.
 
 Example requests:
 
@@ -296,19 +301,12 @@ Hosted/platform deployments are different: do not create local project files in
 the checkout. Export `ZAPBOT_*` and GitHub auth env from your deployment
 environment, typically backed by GitHub repository or environment secrets.
 
-Canonical hosted startup path:
-
-- inject the hosted env from the mapping table above, including required
-  `ZAPBOT_CHECKOUT_PATH=/path/to/your-project`
-- start the bridge directly from the zapbot checkout, not via `start.sh`:
-
-```bash
-cd /path/to/zapbot
-bun run bridge -- --hosted
-```
-
-Hosted mode reads the checkout path from `ZAPBOT_CHECKOUT_PATH`; it does not
-discover that path from `start.sh` or a checkout-local config file.
+Hosted/platform mode is an advanced deployment-owned path, not a copy-paste
+bootstrap in this README. Use it only when the host or image already has the
+equivalent of `./setup --server`, the deployment injects the hosted env above
+including `ZAPBOT_CHECKOUT_PATH`, and the deployment already owns the AO
+runtime/process-supervision contract for a hosted `bun run bridge -- --hosted`
+process.
 
 4. Start the operator stack from the same project checkout in a foreground
    shell:
@@ -349,37 +347,28 @@ ownership before you add a gateway, public ingress, or MoltZap.
    path, register the repo webhook after the bridge is up and
    `bridge.publicUrl` is reachable.
 
-For canonical local config:
-
-```bash
-cd /path/to/your-project
-PROJECT_KEY=your-project-key
-REPO=owner/repo
-CONFIG_PATH="$HOME/.zapbot/projects/$PROJECT_KEY/project.json"
-WEBHOOK_SECRET="$(jq -r --arg repo "$REPO" '.routes[] | select(.repo == $repo) | .webhookSecret' "$CONFIG_PATH")"
-GITHUB_WEBHOOK_BASE_URL="$(jq -r '.bridge.gatewayUrl // .bridge.publicUrl' "$CONFIG_PATH")"
-BRIDGE_PUBLIC_URL="$(jq -r '.bridge.publicUrl' "$CONFIG_PATH")"
-printf 'GitHub webhook URL: %s/api/webhooks/github\nBridge public URL: %s\nSecret: %s\n' \
-  "${GITHUB_WEBHOOK_BASE_URL%/}" \
-  "$BRIDGE_PUBLIC_URL" \
-  "$WEBHOOK_SECRET"
-```
-
 Register that in the GitHub repo settings:
 
+- Advanced ingress topology:
+  in `github-demo`, GitHub sends the webhook to `bridge.gatewayUrl`, and the
+  gateway forwards to `bridge.publicUrl`
+  if you intentionally expose the bridge directly, GitHub can target
+  `bridge.publicUrl` itself
 - Settings -> Webhooks -> Add webhook
-- Payload URL: in `github-demo` mode,
-  `https://<gateway-url>/api/webhooks/github`; if you intentionally expose the
-  bridge directly, `https://<public-bridge>/api/webhooks/github`
+- Payload URL: `bridge.gatewayUrl/api/webhooks/github` in `github-demo`, or
+  `bridge.publicUrl/api/webhooks/github` only when you intentionally expose the
+  bridge directly
 - Content type: `application/json`
-- Secret: the matching `routes[].webhookSecret` for that repo
+- Secret:
+  local operator mode uses the matching `routes[].webhookSecret` for that repo
+  in `~/.zapbot/projects/<project-key>/project.json`
+  hosted/platform mode uses `ZAPBOT_WEBHOOK_SECRET`
 - Event: `Issue comment`
 - Active: enabled
 
-For hosted/platform mode, use the same webhook URL shape but source the secret
-from `ZAPBOT_WEBHOOK_SECRET` instead of `project.json`. In hosted `github-demo`
-mode, the GitHub-facing URL is `ZAPBOT_GATEWAY_URL/api/webhooks/github` and the
-gateway forwards to `ZAPBOT_BRIDGE_URL`.
+In hosted `github-demo`, the same topology applies: GitHub talks to
+`ZAPBOT_GATEWAY_URL/api/webhooks/github`, and the gateway forwards to
+`ZAPBOT_BRIDGE_URL`.
 
 ## Startup receipt
 
@@ -444,6 +433,8 @@ Terms used in this section:
   `zapbot`.
 - `github-demo` mode means `start.sh` is running with public GitHub ingress,
   not `local-only` mode.
+- GitHub comment bodies stay untrusted input even after signature validation
+  and repo-permission checks.
 
 Current lifecycle behavior:
 
@@ -768,8 +759,9 @@ Useful entrypoints:
 
 - `bun run bridge` - run only the webhook bridge; expects canonical local
   config or hosted env from GitHub secrets to already be present
-- `./start.sh /path/to/project-checkout` - run the bridge and AO together for a
-  specific project checkout when invoked from the zapbot checkout
+- from a project checkout, `/path/to/zapbot/start.sh .` - run the bridge and AO
+  together with the same local-operator launch grammar used throughout this
+  README
 
 ## Repo map
 

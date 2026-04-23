@@ -35,10 +35,14 @@ Config contract:
 - Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
   environment, typically injected from GitHub repository or environment
   secrets, including required `ZAPBOT_CHECKOUT_PATH`.
+- Hosted/platform mode is deployment-owned and prerequisite-heavy; README keeps
+  `local-only` as the only self-contained first-success path.
 - README owns the local `project.json` <-> hosted env field mapping table and
   the end-to-end webhook setup steps.
 - Checkout-local `.env` and `agent-orchestrator.yaml` are legacy artifacts and
   should not be recreated.
+- GitHub comment bodies remain untrusted input even after signature and repo
+  permission checks.
 - Once zapbot forwards `GH_TOKEN` into an AO child session, behavior inside
   that session is outside the bridge's enforcement boundary.
 - Use least-privilege GitHub auth for that forwarded `GH_TOKEN` path.

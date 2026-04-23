@@ -24,6 +24,8 @@ GitHub issue_comment webhook
 Plain-language boundary split:
 
 - The bridge verifies GitHub input and forwards only allowed control events.
+- GitHub comment bodies remain untrusted input even after signature validation
+  and repo-permission checks.
 - The orchestrator is the one persistent per-project session that decides
   whether more work is needed.
 - Workers are disposable task sessions; they do not own project lifecycle.
@@ -37,6 +39,8 @@ Config boundary:
 - Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
   environment, typically materialized from GitHub repository or environment
   secrets.
+- Hosted/platform mode is deployment-owned and prerequisite-heavy; the docs use
+  local operator mode as the only self-contained first-success path.
 - Hosted env names are the env-shaped version of the same contract, for
   example `bridge.publicUrl` <-> `ZAPBOT_BRIDGE_URL`,
   `routes[].webhookSecret` <-> `ZAPBOT_WEBHOOK_SECRET`,
@@ -97,6 +101,8 @@ Worker-side spawn failures remain local to the orchestrator/worker lane:
   responses, or bridge-authored GitHub artifacts.
 - Once `GH_TOKEN` is available inside an AO child session, downstream tools and
   prompts in that session are outside the bridge's enforcement boundary.
+- Repo writers who trigger the control path remain inside that AO child-session
+  attack surface after signature and permission checks.
 - Use least-privilege GitHub auth for that handoff: narrow PAT scopes or the
   smallest-installation GitHub App that still satisfies the worker path.
 
