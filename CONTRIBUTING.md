@@ -12,7 +12,8 @@ Bridge operators also need:
 - `ao` installed
 - a GitHub App or PAT-based auth configuration
 
-Operator bootstrap flow:
+Operator bootstrap flow (`./setup --server` provisions the `bun` + `ao` runtime
+used by the later commands):
 
 ```bash
 cd /path/to/zapbot
@@ -20,10 +21,11 @@ cd /path/to/zapbot
 
 cd /path/to/your-project
 /path/to/zapbot/bin/zapbot-team-init owner/repo
-# zapbot-team-init prints the canonical project key
+# zapbot-team-init prints the canonical project key; keep it for validation
 # keep gateway/public/MoltZap unset for first success
 # edit ~/.zapbot/projects/<project-key>/project.json
 /path/to/zapbot/start.sh .
+# '.' is the required current project checkout selector here
 # validate /healthz plus ao status before any advanced ingress work
 ```
 

@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Modes:
 #   ./setup            Teammate install (skill only, no server deps)
-#   ./setup --server   Server install (adds ngrok, agent-orchestrator, tmux/jq/node prereqs)
+#   ./setup --server   Server install (provisions bun + ao runtime plus ngrok, agent-orchestrator, tmux/jq/node prereqs)
 #   ./setup --help     Show usage
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -177,6 +177,7 @@ if $SERVER_MODE; then
   echo "  # do not create checkout-local .env or agent-orchestrator.yaml"
   echo ""
   echo "Next local-operator steps:"
+  echo "  # ./setup --server already provisioned the bun + ao runtime used below"
   echo "  1. Edit ~/.zapbot/projects/<project-key>/project.json"
   echo "  2. cd ~/your-project && ~/.claude/skills/zapbot/start.sh ."
   echo "     first validation can stay local-only with gateway/public/MoltZap unset"

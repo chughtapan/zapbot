@@ -52,6 +52,10 @@ cd /path/to/zapbot
 ./setup --server
 ```
 
+`./setup --server` provisions the `bun` + `ao` runtime that the later
+`start.sh`, `ao status`, and validation commands rely on, plus the local
+operator prerequisites zapbot expects on the bridge host.
+
 Post-setup readiness check:
 
 ```bash
@@ -71,6 +75,13 @@ cd /path/to/your-project
 /path/to/zapbot/bin/zapbot-team-init owner/repo
 ```
 
+`zapbot-team-init` prints the canonical `<project-key>`. Capture that value now;
+step 5 reuses it for validation. If you miss it later, rediscover it with:
+
+```bash
+jq -r '.projectKey + " -> " + .checkoutPath' "$HOME"/.zapbot/projects/*/project.json
+```
+
 That creates canonical local operator config under:
 
 ```text
@@ -82,7 +93,8 @@ That creates canonical local operator config under:
 
 ### 3. Edit the minimum local-only config
 
-Keep public ingress and MoltZap unset. A minimal local-only config looks like:
+Edit exactly `~/.zapbot/projects/<project-key>/project.json`. Keep public ingress
+and MoltZap unset. A minimal local-only config looks like:
 
 ```json
 {
@@ -112,14 +124,16 @@ Notes:
 
 ### 4. Start the stack
 
-From the same project checkout:
+From the same project checkout, pass `.` as the required current-checkout
+selector:
 
 ```bash
 cd /path/to/your-project
 /path/to/zapbot/start.sh .
 ```
 
-`start.sh` resolves `.` as the current project checkout, loads
+Here, `.` is not generic shell shorthand. `start.sh` resolves it as "use this
+checkout as the project root", loads
 `~/.zapbot/projects/<project-key>/project.json`, materializes the AO runtime it
 needs, then starts AO on `bridge.aoPort` and the webhook bridge on
 `bridge.port`.
@@ -130,7 +144,8 @@ zapbot fails closed until those files are removed.
 
 ### 5. Validate first success
 
-From the same project checkout:
+From the same project checkout, substitute the `<project-key>` printed by
+`zapbot-team-init` above or rediscovered with the `jq` command from step 2:
 
 ```bash
 cd /path/to/your-project
@@ -181,6 +196,10 @@ Write access is only an invocation gate for the `@zapbot` path. It is not a
 trust guarantee for the comment body or the actor once control reaches the AO
 child-session surface.
 
+HMAC validation and repo-permission checks narrow who can invoke the bridge.
+They do not make the forwarded comment body trusted or provide a full
+downstream security guarantee once AO receives it.
+
 If zapbot forwards `GH_TOKEN` into an AO child session:
 
 - treat it as a high-value ambient credential
@@ -215,7 +234,8 @@ cd /path/to/other-project
 
 ## Advanced Reference
 
-These are not README quickstarts.
+These are reference notes, not README quickstarts or cold-start bootstrap
+paths.
 
 ### Hosted/platform
 
