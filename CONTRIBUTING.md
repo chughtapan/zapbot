@@ -24,7 +24,7 @@ cd /path/to/your-project
 # edit ~/.zapbot/projects/<project-key>/project.json
 /path/to/zapbot/start.sh .
 # then register https://<gateway-url>/api/webhooks/github
-# in github-demo mode, or the direct public bridge URL if you expose it
+# in the advanced public-ingress path, or the direct public bridge URL if you expose it
 # using the matching routes[].webhookSecret
 ```
 

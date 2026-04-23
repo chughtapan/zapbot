@@ -90,19 +90,21 @@ still contains `.env` or `agent-orchestrator.yaml` from an older setup,
 zapbot fails closed until those files are removed.
 
 The README examples use `start.sh` in a foreground shell so you can see the
-readiness receipt and stop local or demo startup with `Ctrl+C`. For always-on
-deployment, keep the same `~/.zapbot` config and run zapbot under your normal
-process supervisor or service manager.
+readiness receipt and stop local or advanced public-ingress startup with
+`Ctrl+C`. For always-on deployment, keep the same `~/.zapbot` config and run
+zapbot under your normal process supervisor or service manager.
 
 `start.sh` treats ingress as an explicit mode:
 
-- `local-only` runs the stack without public GitHub ingress.
-- `github-demo` requires a reachable public bridge URL and fails closed if the
-  bridge URL is missing or unreachable.
+- `local-only` is the self-contained first-success path. It runs the stack
+  without public GitHub ingress.
+- `github-demo` is the advanced public-ingress path. It assumes you already
+  have a reachable gateway/public URL pair and fails closed if that ingress is
+  missing or unreachable.
 
 If `ZAPBOT_GATEWAY_URL` is unset or only whitespace, `start.sh` stays
-`local-only`. In demo mode, set `ZAPBOT_GATEWAY_URL` and `ZAPBOT_BRIDGE_URL`
-before startup.
+`local-only`. In the advanced public-ingress path, set `ZAPBOT_GATEWAY_URL`
+and `ZAPBOT_BRIDGE_URL` before startup.
 
 Hosted/platform deployments use a different config boundary: set `ZAPBOT_*`
 plus GitHub auth env in the deployment environment, typically sourced from
@@ -271,8 +273,8 @@ Hosted env is the env-shaped version of the same config contract:
 |---|---|---|
 | `bridge.port` | `ZAPBOT_PORT` | bridge HTTP port |
 | `bridge.aoPort` | `ZAPBOT_AO_PORT` | AO dashboard/runtime port |
-| `bridge.publicUrl` | `ZAPBOT_BRIDGE_URL` | required for public GitHub ingress |
-| `bridge.gatewayUrl` | `ZAPBOT_GATEWAY_URL` | enables `github-demo` ingress mode |
+| `bridge.publicUrl` | `ZAPBOT_BRIDGE_URL` | public bridge URL the gateway forwards to in advanced `github-demo` mode |
+| `bridge.gatewayUrl` | `ZAPBOT_GATEWAY_URL` | GitHub-facing ingress URL in advanced `github-demo` mode |
 | `bridge.gatewaySecret` | `ZAPBOT_GATEWAY_SECRET` | optional gateway auth secret |
 | `bridge.apiKey` | `ZAPBOT_API_KEY` | bridge bearer for internal callers |
 | `bridge.botUsername` | `ZAPBOT_BOT_USERNAME` | defaults to `zapbot[bot]` |
@@ -291,6 +293,19 @@ Hosted env is the env-shaped version of the same config contract:
 Hosted/platform deployments are different: do not create local project files in
 the checkout. Export `ZAPBOT_*` and GitHub auth env from your deployment
 environment, typically backed by GitHub repository or environment secrets.
+
+Canonical hosted startup path:
+
+- inject the hosted env from the mapping table above
+- start the bridge directly from the zapbot checkout, not via `start.sh`:
+
+```bash
+cd /path/to/zapbot
+bun run bridge -- --hosted --checkout /path/to/your-project
+```
+
+`--checkout` should match the same checkout path you exported as
+`ZAPBOT_CHECKOUT_PATH`.
 
 4. Start the operator stack from the same project checkout in a foreground
    shell:
@@ -327,8 +342,9 @@ fi
 That proves canonical local config loading, bridge bring-up, and orchestrator
 ownership before you add a gateway, public ingress, or MoltZap.
 
-5. If you want GitHub to reach the bridge, register the repo webhook after the
-   bridge is up and `bridge.publicUrl` is reachable.
+5. If you intentionally move from `local-only` into the advanced public-ingress
+   path, register the repo webhook after the bridge is up and
+   `bridge.publicUrl` is reachable.
 
 For canonical local config:
 
@@ -492,12 +508,14 @@ Registry field meanings:
 - `tmuxName` is the attach target when zapbot knows one.
 - `worktree` is the checkout path that session was launched from.
 
-## Dummy-project demo
+## Advanced `github-demo` walkthrough
 
-This demo assumes you want `github-demo` mode with a reachable public bridge
-URL and a reachable MoltZap server. It fails closed if the bridge URL is
-missing or unreachable. Use a throwaway private repo for this demo. The final
-cleanup step deletes that repo, so do not point this flow at a real project.
+This is not the self-contained cold-start path. Use the `local-only`
+validation flow above for first success. This advanced walkthrough assumes you
+already have a reachable gateway/public ingress pair and a MoltZap server. It
+fails closed if that ingress is missing or unreachable. Use a throwaway
+private repo for this walkthrough. The final cleanup step deletes that repo,
+so do not point this flow at a real project.
 
 1. Create a dummy project checkout, initialize zapbot, and start the stack:
 
@@ -515,7 +533,8 @@ gh repo create "$DEMO_REPO" --private --source=. --remote=origin --push
 "$ZAPBOT_DIR/bin/zapbot-team-init" "$DEMO_REPO"
 ```
 
-2. Before `start.sh .`, edit the canonical config file for this demo project.
+2. Before `start.sh .`, edit the canonical config file for this throwaway
+   project.
    The default project key is the checkout basename, so for `/tmp/zapbot-demo`
    the file is:
 
@@ -523,7 +542,7 @@ gh repo create "$DEMO_REPO" --private --source=. --remote=origin --push
 $HOME/.zapbot/projects/zapbot-demo/project.json
 ```
 
-- Choose exactly one GitHub auth path for the demo:
+- Choose exactly one GitHub auth path for this walkthrough:
   - Personal/token path:
 
     ```json
@@ -541,26 +560,26 @@ $HOME/.zapbot/projects/zapbot-demo/project.json
     }
     ```
 
-- `gh auth status` should show you are logged in, because the demo creates the
-  repo and issues with the GitHub CLI.
+- `gh auth status` should show you are logged in, because this walkthrough
+  creates the repo and issues with the GitHub CLI.
 - `bridge.apiKey` and each route `webhookSecret` are already generated by
   `zapbot-team-init`.
 - If `bridge.gatewayUrl` is `null`, `start.sh` stays `local-only` and
-  will not run the GitHub-backed demo path.
-- If you use token auth, it should be a token that can create the
-  throwaway repo and comment on its issues. If you use GitHub App env instead,
-  those values come from the App you configured for this demo repo.
+  will not run the GitHub-backed advanced path.
+- If you use token auth, it should be a token that can create the throwaway
+  repo and comment on its issues. If you use GitHub App env instead, those
+  values come from the App you configured for this repo.
 
-Demo config checklist inside `project.json`:
+Advanced-path config checklist inside `project.json`:
 
 | Field | Required | Example | Where it comes from | Failure shape if wrong |
 |---|---|---|---|---|
 | `github.token` | one auth path only | `ghp_...` | GitHub token or PAT with repo access | issue/repo operations fail |
-| `github.appId` / `github.installationId` / `github.privateKeyPem` | one auth path only | `123456`, `78901234`, PEM text | GitHub App configured for the demo repo | installation token broker fails |
-| `bridge.gatewayUrl` | yes for `github-demo` | `https://gateway.example.com` | your public gateway/proxy URL | startup stays `local-only` or demo cannot ingress |
+| `github.appId` / `github.installationId` / `github.privateKeyPem` | one auth path only | `123456`, `78901234`, PEM text | GitHub App configured for the throwaway repo | installation token broker fails |
+| `bridge.gatewayUrl` | yes for `github-demo` | `https://gateway.example.com` | your public gateway/proxy URL | startup stays `local-only` or advanced path cannot ingress |
 | `bridge.publicUrl` | yes for `github-demo` | `https://bridge.example.com` | the public URL that reaches this bridge host | startup exits `missing` or `unreachable` |
-| `moltzap.serverUrl` | yes for this demo | `wss://moltzap.example/ws` | your MoltZap server | workers come up without live MoltZap coordination |
-| `moltzap.registrationSecret` | yes for this demo | shared registration secret | your MoltZap deployment | worker provisioning fails |
+| `moltzap.serverUrl` | yes for this walkthrough | `wss://moltzap.example/ws` | your MoltZap server | workers come up without live MoltZap coordination |
+| `moltzap.registrationSecret` | yes for this walkthrough | shared registration secret | your MoltZap deployment | worker provisioning fails |
 
 ```bash
 "$ZAPBOT_DIR/start.sh" .
@@ -628,7 +647,7 @@ If `tmuxName` is missing for a record, do not guess. Treat that as a signal to
 inspect `ao status --json` and `/tmp/zapbot-ao.log` instead of attaching by
 hand.
 
-Single-command questions to ask during the demo:
+Single-command questions to ask during this walkthrough:
 
 | Question | Command |
 |---|---|
@@ -642,8 +661,8 @@ If the counts do not match:
 - no orchestrator record: inspect `/tmp/zapbot-ao.log`
 - orchestrator exists but no workers: inspect the orchestrator session and
   `/tmp/zapbot-bridge.log`
-- `Mode: local-only` in the startup receipt: your gateway/public URL demo env
-  did not activate
+- `Mode: local-only` in the startup receipt: your gateway/public URL advanced
+  path did not activate
 
 6. A simple communication sketch:
 
@@ -657,7 +676,8 @@ orchestrator -> GitHub: consolidated summary
 
 7. Clean shutdown:
 
-- Stop the demo by pressing `Ctrl+C` in the `start.sh` shell that launched it.
+- Stop this walkthrough by pressing `Ctrl+C` in the `start.sh` shell that
+  launched it.
 - `Ctrl+C` stops the bridge and AO parent processes from that shell. It is not
   a global garbage-collect command for every managed session record.
 - If you inspect any leftovers manually, compare them against
@@ -676,15 +696,16 @@ jq -r '.records[] | .tag.sessionName' "$REGISTRY" |
   done
 ```
 
-- When you are done with the throwaway demo, delete the repo you created:
+- When you are done with the throwaway walkthrough, delete the repo you
+  created:
 
 ```bash
 gh repo delete "$DEMO_REPO" --yes
 ```
 
 Repo deletion cleans up the throwaway GitHub artifacts. It does not revoke or
-rotate any reusable token, App, gateway, or MoltZap secret you chose for the
-demo.
+rotate any reusable token, App, gateway, or MoltZap secret you chose for this
+walkthrough.
 
 ## Add another repo later
 
