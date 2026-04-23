@@ -138,7 +138,10 @@ describe("launcher/runtime integration surface", () => {
       bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
       bunBinary: "/usr/local/bin/bun",
     });
-    const reloadedPromise = reloadManagedProcesses(launched, firstAoRuntime, {
+    const reloadedPromise = reloadManagedProcesses(launched, {
+      runtime: firstRuntime,
+      aoRuntime: firstAoRuntime,
+    }, {
       runtime: secondRuntime,
       aoRuntime: secondAoRuntime,
     }, {
@@ -162,6 +165,10 @@ describe("launcher/runtime integration surface", () => {
     const reloaded = await reloadedPromise;
 
     expect(disposedFirst).toBe(true);
+    expect(reloaded.active).toEqual({
+      runtime: secondRuntime,
+      aoRuntime: secondAoRuntime,
+    });
     expect(calls).toHaveLength(4);
     expect(calls[2]).toMatchObject({
       command: "ao",
@@ -180,10 +187,94 @@ describe("launcher/runtime integration surface", () => {
 
     const reloadedAo = children[2];
     const reloadedBridge = children[3];
-    const cleanupPromise = reloaded.cleanup();
+    const cleanupPromise = reloaded.launched.cleanup();
     reloadedAo?.exit(0);
     reloadedBridge?.exit(0);
     await cleanupPromise;
+  });
+
+  it("restores the previous managed pair if replacement launch fails", async () => {
+    const currentRuntime = createRuntime();
+    const nextRuntime = createRuntime({
+      projectHomeCheckoutPath: "/srv/worktrees/secondary",
+    });
+    let disposedCurrent = false;
+    let disposedNext = false;
+    const currentAoRuntime = {
+      configPath: "/tmp/zapbot/current.yaml",
+      registryPath: "/tmp/zapbot/current-registry.json",
+      dispose: Effect.sync(() => {
+        disposedCurrent = true;
+      }),
+    };
+    const nextAoRuntime = {
+      configPath: "/tmp/zapbot/next.yaml",
+      registryPath: "/tmp/zapbot/next-registry.json",
+      dispose: Effect.sync(() => {
+        disposedNext = true;
+      }),
+    };
+    const children = Array.from({ length: 4 }, () => new FakeChildProcess());
+    const calls: Array<{ command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = [];
+    let shouldFailReplacement = false;
+    const spawnImpl: typeof import("node:child_process").spawn = ((command, args, options) => {
+      if (shouldFailReplacement && calls.length === 2) {
+        shouldFailReplacement = false;
+        throw new Error("replacement launch failed");
+      }
+      calls.push({
+        command,
+        args: [...args],
+        cwd: options?.cwd,
+        env: options?.env as NodeJS.ProcessEnv,
+      });
+      return children[calls.length - 1] as never;
+    }) as never;
+
+    const launched = launchManagedProcesses(currentRuntime, currentAoRuntime, {
+      spawnImpl,
+      bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
+      bunBinary: "/usr/local/bin/bun",
+    });
+    shouldFailReplacement = true;
+    const reloadedPromise = reloadManagedProcesses(launched, {
+      runtime: currentRuntime,
+      aoRuntime: currentAoRuntime,
+    }, {
+      runtime: nextRuntime,
+      aoRuntime: nextAoRuntime,
+    }, {
+      spawnImpl,
+      bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
+      bunBinary: "/usr/local/bin/bun",
+    });
+
+    children[0]?.exit(0);
+    children[1]?.exit(0);
+    const reloaded = await reloadedPromise;
+
+    expect(reloaded.active).toEqual({
+      runtime: currentRuntime,
+      aoRuntime: currentAoRuntime,
+    });
+    expect(disposedCurrent).toBe(false);
+    expect(disposedNext).toBe(true);
+    expect(calls).toHaveLength(4);
+    expect(calls[2]).toMatchObject({
+      command: "ao",
+      args: ["start"],
+      cwd: "/srv/worktrees/repo",
+    });
+    expect(calls[3]).toMatchObject({
+      command: "/usr/local/bin/bun",
+      args: ["/srv/zapbot/bin/webhook-bridge.ts", "--checkout", "/srv/worktrees/repo"],
+      cwd: "/srv/worktrees/repo",
+    });
+
+    const restoredCleanup = reloaded.launched.cleanup();
+    children[2]?.exit(0);
+    children[3]?.exit(0);
+    await restoredCleanup;
   });
 
   it("builds a coherent AO runtime env and generated config for multi-repo projects", async () => {

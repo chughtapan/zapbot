@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import {
   handleClassifiedWebhook,
+  startBridge,
   type BridgeConfig,
+  type BridgeDependencies,
   type BridgeHandlerContext,
   type GhAdapter,
   type RepoRoute,
@@ -34,6 +36,7 @@ const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
 const commentId = asCommentId(7);
 const bot = asBotUsername("zapbot[bot]");
+const originalBun = (globalThis as { Bun?: unknown }).Bun;
 
 interface FakeGhCalls {
   addReaction: Array<{ repo: RepoFullName; commentId: number; reaction: string }>;
@@ -107,6 +110,13 @@ function makeConfig(withRoute = true): BridgeConfig {
   }
   return {
     port: 3000,
+    ingress: {
+      _tag: "LocalOnly",
+      mode: "local-only",
+      gatewayUrl: null,
+      publicUrl: null,
+      requiresReachablePublicUrl: false,
+    },
     publicUrl: "http://localhost:3000",
     gatewayUrl: "",
     gatewaySecret: null,
@@ -116,6 +126,21 @@ function makeConfig(withRoute = true): BridgeConfig {
     moltzap: { _tag: "MoltzapDisabled" },
     repos,
   };
+}
+
+async function signPayload(body: string, secret: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(body));
+  return `sha256=${Array.from(new Uint8Array(sig))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
 function makeCtx(
@@ -184,6 +209,10 @@ function asMentionRequest(
     request: request.value,
   };
 }
+
+afterEach(() => {
+  (globalThis as { Bun?: unknown }).Bun = originalBun;
+});
 
 describe("handleClassifiedWebhook — ignore passthrough", () => {
   it("echoes the ignore reason without touching gh", async () => {
@@ -310,3 +339,195 @@ describe("handleClassifiedWebhook — eyes reaction", () => {
     expect(calls.addReaction[0].reaction).toBe("eyes");
   });
 });
+
+describe("startBridge reload", () => {
+  it("refreshes gh, githubState, mintToken, and aoControlHost on reload", async () => {
+    let capturedFetch: ((req: Request) => Promise<Response>) | null = null;
+    (globalThis as { Bun?: unknown }).Bun = {
+      serve(input: { readonly fetch: (req: Request) => Promise<Response> }) {
+        capturedFetch = input.fetch;
+        return {
+          stop() {
+            return undefined;
+          },
+        };
+      },
+    };
+
+    const callsA = {
+      permissions: [] as string[],
+      durableComments: [] as string[],
+      control: [] as string[],
+      minted: 0,
+    };
+    const callsB = {
+      permissions: [] as string[],
+      durableComments: [] as string[],
+      control: [] as string[],
+      minted: 0,
+    };
+
+    const depsA = makeReloadDeps("A", callsA);
+    const depsB = makeReloadDeps("B", callsB);
+    const running = await startBridge(makeConfig() as never, depsA);
+    if (capturedFetch === null) {
+      throw new Error("expected Bun.serve fetch handler");
+    }
+
+    const firstTokenResponse = await capturedFetch(new Request("http://localhost/api/tokens/installation", {
+      method: "GET",
+      headers: {
+        authorization: "Bearer test-broker-key",
+      },
+    }));
+    expect(firstTokenResponse.status).toBe(200);
+    expect((await firstTokenResponse.json()) as { token: string }).toMatchObject({
+      token: "token-A",
+    });
+    expect(callsA.minted).toBe(1);
+    expect(callsB.minted).toBe(0);
+
+    const body = JSON.stringify({
+      action: "created",
+      repository: { full_name: "acme/app" },
+      sender: { login: "alice" },
+      issue: {
+        number: 42,
+        title: "Plan the next lane",
+        html_url: "https://github.com/acme/app/issues/42",
+      },
+      comment: { id: 7, body: "@zapbot please plan the next lane" },
+    });
+    const signature = await signPayload(body, "test-webhook-secret");
+    const firstWebhookResponse = await capturedFetch(new Request("http://localhost/api/webhooks/github", {
+      method: "POST",
+      body,
+      headers: {
+        "x-hub-signature-256": signature,
+        "x-github-event": "issue_comment",
+        "x-github-delivery": "delivery-a",
+      },
+    }));
+    expect(firstWebhookResponse.status).toBe(200);
+    expect(callsA.permissions).toEqual(["A"]);
+    expect(callsA.durableComments).toEqual(["A"]);
+    expect(callsA.control).toEqual(["A"]);
+    expect(callsB.permissions).toEqual([]);
+
+    await running.reload(makeConfig() as never, depsB);
+
+    const secondTokenResponse = await capturedFetch(new Request("http://localhost/api/tokens/installation", {
+      method: "GET",
+      headers: {
+        authorization: "Bearer test-broker-key",
+      },
+    }));
+    expect(secondTokenResponse.status).toBe(200);
+    expect((await secondTokenResponse.json()) as { token: string }).toMatchObject({
+      token: "token-B",
+    });
+    expect(callsA.minted).toBe(1);
+    expect(callsB.minted).toBe(1);
+
+    const secondWebhookResponse = await capturedFetch(new Request("http://localhost/api/webhooks/github", {
+      method: "POST",
+      body,
+      headers: {
+        "x-hub-signature-256": signature,
+        "x-github-event": "issue_comment",
+        "x-github-delivery": "delivery-b",
+      },
+    }));
+    expect(secondWebhookResponse.status).toBe(200);
+    expect(callsA.permissions).toEqual(["A"]);
+    expect(callsA.durableComments).toEqual(["A"]);
+    expect(callsA.control).toEqual(["A"]);
+    expect(callsB.permissions).toEqual(["B"]);
+    expect(callsB.durableComments).toEqual(["B"]);
+    expect(callsB.control).toEqual(["B"]);
+
+    await running.stop();
+  });
+});
+
+function makeReloadDeps(
+  label: string,
+  calls: {
+    permissions: string[];
+    durableComments: string[];
+    control: string[];
+    minted: number;
+  },
+): BridgeDependencies {
+  return {
+    loggerFactory: {
+      create(component: string) {
+        return createLogger(`${component}-${label}`, "info");
+      },
+    },
+    githubClient: {
+      addLabel: async () => undefined,
+      removeLabel: async () => undefined,
+      postComment: async () => ({ id: 1 }),
+      updateComment: async () => undefined,
+      closeIssue: async () => undefined,
+      createIssue: async () => "https://github.com/acme/app/issues/1",
+      editIssue: async () => undefined,
+      convertPrToDraft: async () => undefined,
+      addReaction: async () => undefined,
+      addIssueReaction: async () => undefined,
+      assignIssue: async () => undefined,
+      getIssue: async () => ({ number: 42, state: "open", labels: [], assignees: [], body: "", author: "alice", pullRequest: false }),
+      getIssueState: async () => "open",
+      getIssueBody: async () => "",
+      listIssuesWithLabel: async () => [],
+      listIssueEvents: async () => [],
+      getUserPermission: async () => {
+        calls.permissions.push(label);
+        return "write";
+      },
+      listWebhooks: async () => [],
+      createWebhook: async () => 1,
+      updateWebhook: async () => undefined,
+      deactivateWebhook: async () => undefined,
+    },
+    githubState: {
+      postComment: async () => {
+        calls.durableComments.push(label);
+        return ok(asCommentId(99));
+      },
+      getIssue: async () => ok({
+        repo,
+        number: issue,
+        state: "open",
+        labels: [],
+        assignees: [],
+        body: "",
+        author: "carol",
+      }),
+      getLinkedPullRequest: async () => ok(null),
+    },
+    mintToken: async () => {
+      calls.minted += 1;
+      return {
+        token: `token-${label}`,
+        expiresAt: "2026-04-23T00:00:00Z",
+      };
+    },
+    createAoControlHost() {
+      return {
+        ensureStarted: async () => {
+          calls.control.push(label);
+          return ok(undefined);
+        },
+        resolveReady: async () => ok({
+          session: asAoSessionName(`${label}-orchestrator`),
+          senderId: asMoltzapSenderId(`${label}-sender`),
+          mode: "reused",
+        }),
+        sendPrompt: async () => ok(undefined),
+      };
+    },
+    gatewayHeartbeatMs: 300_000,
+  };
+}

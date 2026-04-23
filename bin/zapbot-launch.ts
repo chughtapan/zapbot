@@ -41,6 +41,11 @@ interface LoadedLaunchState {
   readonly aoRuntime: AoRuntimeHandle;
 }
 
+interface ReloadedLaunchState {
+  readonly launched: LaunchProcessTree;
+  readonly active: LoadedLaunchState;
+}
+
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   const ref: ProjectRef = {
@@ -100,13 +105,16 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
         try {
           const next = await loadLaunchState(ref);
           cleaningUp = true;
-          launched = await reloadManagedProcesses(launched, active.aoRuntime, next);
+          const reloaded = await reloadManagedProcesses(launched, active, next);
           cleaningUp = false;
-          active = next;
+          launched = reloaded.launched;
+          active = reloaded.active;
           generation += 1;
           watch(launched, generation);
         } catch (error) {
           console.error(error instanceof Error ? error.message : String(error));
+          settled = true;
+          resolveExit(1);
         } finally {
           reloading = false;
           cleaningUp = false;
@@ -223,13 +231,31 @@ export function resolveBridgeScriptPath(moduleUrl: string = import.meta.url): st
 
 export async function reloadManagedProcesses(
   current: LaunchProcessTree,
-  currentAoRuntime: AoRuntimeHandle,
+  currentState: LoadedLaunchState,
   next: LoadedLaunchState,
   options: LaunchSpawnOptions = {},
-): Promise<LaunchProcessTree> {
+): Promise<ReloadedLaunchState> {
   await current.cleanup();
-  await Effect.runPromise(currentAoRuntime.dispose).catch(() => undefined);
-  return launchManagedProcesses(next.runtime, next.aoRuntime, options);
+  try {
+    const launched = launchManagedProcesses(next.runtime, next.aoRuntime, options);
+    await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
+    return {
+      launched,
+      active: next,
+    };
+  } catch (error) {
+    await Effect.runPromise(next.aoRuntime.dispose).catch(() => undefined);
+    try {
+      const launched = launchManagedProcesses(currentState.runtime, currentState.aoRuntime, options);
+      return {
+        launched,
+        active: currentState,
+      };
+    } catch {
+      await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
+      throw error;
+    }
+  }
 }
 
 function toRuntimeEnv(runtime: ResolvedProjectRuntime): Record<string, string> {
