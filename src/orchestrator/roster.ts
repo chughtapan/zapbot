@@ -389,7 +389,35 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       spawned.push(member);
     }
 
-    // Register roster once all members are up.
+    // Second-pass allowlist rebind (Invariant 3 — allowlist symmetry):
+    // the first-member spawn saw no peers; the second-member spawn saw
+    // only the first peer; etc. After every member is up, rebind each
+    // member's allowlist with the FULL peer set so later-arriving peers
+    // can reach earlier members (e.g. architect-b → architect-a).
+    const finalPeersByRole = new Map<WorkerRole, MoltzapSenderId[]>();
+    for (const role of ALL_WORKER_ROLES) finalPeersByRole.set(role, []);
+    for (const m of spawned) {
+      const bucket = finalPeersByRole.get(m.role);
+      if (bucket) bucket.push(m.senderId);
+    }
+    for (const m of spawned) {
+      // Exclude the member itself so a member's own senderId is not
+      // added to its own allowlist as a peer.
+      const perMemberPeers = new Map<WorkerRole, readonly MoltzapSenderId[]>();
+      for (const role of ALL_WORKER_ROLES) {
+        const ids = (finalPeersByRole.get(role) ?? []).filter(
+          (sid) => sid !== m.senderId,
+        );
+        if (ids.length > 0) perMemberPeers.set(role, ids);
+      }
+      const rebind = deps.bindAllowlistFor(m, perMemberPeers);
+      if (rebind._tag === "Err") {
+        await rollback(spawned);
+        return err({ _tag: "AllowlistBindFailed", cause: rebind.error });
+      }
+    }
+
+    // Register roster once all members are up and allowlists are symmetric.
     const statuses = new Map<AoSessionName, RosterMemberStatus>();
     for (const m of spawned) {
       statuses.set(m.session, { _tag: "Live", member: m });

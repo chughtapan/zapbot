@@ -223,6 +223,75 @@ async function runAoCommand(
   });
 }
 
+/**
+ * Run a bun script (currently `bin/ao-spawn-with-moltzap.ts`) with the
+ * same env/timeout discipline as `runAoCommand`. Used by the roster
+ * manager's spawnSession dep to go through the MoltZap bootstrap path
+ * (architect plan §2.3) rather than invoking `ao spawn` directly.
+ */
+async function runBunScript(
+  options: AoCliOptions,
+  scriptPath: string,
+  args: readonly string[],
+): Promise<Result<SpawnResult, SpawnFailure>> {
+  const env = buildCliEnv(options.env ?? process.env, options.configPath);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const bun = normalizeEnvValue(env.BUN_BINARY) ?? "bun";
+  return await new Promise((resolve) => {
+    const child = spawn(bun, ["run", scriptPath, ...args], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    if (child.stdout) {
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (c) => {
+        stdout += String(c);
+      });
+    }
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (c) => {
+        stderr += String(c);
+      });
+    }
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      resolve(err({
+        cause: error instanceof Error ? error.message : String(error),
+        exitCode: null,
+        stderr,
+      }));
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timeout);
+      if (timedOut) {
+        resolve(err({
+          cause: `bun run ${scriptPath} timed out after ${timeoutMs}ms`,
+          exitCode: null,
+          stderr,
+        }));
+        return;
+      }
+      if (signal !== null || code !== 0) {
+        resolve(err({
+          cause: signal !== null ? `terminated by ${signal}` : `exit ${code ?? 0}`,
+          exitCode: code ?? null,
+          stderr,
+        }));
+        return;
+      }
+      resolve(ok({ stdout, stderr }));
+    });
+  });
+}
+
 function parseStatusSessions(output: string): Result<readonly AoStatusSession[], { readonly reason: string }> {
   try {
     const parsed = JSON.parse(output);
@@ -433,17 +502,24 @@ export function createAoCliRosterManagerDeps(
           + `your acceptance criteria and publish durable artifacts to GitHub.`,
       ].join("\n");
 
-      const spawnResult = await runAoCommand(options, [
-        "spawn",
-        "--project",
-        projectName as string,
-        "--role",
-        member.role,
-        "--label",
-        member.displayLabel,
-        "--prompt",
-        prompt,
-      ]);
+      // Architect plan §2.3: spawn through `bin/ao-spawn-with-moltzap.ts`
+      // so the worker carries its MoltZap identity. `ao spawn` directly
+      // bypasses the MoltZap bootstrap and leaves the worker without a
+      // peer-channel back to the orchestrator.
+      const spawnResult = await runBunScript(
+        options,
+        "bin/ao-spawn-with-moltzap.ts",
+        [
+          "--prompt",
+          prompt,
+          "--role",
+          member.role,
+          "--label",
+          member.displayLabel,
+          "--project",
+          projectName as string,
+        ],
+      );
       if (spawnResult._tag === "Err") {
         return err({
           _tag: "MemberSpawnFailed",

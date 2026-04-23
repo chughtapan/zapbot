@@ -176,7 +176,7 @@ function decodeExistingMcpConfig(configPath) {
       typeof moltzapEntry === "object" &&
       moltzapEntry._zapbotAuthored === true
     ) {
-      return { kind: "ours" };
+      return { kind: "ours", existing: parsed };
     }
     return { kind: "reservedKeyCollision" };
   }
@@ -222,9 +222,14 @@ function ensureChannelMcpConfig(workspacePath) {
     throw err;
   }
 
-  // Merge our entry in.
+  // Merge our entry in. Both "mergeable" (no moltzap key yet) and "ours"
+  // (our existing moltzap entry) carry the decoded document on `existing`;
+  // either way, reuse it as the base so user-added top-level keys and
+  // sibling mcpServers entries survive rewrites.
   const base =
-    decoded.kind === "mergeable" && decoded.existing && typeof decoded.existing === "object"
+    (decoded.kind === "mergeable" || decoded.kind === "ours") &&
+    decoded.existing &&
+    typeof decoded.existing === "object"
       ? decoded.existing
       : {};
   const existingServers =
