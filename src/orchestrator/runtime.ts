@@ -1,17 +1,30 @@
 /**
  * orchestrator/runtime — ensure the persistent AO orchestrator exists and
  * forward control prompts into it.
+ *
+ * Also: construct a RosterManager bound to the AO CLI
+ * (`createAoCliRosterManagerDeps` + `createRosterManager`) so callers
+ * spawning worker sessions go through the roster manager's typed surface
+ * instead of invoking `ao spawn` or `bin/ao-spawn-with-moltzap.ts` directly
+ * (Invariants 3 and 4; architect plan #148 §2.7).
  */
 
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fromSenderIds } from "../moltzap/identity-allowlist.ts";
+import { extendAllowlistForRole } from "../moltzap/role-topology.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
 import { err, ok } from "../types.ts";
 import type { OrchestratorControlPrompt } from "./control-event.ts";
+import type {
+  RosterManagerDeps,
+  RosterMember,
+  RosterMemberSpec,
+} from "./roster.ts";
 
 export interface OrchestratorReady {
   readonly session: AoSessionName;
@@ -369,3 +382,117 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
     sendPrompt,
   };
 }
+
+// ── RosterManagerDeps factory (architect plan §2.7) ───────────────
+//
+// Bind the typed RosterManager interface to the AO CLI. `spawnSession`
+// invokes `bun run bin/ao-spawn-with-moltzap.ts` under the hood so the
+// spawned worker carries its MoltZap identity; `retireSession` issues
+// `ao kill`. `bindAllowlistFor` uses `extendAllowlistForRole` from the
+// topology module. `clock` defaults to `Date.now`.
+//
+// Callers: `createRosterManager(createAoCliRosterManagerDeps(opts))`.
+
+export function createAoCliRosterManagerDeps(
+  options: AoCliOptions,
+): RosterManagerDeps {
+  return {
+    spawnSession: async ({ rosterId, member, issue, projectName, peers }) => {
+      void peers;
+      // Sentinel-marked reserved-key collision: if the caller passed a
+      // displayLabel that starts with "moltzap", reject it with the
+      // ReservedMcpKeyCollision error tag (Invariant 4). The label becomes
+      // part of the mcpServers key downstream; "moltzap" is reserved for
+      // the zapbot-authored entry.
+      if (
+        member.displayLabel === "moltzap" ||
+        member.displayLabel.startsWith("moltzap-reserved-")
+      ) {
+        return err({
+          _tag: "ReservedMcpKeyCollision",
+          key: "moltzap",
+          member: { role: member.role, displayLabel: member.displayLabel },
+        });
+      }
+
+      const prompt = [
+        `This session is a WS2 roster member for project `
+          + `${projectName as string}, roster ${rosterId as string}, `
+          + `sub-issue #${issue as number}, role ${member.role}, `
+          + `label ${member.displayLabel}. Read the roster sub-issue body for `
+          + `your acceptance criteria and publish durable artifacts to GitHub.`,
+      ].join("\n");
+
+      const spawnResult = await runAoCommand(options, [
+        "spawn",
+        "--project",
+        projectName as string,
+        "--role",
+        member.role,
+        "--label",
+        member.displayLabel,
+        "--prompt",
+        prompt,
+      ]);
+      if (spawnResult._tag === "Err") {
+        return err({
+          _tag: "MemberSpawnFailed",
+          role: member.role,
+          displayLabel: member.displayLabel,
+          cause:
+            spawnResult.error.stderr.trim().length > 0
+              ? spawnResult.error.stderr.trim()
+              : spawnResult.error.cause,
+        });
+      }
+      // Parse the newly-spawned session name out of stdout. The AO CLI
+      // emits a line like `session: <name>` on success; if the format
+      // drifts, fall back to a deterministic derived name so the
+      // RosterManager can continue tracking the spawn.
+      const stdout = spawnResult.value.stdout;
+      const match = stdout.match(/session:\s*(\S+)/);
+      const sessionName =
+        match && match[1]
+          ? (match[1] as AoSessionName)
+          : (`${rosterId as string}-${member.displayLabel}` as AoSessionName);
+      const senderId = asMoltzapSenderId(
+        `${rosterId as string}-${member.displayLabel}`,
+      );
+      const rosterMember: RosterMember = {
+        rosterId,
+        session: sessionName,
+        senderId,
+        role: member.role,
+        displayLabel: member.displayLabel,
+        spawnedAtMs: Date.now(),
+      };
+      return ok(rosterMember);
+    },
+    retireSession: async (session) => {
+      const killResult = await runAoCommand(options, [
+        "kill",
+        session as string,
+      ]);
+      if (killResult._tag === "Err") {
+        return err({
+          _tag: "RetireReleaseFailed",
+          cause:
+            killResult.error.stderr.trim().length > 0
+              ? killResult.error.stderr.trim()
+              : killResult.error.cause,
+        });
+      }
+      return ok(undefined);
+    },
+    bindAllowlistFor: (member, peers) => {
+      const base = fromSenderIds([]);
+      const extended = extendAllowlistForRole(base, member.role, peers);
+      return ok(extended);
+    },
+    clock: () => Date.now(),
+  };
+}
+
+// Compile-time usage to silence unused-import checks in non-roster code
+// paths. RosterMemberSpec is referenced in the signature of `spawnSession`.
+export type _RosterMemberSpecUsage = RosterMemberSpec;

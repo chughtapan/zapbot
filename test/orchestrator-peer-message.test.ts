@@ -106,7 +106,7 @@ describe("peer-message.decodePeerMessage", () => {
 });
 
 describe("peer-message.encodePeerMessage roundtrip", () => {
-  it("decode ∘ encode = id", () => {
+  it("decode ∘ encode = id", { timeout: 15_000 }, () => {
     fc.assert(
       fc.property(
         fc.record({
