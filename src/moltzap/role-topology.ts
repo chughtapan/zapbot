@@ -16,7 +16,11 @@
 
 import type { Result } from "../types.ts";
 import { absurd, err, ok } from "../types.ts";
-import { fromSenderIds, type SenderAllowlist } from "./identity-allowlist.ts";
+import {
+  fromSenderIds,
+  toSenderIds,
+  type SenderAllowlist,
+} from "./identity-allowlist.ts";
 import {
   ALL_SESSION_ROLES,
   decodeSessionRole,
@@ -172,12 +176,7 @@ export function extendAllowlistForRole(
   role: SessionRole,
   peers: ReadonlyMap<SessionRole, readonly MoltzapSenderId[]>,
 ): SenderAllowlist {
-  // Pull the opaque Set out of the base allowlist by round-tripping through
-  // fromSenderIds. identity-allowlist intentionally hides the underlying
-  // Set behind a symbol; read it via the construction path only.
-  const baseIds = getAllowlistIds(base);
-  const merged = new Set<MoltzapSenderId>(baseIds);
-
+  const merged = new Set<MoltzapSenderId>(toSenderIds(base));
   const allowedChannels = channelsForRole(role);
 
   for (const [peerRole, ids] of peers) {
@@ -186,25 +185,6 @@ export function extendAllowlistForRole(
   }
 
   return fromSenderIds([...merged]);
-}
-
-/**
- * Read back the sender-id set from a SenderAllowlist. Uses the same Symbol
- * the identity-allowlist module uses internally. Kept local because the
- * extension function is the only boundary that needs both "construct" and
- * "inspect"; other callers treat SenderAllowlist as opaque.
- */
-function getAllowlistIds(list: SenderAllowlist): ReadonlySet<MoltzapSenderId> {
-  // Find the unique symbol key on the frozen handle; identity-allowlist
-  // assigns exactly one symbol-valued property to the allowlist object.
-  const syms = Object.getOwnPropertySymbols(list);
-  for (const s of syms) {
-    const val = (list as unknown as Record<symbol, unknown>)[s];
-    if (val instanceof Set) {
-      return val as ReadonlySet<MoltzapSenderId>;
-    }
-  }
-  return new Set<MoltzapSenderId>();
 }
 
 /**

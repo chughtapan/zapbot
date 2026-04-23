@@ -24,7 +24,7 @@ import type {
   ProjectName,
   Result,
 } from "../types.ts";
-import { absurd, asIssueNumber, asProjectName, err, ok } from "../types.ts";
+import { asIssueNumber, asProjectName, err, ok } from "../types.ts";
 import {
   fromSenderIds,
   type SenderAllowlist,
@@ -333,10 +333,22 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
         const cleanupErr = await rollback(spawned);
         const errTag = res.error._tag;
         if (errTag === "ReservedMcpKeyCollision") {
-          // Reserved-key collision is a typed error in its own right;
-          // rollback is still performed, but we surface the specific
-          // collision tag so callers don't confuse it with a generic spawn
-          // failure (Invariant 4).
+          // Reserved-key collision is a typed error in its own right
+          // (Invariant 4). Rollback is still performed; if rollback itself
+          // failed, surface that via a PartialSpawnRolledBack wrapping the
+          // collision cause — silently dropping rollback errors would leak
+          // partial-roster state.
+          if (cleanupErr !== null && spawned.length > 0) {
+            return err({
+              _tag: "PartialSpawnRolledBack",
+              spawned,
+              failedAt: {
+                role: memberSpec.role,
+                displayLabel: memberSpec.displayLabel,
+              },
+              cause: `ReservedMcpKeyCollision on key "moltzap"; rollback errors: ${cleanupErr}`,
+            });
+          }
           return err({
             _tag: "ReservedMcpKeyCollision",
             key: "moltzap",
@@ -458,6 +470,11 @@ export function resolveSpawnPeers(
   alreadySpawned: readonly RosterMember[],
   incoming: RosterMemberSpec,
 ): ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]> {
+  // `spec` is retained in the signature for forward-compat: a future
+  // revision may prune peers using the spec's declared-member list before
+  // a role's members have all spawned. Today we only need the
+  // already-spawned set.
+  void spec;
   const byRole = new Map<WorkerRole, MoltzapSenderId[]>();
   for (const role of ALL_WORKER_ROLES) {
     byRole.set(role, []);
@@ -466,13 +483,17 @@ export function resolveSpawnPeers(
     const bucket = byRole.get(m.role);
     if (bucket) bucket.push(m.senderId);
   }
-  // `incoming` is intentionally unused here: we expose peers already spawned
-  // at the moment this member is about to be introduced. The upstream
-  // contract in the architect plan makes this the seed-set; downstream
-  // members extend their own allowlists when they come online in turn.
-  void incoming;
-  void spec;
-  // Freeze buckets.
+  // Omit roles the incoming member cannot receive from directly. For the
+  // four-role topology, `implementer` and `reviewer` do not receive from
+  // sideways peers of their own role, so we drop those buckets from the
+  // returned map (the empty default would leak them as "present but
+  // empty" to the bind step).
+  if (incoming.role === "implementer") {
+    byRole.delete("implementer");
+  }
+  if (incoming.role === "reviewer") {
+    byRole.delete("reviewer");
+  }
   const frozen = new Map<WorkerRole, readonly MoltzapSenderId[]>();
   for (const [role, ids] of byRole) frozen.set(role, ids);
   return frozen;
@@ -495,5 +516,3 @@ export { fromSenderIds };
 
 // Re-export peer channel kind for barrel convenience.
 export type { PeerChannelKind };
-// Suppress unused warnings for types used only in JSDoc references.
-export type _Unused_Absurd = typeof absurd;

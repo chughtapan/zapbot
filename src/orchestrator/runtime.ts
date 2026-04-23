@@ -391,10 +391,20 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
 // `ao kill`. `bindAllowlistFor` uses `extendAllowlistForRole` from the
 // topology module. `clock` defaults to `Date.now`.
 //
-// Callers: `createRosterManager(createAoCliRosterManagerDeps(opts))`.
+// Callers: `createRosterManager(createAoCliRosterManagerDeps(opts, {...}))`.
+
+export interface AoCliRosterManagerOptions {
+  /**
+   * Orchestrator sender identity. Seeded into every worker's base
+   * allowlist so workers accept inbound messages from the orchestrator;
+   * `extendAllowlistForRole` unions per-role peers on top of this seed.
+   */
+  readonly orchestratorSenderId: MoltzapSenderId;
+}
 
 export function createAoCliRosterManagerDeps(
   options: AoCliOptions,
+  rosterOptions: AoCliRosterManagerOptions,
 ): RosterManagerDeps {
   return {
     spawnSession: async ({ rosterId, member, issue, projectName, peers }) => {
@@ -446,15 +456,21 @@ export function createAoCliRosterManagerDeps(
         });
       }
       // Parse the newly-spawned session name out of stdout. The AO CLI
-      // emits a line like `session: <name>` on success; if the format
-      // drifts, fall back to a deterministic derived name so the
-      // RosterManager can continue tracking the spawn.
+      // emits a line like `session: <name>` on success. If the format
+      // drifts we must fail loudly: fabricating a session name would
+      // leave the RosterManager tracking a ghost and every later
+      // retireSession would fail on a name that was never spawned.
       const stdout = spawnResult.value.stdout;
       const match = stdout.match(/session:\s*(\S+)/);
-      const sessionName =
-        match && match[1]
-          ? (match[1] as AoSessionName)
-          : (`${rosterId as string}-${member.displayLabel}` as AoSessionName);
+      if (!match || !match[1]) {
+        return err({
+          _tag: "MemberSpawnFailed",
+          role: member.role,
+          displayLabel: member.displayLabel,
+          cause: `could not parse session name from \`ao spawn\` stdout: ${stdout.trim()}`,
+        });
+      }
+      const sessionName = match[1] as AoSessionName;
       const senderId = asMoltzapSenderId(
         `${rosterId as string}-${member.displayLabel}`,
       );
@@ -485,14 +501,13 @@ export function createAoCliRosterManagerDeps(
       return ok(undefined);
     },
     bindAllowlistFor: (member, peers) => {
-      const base = fromSenderIds([]);
+      // Seed the base with the orchestrator's senderId so every worker
+      // accepts inbound messages from the orchestrator; extendAllowlistForRole
+      // unions per-role peers on top (Invariant 3).
+      const base = fromSenderIds([rosterOptions.orchestratorSenderId]);
       const extended = extendAllowlistForRole(base, member.role, peers);
       return ok(extended);
     },
     clock: () => Date.now(),
   };
 }
-
-// Compile-time usage to silence unused-import checks in non-roster code
-// paths. RosterMemberSpec is referenced in the signature of `spawnSession`.
-export type _RosterMemberSpecUsage = RosterMemberSpec;
