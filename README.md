@@ -3,37 +3,35 @@
 Zapbot is a thin GitHub webhook control bridge for the AO runtime (`ao`).
 
 GitHub keeps the durable task record. Zapbot validates GitHub webhook
-signatures against the configured secret, uses repo write access as an
-invocation gate, and forwards control events into a persistent AO orchestrator
-session for each configured project.
+signatures, uses repo write access as an invocation gate for `@zapbot`, and
+forwards allowed control events into one persistent AO orchestrator session per
+project.
 
-## Plain-language terms
+README is the canonical local-only quickstart. It is intentionally scoped to
+the first self-contained success path:
 
-- `ao` is the CLI/runtime zapbot uses to start and keep agent sessions alive.
-- An orchestrator session is the always-on AO session for one project. It reads
-  GitHub events, chooses what to do next, and delegates work.
-- Worker sessions are short-lived AO sessions spawned for one issue or task.
-- MoltZap is the live messaging layer attached to an AO session. Zapbot uses
-  it so the orchestrator and workers can coordinate in real time.
+- bridge host prepared
+- one project initialized under `~/.zapbot`
+- zapbot started in `local-only` mode
+- bridge health and AO orchestrator state verified
 
-## Runtime flow
+Hosted/platform and public-ingress paths are reference-only and are not part of
+this quickstart. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[ARCHITECTURE.md](ARCHITECTURE.md) for the broader operator/runtime contract.
 
-1. GitHub sends `issue_comment` webhooks to `/api/webhooks/github`.
-2. Zapbot validates the configured GitHub webhook signature and detects an
-   eligible direct `@zapbot` mention.
-3. Zapbot checks that the commenter has repo write access to invoke the control
-   path.
-4. Zapbot ensures the project's AO orchestrator session is running.
-5. Zapbot forwards the GitHub control event into that orchestrator session.
-6. The orchestrator decides whether to spawn worker sessions with
-   `bun run bin/ao-spawn-with-moltzap.ts <issue-number>`.
+You need two checkouts:
+
+- the zapbot checkout, which contains `./setup`, `bin/zapbot-team-init`, and
+  `start.sh`
+- the target project checkout that zapbot should control
+
+Plain-language terms used below:
+
+- `ao` is the CLI/runtime zapbot uses to keep agent sessions alive.
+- the orchestrator is the one long-lived AO session for a project.
+- workers are short-lived AO sessions spawned later for task-specific work.
 
 ## First Success (Local-only)
-
-README is the canonical first-success guide. The only self-contained startup
-path here is local operator mode with public ingress and MoltZap disabled.
-Hosted/platform and `github-demo` are advanced/reference-only paths later in
-this document.
 
 ### Prerequisites
 
@@ -42,6 +40,10 @@ Bridge operators need:
 - `git`
 - `gh` authenticated via `gh auth login`
 - `node`, `tmux`, and `jq`
+
+`bun` and `ao` do not need to exist yet. `./setup --server` below is the step
+that provisions the `bun` + `ao` runtime used by the later quickstart
+commands.
 
 ### 1. Prepare the bridge host
 
@@ -75,8 +77,8 @@ cd /path/to/your-project
 /path/to/zapbot/bin/zapbot-team-init owner/repo
 ```
 
-`zapbot-team-init` prints the canonical `<project-key>`. Capture that value now;
-step 5 reuses it for validation. If you miss it later, rediscover it with:
+`zapbot-team-init` prints the canonical `<project-key>`. Capture that value
+now; step 5 reuses it for validation. If you miss it later, rediscover it with:
 
 ```bash
 jq -r '.projectKey + " -> " + .checkoutPath' "$HOME"/.zapbot/projects/*/project.json
@@ -93,8 +95,8 @@ That creates canonical local operator config under:
 
 ### 3. Edit the minimum local-only config
 
-Edit exactly `~/.zapbot/projects/<project-key>/project.json`. Keep public ingress
-and MoltZap unset. A minimal local-only config looks like:
+Edit exactly `~/.zapbot/projects/<project-key>/project.json`. Keep public
+ingress and MoltZap unset. A minimal local-only config looks like:
 
 ```json
 {
@@ -129,7 +131,7 @@ selector:
 
 ```bash
 cd /path/to/your-project
-/path/to/zapbot/start.sh .
+/path/to/zapbot/start.sh .  # '.' means "use this checkout as the project root"
 ```
 
 Here, `.` is not generic shell shorthand. `start.sh` resolves it as "use this
@@ -183,6 +185,15 @@ If the managed-session registry is missing, empty, or stale:
   not, treat the record as bookkeeping drift, not proof of a live session. Do
   not kill tmux by name from a stale row alone.
 
+First success in README stops here. In `local-only` mode you have proven:
+
+- zapbot can load canonical config from `~/.zapbot`
+- the bridge can start and answer `/healthz`
+- the AO orchestrator can start and publish visible runtime state
+
+GitHub webhook delivery, public ingress, and live `@zapbot` comment handling
+are advanced paths outside this self-contained quickstart.
+
 ## Trust Boundary
 
 Zapbot only reacts to issue comments that directly mention `@zapbot` outside
@@ -232,86 +243,15 @@ cd /path/to/other-project
 /path/to/zapbot/bin/zapbot-team-init --project-key <existing-project-key> --add-repo owner/other-repo
 ```
 
-## Advanced Reference
+## Advanced paths
 
-These are reference notes, not README quickstarts or cold-start bootstrap
-paths.
+README intentionally stops at the self-contained local-only path. For
+hosted/platform, GitHub App auth, public ingress (`github-demo`), and MoltZap
+operator reference, use:
 
-### Hosted/platform
-
-Hosted/platform mode is deployment-owned. Use it only when the host or image
-already has the equivalent of `./setup --server`, the deployment injects the
-required hosted env including `ZAPBOT_CHECKOUT_PATH`, and the deployment owns
-the AO/runtime/process-supervision contract for a hosted
-`bun run bridge -- --hosted` process.
-
-Hosted env is the env-shaped version of the same config contract:
-
-| Local `project.json` field | Hosted env | Notes |
-|---|---|---|
-| `checkoutPath` | `ZAPBOT_CHECKOUT_PATH` | required absolute checkout path on the host; zapbot uses it as the repo/worktree root in hosted mode |
-| `projectKey` | `ZAPBOT_PROJECT_KEY` | optional hosted override; defaults to the checkout basename slug when unset |
-| `bridge.port` | `ZAPBOT_PORT` | bridge HTTP port |
-| `bridge.aoPort` | `ZAPBOT_AO_PORT` | AO dashboard/runtime port |
-| `bridge.publicUrl` | `ZAPBOT_BRIDGE_URL` | public bridge URL the gateway forwards to in advanced `github-demo` mode |
-| `bridge.gatewayUrl` | `ZAPBOT_GATEWAY_URL` | GitHub-facing ingress URL in advanced `github-demo` mode |
-| `bridge.gatewaySecret` | `ZAPBOT_GATEWAY_SECRET` | optional gateway auth secret |
-| `bridge.apiKey` | `ZAPBOT_API_KEY` | bridge bearer for internal callers |
-| `bridge.botUsername` | `ZAPBOT_BOT_USERNAME` | defaults to `zapbot[bot]` |
-| `bridge.logLevel` | `ZAPBOT_LOG_LEVEL` | defaults to `info` |
-| `routes[].repo` | `ZAPBOT_REPO` | hosted mode is one repo route per process |
-| `routes[].defaultBranch` | `ZAPBOT_DEFAULT_BRANCH` | defaults to `main` |
-| `routes[].webhookSecret` | `ZAPBOT_WEBHOOK_SECRET` | GitHub webhook HMAC secret |
-| `github.token` | `ZAPBOT_GITHUB_TOKEN` | token/PAT auth path |
-| `github.appId` | `GITHUB_APP_ID` | GitHub App auth path |
-| `github.installationId` | `GITHUB_APP_INSTALLATION_ID` | GitHub App auth path |
-| `github.privateKeyPem` | `GITHUB_APP_PRIVATE_KEY` | full PEM contents |
-| `moltzap.serverUrl` | `ZAPBOT_MOLTZAP_SERVER_URL` | optional MoltZap runtime |
-| `moltzap.registrationSecret` | `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | optional MoltZap registration |
-| `moltzap.allowedSenders` | `ZAPBOT_MOLTZAP_ALLOWED_SENDERS` | optional sender allowlist |
-
-### Public ingress (`github-demo`)
-
-`github-demo` is an advanced public-ingress path. It assumes you already have:
-
-- a reachable gateway/public URL pair
-- GitHub webhook registration access
-- a reason to move beyond `local-only`
-
-Ingress topology:
-
-- in `github-demo`, GitHub sends the webhook to `bridge.gatewayUrl` /
-  `ZAPBOT_GATEWAY_URL`
-- the gateway forwards to `bridge.publicUrl` / `ZAPBOT_BRIDGE_URL`
-- if you intentionally expose the bridge directly, GitHub can target the
-  public bridge URL instead
-
-Webhook secret source:
-
-- local operator mode uses the matching `routes[].webhookSecret` in
-  `~/.zapbot/projects/<project-key>/project.json`
-- hosted/platform mode uses `ZAPBOT_WEBHOOK_SECRET`
-
-### GitHub App and MoltZap
-
-GitHub App fields:
-
-- `appId`: numeric App ID from the GitHub App settings page
-- `installationId`: installation ID for the App installation on the target
-  owner/repo
-- `privateKeyPem`: full PEM private-key contents, including the `BEGIN` /
-  `END` lines
-
-Minimum GitHub App permissions:
-
-- Issues read/write
-- Pull requests read/write
-- Contents read/write
-- Checks read
-
-MoltZap is optional for README first success. Enable it only when you already
-have MoltZap infrastructure and want live worker coordination via
-`moltzap.*` or `ZAPBOT_MOLTZAP_*`.
+- [CONTRIBUTING.md](CONTRIBUTING.md) for operator and repo-maintainer guidance
+- [ARCHITECTURE.md](ARCHITECTURE.md) for runtime/module boundaries and config
+  contracts
 
 ## Development
 
