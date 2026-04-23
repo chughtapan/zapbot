@@ -694,15 +694,13 @@ export function resolveSpawnPeers(
   // sideways peers of their own role, so we drop those buckets from the
   // returned map (the empty default would leak them as "present but
   // empty" to the bind step).
-  if (incoming.role === "implementer") {
-    byRole.delete("implementer");
-  }
-  if (incoming.role === "reviewer") {
-    byRole.delete("reviewer");
-  }
-  const frozen = new Map<WorkerRole, readonly MoltzapSenderId[]>();
-  for (const [role, ids] of byRole) frozen.set(role, ids);
-  return frozen;
+  // Drop buckets for roles the incoming member cannot receive from
+  // sideways (same-role peers for implementer/reviewer). The returned
+  // type narrows to `ReadonlyMap<_, readonly _[]>` so callers cannot
+  // mutate through it; no defensive freeze needed.
+  if (incoming.role === "implementer") byRole.delete("implementer");
+  if (incoming.role === "reviewer") byRole.delete("reviewer");
+  return byRole;
 }
 
 export function resolveRetiredRecipientRoute(
