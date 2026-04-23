@@ -1,9 +1,16 @@
 #!/usr/bin/env bun
 
 import { spawn } from "node:child_process";
+import { resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
-import { materializeAoRuntime } from "../src/config/ao-runtime.ts";
+import {
+  AO_WEBHOOK_SECRET_ENV_VAR,
+  materializeAoRuntime,
+  resolveAoWebhookSecret,
+  type AoRuntimeHandle,
+} from "../src/config/ao-runtime.ts";
 import { asRepoCheckoutPath, type ProjectRef } from "../src/config/home.ts";
 import { createConfigService } from "../src/config/service.ts";
 import type { ResolvedProjectRuntime } from "../src/config/schema.ts";
@@ -12,6 +19,20 @@ import { buildMoltzapProcessEnv } from "../src/moltzap/runtime.ts";
 interface LaunchArgs {
   readonly checkoutPath: string;
   readonly projectKey?: string;
+}
+
+interface LaunchSpawnOptions {
+  readonly spawnImpl?: typeof spawn;
+  readonly bridgeScriptPath?: string;
+  readonly bunBinary?: string;
+}
+
+interface LaunchProcessTree {
+  readonly ao: ReturnType<typeof spawn>;
+  readonly bridge: ReturnType<typeof spawn>;
+  readonly env: NodeJS.ProcessEnv;
+  readonly reload: () => void;
+  readonly cleanup: () => Promise<void>;
 }
 
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
@@ -24,45 +45,16 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
 
   const runtime = await Effect.runPromise(configService.loadProjectRuntime(ref));
   const aoRuntime = await Effect.runPromise(materializeAoRuntime(runtime));
+  const launched = launchManagedProcesses(runtime, aoRuntime);
 
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    AO_CONFIG_PATH: aoRuntime.configPath,
-    ZAPBOT_PROJECT_KEY: runtime.projectHome.projectKey as string,
-    ZAPBOT_CHECKOUT_PATH: runtime.projectHome.checkoutPath as string,
-    ZAPBOT_MANAGED_SESSION_REGISTRY_PATH: aoRuntime.registryPath,
-  };
-  for (const [key, value] of Object.entries(toRuntimeEnv(runtime))) {
-    env[key] = value;
-  }
-
-  const ao = spawn("ao", ["start"], {
-    cwd: runtime.projectHome.checkoutPath as string,
-    env,
-    stdio: "inherit",
+  process.on("SIGHUP", () => {
+    launched.reload();
   });
-  const bridge = spawn("bun", ["bin/webhook-bridge.ts", "--checkout", runtime.projectHome.checkoutPath as string], {
-    cwd: runtime.projectHome.checkoutPath as string,
-    env,
-    stdio: "inherit",
-  });
+  process.on("SIGINT", () => void launched.cleanup());
+  process.on("SIGTERM", () => void launched.cleanup());
 
-  let cleaned = false;
-  const cleanup = async () => {
-    if (cleaned) {
-      return;
-    }
-    cleaned = true;
-    ao.kill("SIGTERM");
-    bridge.kill("SIGTERM");
-    await Effect.runPromise(aoRuntime.dispose).catch(() => undefined);
-  };
-
-  process.on("SIGINT", () => void cleanup());
-  process.on("SIGTERM", () => void cleanup());
-
-  const exitCode = await waitForFirstExit(ao, bridge);
-  await cleanup();
+  const exitCode = await waitForFirstExit(launched.ao, launched.bridge);
+  await launched.cleanup();
   process.exit(exitCode);
 }
 
@@ -91,6 +83,78 @@ function parseArgs(argv: readonly string[]): LaunchArgs {
   return { checkoutPath, projectKey };
 }
 
+export function launchManagedProcesses(
+  runtime: ResolvedProjectRuntime,
+  aoRuntime: AoRuntimeHandle,
+  options: LaunchSpawnOptions = {},
+): LaunchProcessTree {
+  const spawnImpl = options.spawnImpl ?? spawn;
+  const env = buildLauncherEnv(runtime, aoRuntime);
+  const ao = spawnImpl("ao", ["start"], {
+    cwd: runtime.projectHome.checkoutPath as string,
+    env,
+    stdio: "inherit",
+  });
+  const bridge = spawnImpl(
+    options.bunBinary ?? process.execPath,
+    [
+      options.bridgeScriptPath ?? resolveBridgeScriptPath(),
+      "--checkout",
+      runtime.projectHome.checkoutPath as string,
+    ],
+    {
+      cwd: runtime.projectHome.checkoutPath as string,
+      env,
+      stdio: "inherit",
+    },
+  );
+
+  let cleaned = false;
+  return {
+    ao,
+    bridge,
+    env,
+    reload() {
+      bridge.kill("SIGHUP");
+    },
+    async cleanup() {
+      if (cleaned) {
+        return;
+      }
+      cleaned = true;
+      ao.kill("SIGTERM");
+      bridge.kill("SIGTERM");
+      await Effect.runPromise(aoRuntime.dispose).catch(() => undefined);
+    },
+  };
+}
+
+export function buildLauncherEnv(
+  runtime: ResolvedProjectRuntime,
+  aoRuntime: AoRuntimeHandle,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    AO_CONFIG_PATH: aoRuntime.configPath,
+    ZAPBOT_PROJECT_KEY: runtime.projectHome.projectKey as string,
+    ZAPBOT_CHECKOUT_PATH: runtime.projectHome.checkoutPath as string,
+    ZAPBOT_MANAGED_SESSION_REGISTRY_PATH: aoRuntime.registryPath,
+  };
+  const webhookSecret = resolveAoWebhookSecret(runtime);
+  if (webhookSecret !== null) {
+    env[AO_WEBHOOK_SECRET_ENV_VAR] = webhookSecret;
+  }
+  for (const [key, value] of Object.entries(toRuntimeEnv(runtime))) {
+    env[key] = value;
+  }
+  return env;
+}
+
+export function resolveBridgeScriptPath(moduleUrl: string = import.meta.url): string {
+  return resolve(fileURLToPath(new URL("./webhook-bridge.ts", moduleUrl)));
+}
+
 function toRuntimeEnv(runtime: ResolvedProjectRuntime): Record<string, string> {
   const firstRoute = Array.from(runtime.routes.values())[0] ?? null;
   return {
@@ -114,7 +178,13 @@ async function waitForFirstExit(...children: Array<ReturnType<typeof spawn>>): P
   });
 }
 
-await main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+const isMainModule =
+  typeof process.argv[1] === "string" &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMainModule) {
+  await main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

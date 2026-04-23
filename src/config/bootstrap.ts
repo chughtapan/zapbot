@@ -140,7 +140,11 @@ export function rotateLocalSecrets(
 }
 
 function resolveProjectHomePath(projectKey: ProjectKey): string {
-  return join(process.env.HOME ?? "", ".zapbot", "projects", projectKey as string);
+  const home = process.env.HOME;
+  if (typeof home !== "string" || home.trim().length === 0) {
+    throw new Error("HOME must be set to initialize canonical ~/.zapbot project config");
+  }
+  return join(home, ".zapbot", "projects", projectKey as string);
 }
 
 function createInitialDocument(input: {

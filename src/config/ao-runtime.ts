@@ -8,6 +8,8 @@ import type { ResolvedProjectRuntime } from "./schema.ts";
 import { resolveManagedSessionRegistryPath } from "../lifecycle/contracts.ts";
 import type { ProjectName, RepoFullName } from "../types.ts";
 
+export const AO_WEBHOOK_SECRET_ENV_VAR = "ZAPBOT_WEBHOOK_SECRET";
+
 export interface AoRuntimeHandle {
   readonly configPath: string;
   readonly registryPath: string;
@@ -69,6 +71,11 @@ export function resolveProjectBinding(
   };
 }
 
+export function resolveAoWebhookSecret(runtime: ResolvedProjectRuntime): string | null {
+  const firstRoute = Array.from(runtime.routes.values())[0] ?? null;
+  return firstRoute?.webhookSecret ?? null;
+}
+
 function buildAoRuntimeYaml(runtime: ResolvedProjectRuntime): string {
   const projects = Object.fromEntries(
     Array.from(runtime.routes.values()).map((route) => [
@@ -81,7 +88,7 @@ function buildAoRuntimeYaml(runtime: ResolvedProjectRuntime): string {
           plugin: "github",
           webhook: {
             path: "/api/webhooks/github",
-            secretEnvVar: "__CANONICAL_ZAPBOT_WEBHOOK_SECRET__",
+            secretEnvVar: AO_WEBHOOK_SECRET_ENV_VAR,
             signatureHeader: "x-hub-signature-256",
             eventHeader: "x-github-event",
           },

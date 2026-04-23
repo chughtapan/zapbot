@@ -1,13 +1,16 @@
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
+import { initializeProjectConfig } from "../src/config/bootstrap.ts";
 import {
   createManagedSessionFileRegistry,
   managedSessionIdFromSessionName,
   resolveManagedSessionRegistryPath,
 } from "../src/lifecycle/contracts.ts";
 import {
+  resolveManagedStartupRetry,
   ensureProjectOrchestrator,
   forwardControlPrompt,
   createAoCliControlHost,
@@ -37,6 +40,77 @@ describe("ensureProjectOrchestrator", () => {
     const result = await ensureProjectOrchestrator(asProjectName("app"), host);
     expect(result._tag).toBe("Ok");
     expect(calls).toEqual(["ensureStarted", "resolveReady"]);
+  });
+});
+
+describe("resolveManagedStartupRetry", () => {
+  it("reads managed orchestrator state from the canonical ~/.zapbot registry", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "zapbot-home-"));
+    const checkoutPath = mkdtempSync(join(tmpdir(), "zapbot-checkout-"));
+    const aoConfigDir = mkdtempSync(join(tmpdir(), "zapbot-ao-config-"));
+    const aoConfigPath = join(aoConfigDir, "agent-orchestrator.generated.yaml");
+    const previousHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+
+    try {
+      const receipt = await Effect.runPromise(initializeProjectConfig({
+        checkoutPath,
+        repo: "owner/app",
+      }));
+      const registry = createManagedSessionFileRegistry({
+        registryPath: resolveManagedSessionRegistryPath({
+          projectHomePath: join(receipt.projectHomePath, "state"),
+        }),
+      });
+      await registry.put({
+        id: managedSessionIdFromSessionName(asAoSessionName("app-orchestrator")),
+        tag: {
+          managed: true,
+          owner: "zapbot",
+          projectName: asProjectName("app"),
+          sessionName: asAoSessionName("app-orchestrator"),
+          scope: "orchestrator",
+          origin: "start.sh",
+          claimedAtMs: Date.now(),
+        },
+        tmuxName: "app-orchestrator",
+        worktree: checkoutPath,
+        processId: null,
+        phase: "active",
+        lastHeartbeatAtMs: Date.now(),
+      });
+
+      writeFileSync(
+        aoConfigPath,
+        `port: 3001
+projects:
+  app:
+    path: ${checkoutPath}
+`,
+        "utf8",
+      );
+
+      const decision = await resolveManagedStartupRetry({
+        projectDir: checkoutPath,
+        projectConfigPath: aoConfigPath,
+        aoLogText: "fatal: duplicate session: app-orchestrator",
+      });
+
+      expect(decision).toEqual({
+        action: "retry",
+        duplicateSession: "app-orchestrator",
+        reason: "duplicate session app-orchestrator matches a zapbot-managed orchestrator",
+      });
+    } finally {
+      if (previousHome !== undefined) {
+        process.env.HOME = previousHome;
+      } else {
+        delete process.env.HOME;
+      }
+      rmSync(fakeHome, { recursive: true, force: true });
+      rmSync(checkoutPath, { recursive: true, force: true });
+      rmSync(aoConfigDir, { recursive: true, force: true });
+    }
   });
 });
 

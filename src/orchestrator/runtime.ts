@@ -7,7 +7,10 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { parse as parseYaml } from "yaml";
+import { asRepoCheckoutPath, projectStateDir, resolveProjectHome } from "../config/home.ts";
+import type { ConfigServiceError } from "../config/schema.ts";
 import {
   createManagedSessionFileRegistry,
   isManagedSessionRecord,
@@ -142,9 +145,20 @@ export async function resolveManagedStartupRetry(
     };
   }
 
+  const projectHome = await Effect.runPromise(
+    Effect.either(resolveProjectHome({ checkoutPath: asRepoCheckoutPath(request.projectDir) })),
+  );
+  if (projectHome._tag === "Left") {
+    return {
+      action: "fail",
+      duplicateSession,
+      reason: stringifyProjectHomeError(projectHome.left),
+    };
+  }
+
   const registry = createManagedSessionFileRegistry({
     registryPath: resolveManagedSessionRegistryPath({
-      projectDir: request.projectDir,
+      projectHomePath: projectStateDir(projectHome.right),
     }),
   });
   const managed = await registry.listByProject(projectName.value);
@@ -609,5 +623,21 @@ function stringifyRegistryError(error: ManagedSessionRegistryError): string {
     case "ManagedSessionAlreadyOwned":
     case "ManagedSessionNotFound":
       return error.sessionId;
+  }
+}
+
+function stringifyProjectHomeError(error: ConfigServiceError): string {
+  switch (error._tag) {
+    case "ZapbotHomeMissing":
+      return `canonical zapbot home missing: ${error.path}`;
+    case "ProjectHomeMissing":
+      return `canonical project home missing: ${error.projectKey}`;
+    case "LegacyRepoLocalConfigUnsupported":
+      return `legacy repo-local config unsupported: ${error.path}`;
+    case "ConfigFileUnreadable":
+    case "ConfigDecodeFailed":
+      return `${error.path}: ${error.cause}`;
+    case "IngressConfigInvalid":
+      return error.reason;
   }
 }

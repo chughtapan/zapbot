@@ -94,4 +94,21 @@ describe("canonical config service", () => {
     expect(receipt.projectHomePath.startsWith(join(fakeHome, ".zapbot", "projects"))).toBe(true);
     expect(receipt.configPath.endsWith("/project.json")).toBe(true);
   });
+
+  it("bootstrap fails closed when HOME is missing", async () => {
+    delete process.env.HOME;
+
+    const result = await Effect.runPromise(Effect.either(initializeProjectConfig({
+      checkoutPath,
+      repo: "owner/repo",
+    })));
+
+    expect(result._tag).toBe("Left");
+    if (result._tag === "Left") {
+      expect(result.left).toMatchObject({
+        _tag: "BootstrapConfigWriteFailed",
+      });
+      expect(result.left.cause).toContain("HOME must be set");
+    }
+  });
 });
