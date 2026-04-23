@@ -252,6 +252,16 @@ describe("launcher/runtime integration surface", () => {
 
     children[0]?.exit(0);
     children[1]?.exit(0);
+    let reloadSettled = false;
+    void reloadedPromise.then(() => {
+      reloadSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reloadSettled).toBe(false);
+    expect(calls).toHaveLength(3);
+    expect(children[2]?.signals).toEqual(["SIGTERM"]);
+
+    children[2]?.exit(0);
     const reloaded = await reloadedPromise;
 
     expect(reloaded.active).toEqual({
@@ -261,7 +271,6 @@ describe("launcher/runtime integration surface", () => {
     expect(disposedCurrent).toBe(false);
     expect(disposedNext).toBe(true);
     expect(calls).toHaveLength(5);
-    expect(children[2]?.signals).toEqual(["SIGTERM"]);
     expect(calls[2]).toMatchObject({
       command: "ao",
       args: ["start"],

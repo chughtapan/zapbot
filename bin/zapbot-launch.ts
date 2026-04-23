@@ -54,6 +54,16 @@ class ManagedProcessStartupError extends Error {
   }
 }
 
+class ManagedProcessLaunchError extends Error {
+  readonly cleanup: Promise<void>;
+
+  constructor(message: string, cleanup: Promise<void>) {
+    super(message);
+    this.name = "ManagedProcessLaunchError";
+    this.cleanup = cleanup;
+  }
+}
+
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   const ref: ProjectRef = {
@@ -191,7 +201,10 @@ export function launchManagedProcesses(
     );
   } catch (error) {
     ao.kill("SIGTERM");
-    throw error;
+    throw new ManagedProcessLaunchError(
+      error instanceof Error ? error.message : String(error),
+      waitForChildExit(ao),
+    );
   }
 
   let cleaned = false;
@@ -254,6 +267,9 @@ export async function reloadManagedProcesses(
   try {
     launched = launchManagedProcesses(next.runtime, next.aoRuntime, options);
   } catch (error) {
+    if (error instanceof ManagedProcessLaunchError) {
+      await error.cleanup.catch(() => undefined);
+    }
     await Effect.runPromise(next.aoRuntime.dispose).catch(() => undefined);
     return rollbackManagedProcesses(currentState, options, error);
   }
