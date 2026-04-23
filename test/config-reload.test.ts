@@ -214,12 +214,12 @@ describe("launcher/runtime integration surface", () => {
         disposedNext = true;
       }),
     };
-    const children = Array.from({ length: 4 }, () => new FakeChildProcess());
+    const children = Array.from({ length: 5 }, () => new FakeChildProcess());
     const calls: Array<{ command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = [];
-    let shouldFailReplacement = false;
+    let shouldFailReplacementBridge = false;
     const spawnImpl: typeof import("node:child_process").spawn = ((command, args, options) => {
-      if (shouldFailReplacement && calls.length === 2) {
-        shouldFailReplacement = false;
+      if (shouldFailReplacementBridge && calls.length === 3) {
+        shouldFailReplacementBridge = false;
         throw new Error("replacement launch failed");
       }
       calls.push({
@@ -236,7 +236,7 @@ describe("launcher/runtime integration surface", () => {
       bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
       bunBinary: "/usr/local/bin/bun",
     });
-    shouldFailReplacement = true;
+    shouldFailReplacementBridge = true;
     const reloadedPromise = reloadManagedProcesses(launched, {
       runtime: currentRuntime,
       aoRuntime: currentAoRuntime,
@@ -247,6 +247,7 @@ describe("launcher/runtime integration surface", () => {
       spawnImpl,
       bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
       bunBinary: "/usr/local/bin/bun",
+      startupGraceMs: 10,
     });
 
     children[0]?.exit(0);
@@ -259,25 +260,31 @@ describe("launcher/runtime integration surface", () => {
     });
     expect(disposedCurrent).toBe(false);
     expect(disposedNext).toBe(true);
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
+    expect(children[2]?.signals).toEqual(["SIGTERM"]);
     expect(calls[2]).toMatchObject({
+      command: "ao",
+      args: ["start"],
+      cwd: "/srv/worktrees/secondary",
+    });
+    expect(calls[3]).toMatchObject({
       command: "ao",
       args: ["start"],
       cwd: "/srv/worktrees/repo",
     });
-    expect(calls[3]).toMatchObject({
+    expect(calls[4]).toMatchObject({
       command: "/usr/local/bin/bun",
       args: ["/srv/zapbot/bin/webhook-bridge.ts", "--checkout", "/srv/worktrees/repo"],
       cwd: "/srv/worktrees/repo",
     });
 
     const restoredCleanup = reloaded.launched.cleanup();
-    children[2]?.exit(0);
     children[3]?.exit(0);
+    children[4]?.exit(0);
     await restoredCleanup;
   });
 
-  it("fails reload when a replacement child exits during startup after the old pair is gone", async () => {
+  it("restores the previous managed pair when a replacement child dies during startup grace", async () => {
     const currentRuntime = createRuntime();
     const nextRuntime = createRuntime({
       projectHomeCheckoutPath: "/srv/worktrees/secondary",
@@ -298,7 +305,7 @@ describe("launcher/runtime integration surface", () => {
         disposedNext = true;
       }),
     };
-    const children = Array.from({ length: 4 }, () => new FakeChildProcess());
+    const children = Array.from({ length: 6 }, () => new FakeChildProcess());
     const calls: Array<{ command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = [];
     const spawnImpl: typeof import("node:child_process").spawn = ((command, args, options) => {
       calls.push({
@@ -325,6 +332,7 @@ describe("launcher/runtime integration surface", () => {
       spawnImpl,
       bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
       bunBinary: "/usr/local/bin/bun",
+      startupGraceMs: 20,
     });
 
     children[0]?.exit(0);
@@ -335,11 +343,32 @@ describe("launcher/runtime integration surface", () => {
     children[3]?.exit(1);
     await Promise.resolve();
     children[2]?.exit(0);
+    const reloaded = await reloadedPromise;
 
-    await expect(reloadedPromise).rejects.toThrow("bridge exited during startup with code 1");
+    expect(reloaded.active).toEqual({
+      runtime: currentRuntime,
+      aoRuntime: currentAoRuntime,
+    });
     expect(disposedCurrent).toBe(false);
     expect(disposedNext).toBe(true);
     expect(children[2]?.signals).toEqual(["SIGTERM"]);
+    expect(children[3]?.signals).toEqual(["SIGTERM"]);
+    expect(calls).toHaveLength(6);
+    expect(calls[4]).toMatchObject({
+      command: "ao",
+      args: ["start"],
+      cwd: "/srv/worktrees/repo",
+    });
+    expect(calls[5]).toMatchObject({
+      command: "/usr/local/bin/bun",
+      args: ["/srv/zapbot/bin/webhook-bridge.ts", "--checkout", "/srv/worktrees/repo"],
+      cwd: "/srv/worktrees/repo",
+    });
+
+    const restoredCleanup = reloaded.launched.cleanup();
+    children[4]?.exit(0);
+    children[5]?.exit(0);
+    await restoredCleanup;
   });
 
   it("builds a coherent AO runtime env and generated config for multi-repo projects", async () => {

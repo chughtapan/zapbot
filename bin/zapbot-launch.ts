@@ -27,6 +27,7 @@ interface LaunchSpawnOptions {
   readonly bridgeScriptPath?: string;
   readonly bunBinary?: string;
   readonly baseEnv?: NodeJS.ProcessEnv;
+  readonly startupGraceMs?: number;
 }
 
 interface LaunchProcessTree {
@@ -173,19 +174,25 @@ export function launchManagedProcesses(
     env,
     stdio: "inherit",
   });
-  const bridge = spawnImpl(
-    options.bunBinary ?? process.execPath,
-    [
-      options.bridgeScriptPath ?? resolveBridgeScriptPath(),
-      "--checkout",
-      runtime.projectHome.checkoutPath as string,
-    ],
-    {
-      cwd: runtime.projectHome.checkoutPath as string,
-      env,
-      stdio: "inherit",
-    },
-  );
+  let bridge: ReturnType<typeof spawn>;
+  try {
+    bridge = spawnImpl(
+      options.bunBinary ?? process.execPath,
+      [
+        options.bridgeScriptPath ?? resolveBridgeScriptPath(),
+        "--checkout",
+        runtime.projectHome.checkoutPath as string,
+      ],
+      {
+        cwd: runtime.projectHome.checkoutPath as string,
+        env,
+        stdio: "inherit",
+      },
+    );
+  } catch (error) {
+    ao.kill("SIGTERM");
+    throw error;
+  }
 
   let cleaned = false;
   return {
@@ -248,29 +255,15 @@ export async function reloadManagedProcesses(
     launched = launchManagedProcesses(next.runtime, next.aoRuntime, options);
   } catch (error) {
     await Effect.runPromise(next.aoRuntime.dispose).catch(() => undefined);
-    let restored: LaunchProcessTree | null = null;
-    try {
-      restored = launchManagedProcesses(currentState.runtime, currentState.aoRuntime, options);
-      await waitForManagedProcessStartup(restored);
-      return {
-        launched: restored,
-        active: currentState,
-      };
-    } catch {
-      if (restored !== null) {
-        await restored.cleanup().catch(() => undefined);
-      }
-      await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
-      throw error;
-    }
+    return rollbackManagedProcesses(currentState, options, error);
   }
 
   try {
-    await waitForManagedProcessStartup(launched);
+    await waitForManagedProcessStartup(launched, options.startupGraceMs);
   } catch (error) {
     await launched.cleanup().catch(() => undefined);
     await Effect.runPromise(next.aoRuntime.dispose).catch(() => undefined);
-    throw error;
+    return rollbackManagedProcesses(currentState, options, error);
   }
 
   await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
@@ -278,6 +271,28 @@ export async function reloadManagedProcesses(
     launched,
     active: next,
   };
+}
+
+async function rollbackManagedProcesses(
+  currentState: LoadedLaunchState,
+  options: LaunchSpawnOptions,
+  originalError: unknown,
+): Promise<ReloadedLaunchState> {
+  let restored: LaunchProcessTree | null = null;
+  try {
+    restored = launchManagedProcesses(currentState.runtime, currentState.aoRuntime, options);
+    await waitForManagedProcessStartup(restored, options.startupGraceMs);
+    return {
+      launched: restored,
+      active: currentState,
+    };
+  } catch {
+    if (restored !== null) {
+      await restored.cleanup().catch(() => undefined);
+    }
+    await Effect.runPromise(currentState.aoRuntime.dispose).catch(() => undefined);
+    throw originalError;
+  }
 }
 
 function toRuntimeEnv(runtime: ResolvedProjectRuntime): Record<string, string> {
@@ -325,7 +340,10 @@ function waitForChildExit(child: ReturnType<typeof spawn>): Promise<void> {
   });
 }
 
-function waitForManagedProcessStartup(tree: LaunchProcessTree): Promise<void> {
+function waitForManagedProcessStartup(
+  tree: LaunchProcessTree,
+  startupGraceMs = 100,
+): Promise<void> {
   const managedChildren = [
     { name: "ao", child: tree.ao },
     { name: "bridge", child: tree.bridge },
@@ -360,7 +378,7 @@ function waitForManagedProcessStartup(tree: LaunchProcessTree): Promise<void> {
     };
     const timer = setTimeout(() => {
       finish(resolve);
-    }, 0);
+    }, startupGraceMs);
 
     for (const { name, child } of managedChildren) {
       const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
