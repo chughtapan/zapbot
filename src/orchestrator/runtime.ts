@@ -7,7 +7,10 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { parse as parseYaml } from "yaml";
+import { asRepoCheckoutPath, projectStateDir, resolveProjectHome } from "../config/home.ts";
+import type { ConfigServiceError } from "../config/schema.ts";
 import {
   createManagedSessionFileRegistry,
   isManagedSessionRecord,
@@ -142,9 +145,20 @@ export async function resolveManagedStartupRetry(
     };
   }
 
+  const projectHome = await Effect.runPromise(
+    Effect.either(resolveProjectHome({ checkoutPath: asRepoCheckoutPath(request.projectDir) })),
+  );
+  if (projectHome._tag === "Left") {
+    return {
+      action: "fail",
+      duplicateSession,
+      reason: stringifyProjectHomeError(projectHome.left),
+    };
+  }
+
   const registry = createManagedSessionFileRegistry({
     registryPath: resolveManagedSessionRegistryPath({
-      projectDir: request.projectDir,
+      projectHomePath: projectStateDir(projectHome.right),
     }),
   });
   const managed = await registry.listByProject(projectName.value);
@@ -181,8 +195,10 @@ export async function resolveManagedStartupRetry(
 interface AoCliOptions {
   readonly aoBinary?: string;
   readonly configPath: string | null;
-  readonly env?: Record<string, string | undefined>;
+  readonly registryPath: string;
+  readonly env: Record<string, string | undefined>;
   readonly timeoutMs?: number;
+  readonly orchestratorSenderId?: MoltzapSenderId;
 }
 
 interface AoStatusSession {
@@ -275,7 +291,7 @@ function buildCliEnv(base: Record<string, string | undefined>, configPath: strin
 }
 
 function aoBinaryPath(options: AoCliOptions): string {
-  return options.aoBinary ?? normalizeEnvValue(process.env.AO_BINARY) ?? "ao";
+  return options.aoBinary ?? "ao";
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -286,7 +302,7 @@ async function runAoCommand(
   options: AoCliOptions,
   args: readonly string[],
 ): Promise<Result<SpawnResult, SpawnFailure>> {
-  const env = buildCliEnv(options.env ?? process.env, options.configPath);
+  const env = buildCliEnv(options.env, options.configPath);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const ao = aoBinaryPath(options);
   return await new Promise((resolve) => {
@@ -380,7 +396,6 @@ function resolveSenderId(projectName: ProjectName, session: AoStatusSession): Mo
   const raw =
     normalizeEnvValue(session.metadata?.senderId as string | undefined) ??
     normalizeEnvValue(session.metadata?.localSenderId as string | undefined) ??
-    normalizeEnvValue(process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID) ??
     sessionNameFor(projectName);
   return asMoltzapSenderId(raw);
 }
@@ -423,9 +438,7 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
       return err(sessions.error);
     }
     const registry = createManagedSessionFileRegistry({
-      registryPath: resolveManagedSessionRegistryPath({
-        configPath: options.configPath,
-      }),
+      registryPath: options.registryPath,
     });
     const managed = await registry.listByProject(projectName);
     if (managed._tag === "Err") {
@@ -453,7 +466,7 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
     }
     return ok({
       session: found.record.tag.sessionName,
-      senderId: resolveSenderId(projectName, found.session),
+      senderId: options.orchestratorSenderId ?? resolveSenderId(projectName, found.session),
       mode: found.record.phase === "claimed" ? "started" : "reused",
     });
   }
@@ -546,9 +559,7 @@ async function claimManagedOrchestratorSession(
     statusSession.name ?? statusSession.id ?? sessionNameFor(projectName),
   );
   const registry = createManagedSessionFileRegistry({
-    registryPath: resolveManagedSessionRegistryPath({
-      configPath: options.configPath,
-    }),
+    registryPath: options.registryPath,
   });
   await registry.put({
     id: managedSessionIdFromSessionName(sessionName),
@@ -612,5 +623,21 @@ function stringifyRegistryError(error: ManagedSessionRegistryError): string {
     case "ManagedSessionAlreadyOwned":
     case "ManagedSessionNotFound":
       return error.sessionId;
+  }
+}
+
+function stringifyProjectHomeError(error: ConfigServiceError): string {
+  switch (error._tag) {
+    case "ZapbotHomeMissing":
+      return `canonical zapbot home missing: ${error.path}`;
+    case "ProjectHomeMissing":
+      return `canonical project home missing: ${error.projectKey}`;
+    case "LegacyRepoLocalConfigUnsupported":
+      return `legacy repo-local config unsupported: ${error.path}`;
+    case "ConfigFileUnreadable":
+    case "ConfigDecodeFailed":
+      return `${error.path}: ${error.cause}`;
+    case "IngressConfigInvalid":
+      return error.reason;
   }
 }

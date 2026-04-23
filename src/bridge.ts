@@ -13,15 +13,12 @@
 
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
-import { postComment as postGitHubComment } from "./github-state.ts";
+import type { GitHubStateService } from "./github-state.ts";
 import { mirrorDurableStatusComment, type DurableStatusComment } from "./github/comment-mirroring.ts";
 import { resolveThreadMirrorTargets, type IssueThreadAnchor } from "./github/thread-links.ts";
-import {
-  buildMoltzapProcessEnv,
-  type MoltzapRuntimeConfig,
-} from "./moltzap/runtime.ts";
+import { type MoltzapRuntimeConfig } from "./moltzap/runtime.ts";
 import type { IngressPolicy } from "./config/ingress.ts";
-import { createAoCliControlHost, forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
+import { forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
 import { toOrchestratorControlPrompt, type ControlPromptShapeError } from "./orchestrator/github-control-prompt.ts";
 import {
   absurd,
@@ -39,8 +36,8 @@ import type {
   RepoFullName,
   Result,
 } from "./types.ts";
-import { createGitHubClient, getInstallationToken } from "./github/client.ts";
-import { createLogger } from "./logger.ts";
+import type { GitHubClient } from "./github/client.ts";
+import type { Logger, LoggerFactory } from "./logger.ts";
 import { errorResponse } from "./http/error-response.ts";
 import {
   handleInstallationTokenRequest,
@@ -49,7 +46,6 @@ import {
 } from "./http/routes/installation-token.ts";
 
 const WRITE_PERMISSIONS = new Set(["write", "maintain", "admin"]);
-const log = createLogger("bridge");
 
 // ── Typed wrapper around v1 gh.* (which throws) ─────────────────────
 
@@ -60,7 +56,8 @@ const log = createLogger("bridge");
  */
 async function safeGh<T>(
   label: string,
-  fn: () => Promise<T>
+  log: Logger,
+  fn: () => Promise<T>,
 ): Promise<Result<T, GhCallError>> {
   try {
     return ok(await fn());
@@ -83,15 +80,13 @@ export interface BridgeConfig {
   readonly aoConfigPath: string;
   /** Bearer for the loopback broker route (GET /api/tokens/installation). */
   readonly apiKey: string;
-  /** HMAC-SHA256 secret for GitHub webhooks. Must differ from `apiKey`. */
-  readonly webhookSecret: string;
   readonly moltzap: MoltzapRuntimeConfig;
   readonly repos: ReadonlyMap<RepoFullName, RepoRoute>;
 }
 
 export interface RepoRoute {
   readonly projectName: ProjectName;
-  readonly webhookSecretEnvVar: string;
+  readonly webhookSecret: string;
   readonly defaultBranch: string;
 }
 
@@ -99,20 +94,31 @@ export interface RepoRoute {
 
 export interface RunningBridge {
   readonly stop: () => Promise<void>;
-  readonly reload: (nextConfig: BridgeConfig) => Promise<void>;
+  readonly reload: (nextConfig: BridgeConfig, nextDeps?: BridgeDependencies) => Promise<void>;
 }
 
 export interface BridgeHandlerContext {
   readonly mintToken: () => Promise<MintedInstallationToken | null>;
   readonly gh: GhAdapter;
+  readonly githubState: Pick<GitHubStateService, "postComment" | "getIssue" | "getLinkedPullRequest">;
   readonly aoControlHost: AoControlHost;
   readonly config: BridgeConfig;
+  readonly log: Logger;
 }
 
 export interface GhAdapter {
   readonly addReaction: (repo: RepoFullName, commentId: number, reaction: string) => Promise<Result<void, GhCallError>>;
   readonly getUserPermission: (repo: RepoFullName, user: string) => Promise<Result<string, GhCallError>>;
   readonly postComment: (repo: RepoFullName, issue: IssueNumber, body: string) => Promise<Result<void, GhCallError>>;
+}
+
+export interface BridgeDependencies {
+  readonly loggerFactory: LoggerFactory;
+  readonly githubClient: GitHubClient;
+  readonly githubState: Pick<GitHubStateService, "postComment" | "getIssue" | "getLinkedPullRequest">;
+  readonly mintToken: () => Promise<MintedInstallationToken | null>;
+  readonly createAoControlHost: (config: BridgeConfig) => AoControlHost;
+  readonly gatewayHeartbeatMs: number;
 }
 
 export type { HandleOutcome } from "./types.ts";
@@ -200,14 +206,14 @@ async function postDurableStatusComment(
   comment: DurableStatusComment,
   ctx: BridgeHandlerContext,
 ): Promise<void> {
-  const targets = await resolveThreadMirrorTargets(anchor);
+  const targets = await resolveThreadMirrorTargets(anchor, ctx.githubState);
   if (targets._tag === "Err") {
-    log.warn(
+    ctx.log.warn(
       `durable_comment_target_lookup_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${targets.error._tag}`,
     );
     const fallback = await ctx.gh.postComment(anchor.repo, anchor.issue, comment.body);
     if (fallback._tag === "Err") {
-      log.warn(
+      ctx.log.warn(
         `durable_comment_issue_post_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${fallback.error.cause}`,
       );
     }
@@ -217,19 +223,19 @@ async function postDurableStatusComment(
   const receipt = await mirrorDurableStatusComment(
     targets.value,
     comment,
-    { postComment: postGitHubComment },
+    { postComment: ctx.githubState.postComment },
   );
   if (receipt._tag === "Err") {
     const fallback = await ctx.gh.postComment(anchor.repo, anchor.issue, comment.body);
     if (fallback._tag === "Err") {
-      log.warn(
+      ctx.log.warn(
         `durable_comment_issue_post_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${receipt.error.cause}`,
       );
     }
     return;
   }
   if (receipt.value.linkedPullRequestMirror._tag === "Failed") {
-    log.warn(
+    ctx.log.warn(
       `durable_comment_pr_mirror_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} linked_pr=${targets.value.linkedPullRequest as unknown as number} cause=${receipt.value.linkedPullRequestMirror.cause}`,
     );
   }
@@ -247,19 +253,9 @@ async function postDurableStatusComment(
  *
  * Tests substitute their own adapter via `BridgeHandlerContext`.
  */
-export function buildDefaultGhAdapter(): GhAdapter {
-  let cached: ReturnType<typeof createGitHubClient> | null = null;
-  async function lazy<T>(label: string, fn: (gh: ReturnType<typeof createGitHubClient>) => Promise<T>): Promise<Result<T, GhCallError>> {
-    if (cached === null) {
-      try {
-        cached = createGitHubClient();
-      } catch (e) {
-        const cause = e instanceof Error ? e.message : String(e);
-        log.warn(`gh_call_failed label=${label} cause=${cause}`);
-        return err({ _tag: "GhCallFailed", label, cause });
-      }
-    }
-    return safeGh(label, () => fn(cached!));
+export function buildDefaultGhAdapter(githubClient: GitHubClient, log: Logger): GhAdapter {
+  async function lazy<T>(label: string, fn: (gh: GitHubClient) => Promise<T>): Promise<Result<T, GhCallError>> {
+    return safeGh(label, log, () => fn(githubClient));
   }
   return {
     addReaction: (repo, commentId, reaction) =>
@@ -299,7 +295,7 @@ export function buildFetchHandler(
         apiKey: current.apiKey,
       });
       const clientIp = req.headers.get("x-forwarded-for") ?? "local";
-      log.info(`installation_token.request status=${result.status} client_ip=${clientIp}`);
+      ctx.log.info(`installation_token.request status=${result.status} client_ip=${clientIp}`);
       return Response.json(result.body, { status: result.status });
     }
 
@@ -393,16 +389,13 @@ export function buildFetchHandler(
  * Default `mintToken` implementation — delegates to the v1 singleton
  * `getInstallationToken` and preserves the broker's minted token contract.
  */
-export async function defaultMintToken(): Promise<MintedInstallationToken | null> {
-  return await getInstallationToken();
-}
-
 /**
  * Boot the HTTP server, register every configured repo with the gateway,
  * start heartbeats, install SIGHUP → reload. Returns a handle for stop/reload.
  */
-export async function startBridge(config: BridgeConfig): Promise<RunningBridge> {
+export async function startBridge(config: BridgeConfig, deps: BridgeDependencies): Promise<RunningBridge> {
   let current = config;
+  let currentDeps = deps;
   let stopHeartbeat: (() => void) | null = null;
 
   async function registerAll(cfg: BridgeConfig): Promise<void> {
@@ -424,8 +417,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     await Promise.allSettled(
       repos.map((repo) => registerBridge(client, repo, publicUrl))
     );
-    const intervalMs = parseInt(process.env.ZAPBOT_GATEWAY_HEARTBEAT_MS ?? "300000", 10);
-    stopHeartbeat = startHeartbeat(client, repos, publicUrl, intervalMs);
+    stopHeartbeat = startHeartbeat(client, repos, publicUrl, currentDeps.gatewayHeartbeatMs);
   }
 
   async function deregisterAll(cfg: BridgeConfig): Promise<void> {
@@ -444,22 +436,29 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     );
   }
 
-  const ghAdapter = buildDefaultGhAdapter();
-  let aoControlHost = createAoCliControlHost({
-    configPath: current.aoConfigPath,
-    env: {
-      ...process.env,
-      ...buildMoltzapProcessEnv(current.moltzap),
-    },
-  });
+  let log = deps.loggerFactory.create("bridge");
+  let ghAdapter = buildDefaultGhAdapter(deps.githubClient, log);
+  let githubState = deps.githubState;
+  let mintToken = deps.mintToken;
+  let aoControlHost = deps.createAoControlHost(current);
   const ctx: BridgeHandlerContext = {
-    mintToken: defaultMintToken,
-    gh: ghAdapter,
+    get mintToken() {
+      return mintToken;
+    },
+    get gh() {
+      return ghAdapter;
+    },
+    get githubState() {
+      return githubState;
+    },
     get aoControlHost() {
       return aoControlHost;
     },
     get config() {
       return current;
+    },
+    get log() {
+      return log;
     },
   };
 
@@ -477,22 +476,21 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       await deregisterAll(current);
       server.stop();
     },
-    async reload(nextConfig: BridgeConfig): Promise<void> {
+    async reload(nextConfig: BridgeConfig, nextDeps: BridgeDependencies = currentDeps): Promise<void> {
       await deregisterAll(current);
       current = nextConfig;
-      aoControlHost = createAoCliControlHost({
-        configPath: current.aoConfigPath,
-        env: {
-          ...process.env,
-          ...buildMoltzapProcessEnv(current.moltzap),
-        },
-      });
+      currentDeps = nextDeps;
+      log = currentDeps.loggerFactory.create("bridge");
+      ghAdapter = buildDefaultGhAdapter(currentDeps.githubClient, log);
+      githubState = currentDeps.githubState;
+      mintToken = currentDeps.mintToken;
+      aoControlHost = currentDeps.createAoControlHost(current);
       await registerAll(current);
     },
   };
   return running;
 }
 
-function resolveSecret(_repo: RepoFullName, cfg: BridgeConfig): string | null {
-  return cfg.webhookSecret;
+function resolveSecret(repo: RepoFullName, cfg: BridgeConfig): string | null {
+  return cfg.repos.get(repo)?.webhookSecret ?? null;
 }

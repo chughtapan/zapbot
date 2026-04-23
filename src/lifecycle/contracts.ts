@@ -150,6 +150,7 @@ interface ManagedSessionRegistryFile {
 }
 
 export interface ManagedSessionRegistryPathOptions {
+  readonly projectHomePath?: string | null;
   readonly configPath?: string | null;
   readonly projectDir?: string | null;
 }
@@ -175,6 +176,9 @@ export function isManagedSessionRecord(record: ManagedSessionRecord): boolean {
 export function resolveManagedSessionRegistryPath(
   options: ManagedSessionRegistryPathOptions,
 ): string {
+  if (typeof options.projectHomePath === "string" && options.projectHomePath.trim().length > 0) {
+    return join(options.projectHomePath.trim(), MANAGED_SESSION_REGISTRY_FILE);
+  }
   if (typeof options.projectDir === "string" && options.projectDir.trim().length > 0) {
     return join(options.projectDir.trim(), MANAGED_SESSION_REGISTRY_FILE);
   }

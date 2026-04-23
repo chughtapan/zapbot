@@ -22,13 +22,13 @@ describe("upsertManagedWorkerRegistration", () => {
   it("writes a managed worker record beside the project config", async () => {
     const projectDir = mkdtempSync(join(tmpdir(), "zapbot-worker-registration-"));
     tempDirs.push(projectDir);
-    const configPath = join(projectDir, "agent-orchestrator.yaml");
+    const registryPath = resolveManagedSessionRegistryPath({ projectDir });
     const now = 1_717_171_717_000;
 
     const record = await upsertManagedWorkerRegistration({
       sessionName: "demo-42",
       projectId: "demo",
-      configPath,
+      registryPath,
       worktree: "/tmp/demo-42",
       tmuxName: "demo-42",
       now: () => now,
@@ -53,7 +53,7 @@ describe("upsertManagedWorkerRegistration", () => {
     });
 
     const registry = createManagedSessionFileRegistry({
-      registryPath: resolveManagedSessionRegistryPath({ configPath }),
+      registryPath,
     });
     const listed = await registry.listByProject(asProjectName("demo"));
     expect(listed).toEqual({
@@ -65,12 +65,12 @@ describe("upsertManagedWorkerRegistration", () => {
   it("updates an existing managed worker record without changing its claim time", async () => {
     const projectDir = mkdtempSync(join(tmpdir(), "zapbot-worker-registration-"));
     tempDirs.push(projectDir);
-    const configPath = join(projectDir, "agent-orchestrator.yaml");
+    const registryPath = resolveManagedSessionRegistryPath({ projectDir });
 
     await upsertManagedWorkerRegistration({
       sessionName: "demo-42",
       projectId: "demo",
-      configPath,
+      registryPath,
       worktree: "/tmp/demo-old",
       tmuxName: "demo-worker-old",
       now: () => 1_000,
@@ -79,7 +79,7 @@ describe("upsertManagedWorkerRegistration", () => {
     const updated = await upsertManagedWorkerRegistration({
       sessionName: "demo-42",
       projectId: "demo",
-      configPath,
+      registryPath,
       worktree: "/tmp/demo-new",
       tmuxName: "demo-worker-new",
       now: () => 2_000,
@@ -91,7 +91,7 @@ describe("upsertManagedWorkerRegistration", () => {
     expect(updated.lastHeartbeatAtMs).toBe(2_000);
 
     const registry = createManagedSessionFileRegistry({
-      registryPath: resolveManagedSessionRegistryPath({ configPath }),
+      registryPath,
     });
     const stored = await registry.get(
       managedSessionIdFromSessionName(asAoSessionName("demo-42")),

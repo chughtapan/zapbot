@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -135,7 +134,6 @@ function pickPassthroughEnv(keys) {
 }
 
 function resolveMoltzapRuntimeEnv() {
-  const fileEnv = readZapbotEnvFile();
   const env = {};
   for (const key of [
     "MOLTZAP_SERVER_URL",
@@ -145,7 +143,7 @@ function resolveMoltzapRuntimeEnv() {
     "MOLTZAP_ALLOWED_SENDERS",
     "MOLTZAP_REGISTRATION_SECRET",
   ]) {
-    const value = resolveEnvValue(key, fileEnv);
+    const value = resolveEnvValue(key);
     if (value !== null) {
       env[key] = value;
     }
@@ -153,55 +151,12 @@ function resolveMoltzapRuntimeEnv() {
   return env;
 }
 
-function resolveEnvValue(key, fileEnv) {
+function resolveEnvValue(key) {
   const direct = normalizeEnvValue(process.env[key]);
   if (direct !== null) {
     return direct;
   }
-
-  const fileValue = normalizeEnvValue(fileEnv[key]);
-  if (fileValue !== null) {
-    return fileValue;
-  }
-
   return null;
-}
-
-function readZapbotEnvFile() {
-  const path =
-    normalizeEnvValue(process.env.ZAPBOT_ENV_PATH) ?? join(homedir(), ".zapbot", ".env");
-  if (!existsSync(path)) {
-    return {};
-  }
-
-  const env = {};
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) {
-      continue;
-    }
-    const normalized = trimmed.startsWith("export ") ? trimmed.slice(7).trim() : trimmed;
-    const index = normalized.indexOf("=");
-    if (index <= 0) {
-      continue;
-    }
-    const key = normalized.slice(0, index).trim();
-    const value = stripWrappingQuotes(normalized.slice(index + 1).trim());
-    if (key.length > 0 && value.length > 0) {
-      env[key] = value;
-    }
-  }
-  return env;
-}
-
-function stripWrappingQuotes(value) {
-  if (
-    (value.startsWith("\"") && value.endsWith("\"")) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
 
 function normalizeEnvValue(value) {

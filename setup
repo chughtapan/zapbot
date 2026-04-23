@@ -100,7 +100,7 @@ if $SERVER_MODE; then
   echo "    sudo cp $SERVICE_FILE /etc/systemd/system/zapbot-bridge.service"
   echo "    sudo systemctl enable --now zapbot-bridge"
   echo ""
-  echo "  To reload config without restart (after changing .env or agent-orchestrator.yaml):"
+  echo "  To reload config without restart (after changing ~/.zapbot project config or hosted env):"
   echo "    sudo systemctl reload zapbot-bridge"
 fi
 

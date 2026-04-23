@@ -1,55 +1,51 @@
-import { describe, it, expect } from "vitest";
-import * as fs from "fs";
-import * as path from "path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 
-const TEMPLATE_PATH = path.join(__dirname, "../templates/zapbot-bridge.service");
+const TEMPLATE_PATH = join(__dirname, "../templates/zapbot-bridge.service");
 
 describe("systemd service template", () => {
-  it("template file exists", () => {
-    expect(fs.existsSync(TEMPLATE_PATH)).toBe(true);
+  it("renders a launcher-owned service topology", () => {
+    const directives = parseUnitDirectives(renderTemplate({
+      projectDir: "/home/user/project",
+      zapbotDir: "/home/user/.zapbot/zapbot",
+    }));
+
+    expect(directives.WorkingDirectory).toBe("/home/user/project");
+    expect(directives.ExecStart).toBe(
+      "/usr/bin/env bun /home/user/.zapbot/zapbot/bin/zapbot-launch.ts --checkout /home/user/project",
+    );
+    expect(directives.ExecReload).toBe("/bin/kill -HUP $MAINPID");
+    expect(directives.Restart).toBe("always");
+    expect(directives.EnvironmentFile).toBeUndefined();
   });
 
-  it("contains required systemd sections", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("[Unit]");
-    expect(content).toContain("[Service]");
-    expect(content).toContain("[Install]");
-  });
+  it("starts the launcher instead of invoking the bridge directly", () => {
+    const directives = parseUnitDirectives(readFileSync(TEMPLATE_PATH, "utf8"));
+    const execStart = directives.ExecStart ?? "";
 
-  it("uses placeholder variables for paths", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("__PROJECT_DIR__");
-    expect(content).toContain("__ZAPBOT_DIR__");
-  });
-
-  it("supports SIGHUP reload via ExecReload", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("ExecReload=/bin/kill -HUP $MAINPID");
-  });
-
-  it("auto-restarts on crash", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("Restart=always");
-  });
-
-  it("loads env file from project directory", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("EnvironmentFile=__PROJECT_DIR__/.env");
-  });
-
-  it("runs webhook-bridge.ts via bun", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("bun __ZAPBOT_DIR__/bin/webhook-bridge.ts");
-  });
-
-  it("placeholders can be replaced to produce valid paths", () => {
-    const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    const resolved = content
-      .replace(/__PROJECT_DIR__/g, "/home/user/project")
-      .replace(/__ZAPBOT_DIR__/g, "/home/user/.claude/skills/zapbot");
-    expect(resolved).toContain("WorkingDirectory=/home/user/project");
-    expect(resolved).toContain("EnvironmentFile=/home/user/project/.env");
-    expect(resolved).toContain("bun /home/user/.claude/skills/zapbot/bin/webhook-bridge.ts");
-    expect(resolved).not.toContain("__");
+    expect(execStart.includes("zapbot-launch.ts")).toBe(true);
+    expect(execStart.includes("webhook-bridge.ts")).toBe(false);
   });
 });
+
+function renderTemplate(input: { readonly projectDir: string; readonly zapbotDir: string }): string {
+  return readFileSync(TEMPLATE_PATH, "utf8")
+    .replace(/__PROJECT_DIR__/g, input.projectDir)
+    .replace(/__ZAPBOT_DIR__/g, input.zapbotDir);
+}
+
+function parseUnitDirectives(content: string): Record<string, string> {
+  return content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("["))
+    .reduce<Record<string, string>>((directives, line) => {
+      const separator = line.indexOf("=");
+      if (separator === -1) {
+        return directives;
+      }
+      directives[line.slice(0, separator)] = line.slice(separator + 1);
+      return directives;
+    }, {});
+}

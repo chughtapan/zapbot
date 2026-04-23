@@ -89,8 +89,8 @@ using those credentials.
 
 Lifecycle ownership is explicit, not inferred from names.
 
-- Each project keeps a local `.zapbot-managed-sessions.json` registry beside
-  `agent-orchestrator.yaml`.
+- Each project keeps its managed-session registry under
+  `~/.zapbot/projects/<project-key>/state/.zapbot-managed-sessions.json`.
 - `src/orchestrator/runtime.ts` only resolves a reusable orchestrator session if
   there is a matching zapbot-managed orchestrator record in that registry.
 - `bin/ao-spawn-with-moltzap.ts` upserts worker records with `scope: "worker"`
@@ -106,8 +106,9 @@ Lifecycle ownership is explicit, not inferred from names.
 
 ## Reload and shutdown
 
-- `SIGHUP` re-reads `.env` and `agent-orchestrator.yaml`, rebuilds `BridgeConfig`,
-  and re-registers bridge routes with the gateway.
+- `SIGHUP` re-reads the canonical `~/.zapbot` project config (or hosted env in
+  deployment mode), rebuilds `BridgeConfig`, and re-registers bridge routes
+  with the gateway.
 - `SIGINT` / `SIGTERM` stop the HTTP server and deregister bridge routes.
 - `start.sh` duplicate-session retry is lifecycle-gated: it may stop only a
   matching managed orchestrator record, never a session chosen by tmux-name

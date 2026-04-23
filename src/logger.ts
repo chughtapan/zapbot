@@ -1,8 +1,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { Effect } from "effect";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
+export type Logger = InstanceType<typeof StructuredLogger>;
+export interface LoggerFactory {
+  readonly create: (component: string) => Logger;
+}
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 0,
@@ -31,21 +36,17 @@ function formatKv(kv: Record<string, unknown>): string {
   return parts.length > 0 ? ` (${parts.join(", ")})` : "";
 }
 
-function getMinLevel(): LogLevel {
-  const env = process.env.ZAPBOT_LOG_LEVEL?.toLowerCase();
-  if (env && env in LEVEL_ORDER) return env as LogLevel;
-  return "info";
-}
-
-class Logger {
+class StructuredLogger {
   readonly component: string;
+  readonly minLevel: LogLevel;
 
-  constructor(component: string) {
+  constructor(component: string, minLevel: LogLevel) {
     this.component = component;
+    this.minLevel = minLevel;
   }
 
   private log(level: LogLevel, message: string, kv: Record<string, unknown> = {}): void {
-    if (LEVEL_ORDER[level] < LEVEL_ORDER[getMinLevel()]) return;
+    if (LEVEL_ORDER[level] < LEVEL_ORDER[this.minLevel]) return;
 
     const timestamp = new Date().toISOString();
     const line = `${timestamp} ${level.toUpperCase().padEnd(5)} [${this.component}] ${message}${formatKv(kv)}`;
@@ -82,6 +83,17 @@ class Logger {
   }
 }
 
-export function createLogger(component: string): Logger {
-  return new Logger(component);
+export function createLogger(component: string, minLevel: LogLevel): Logger {
+  return new StructuredLogger(component, minLevel);
+}
+
+export function createLoggerFactory(level: LogLevel): Effect.Effect<LoggerFactory, string, never> {
+  if (!(level in LEVEL_ORDER)) {
+    return Effect.fail(`unsupported log level: ${level}`);
+  }
+  return Effect.succeed({
+    create(component: string): Logger {
+      return createLogger(component, level);
+    },
+  });
 }
