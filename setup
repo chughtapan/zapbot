@@ -179,6 +179,7 @@ if $SERVER_MODE; then
   echo "Next local-operator steps:"
   echo "  1. Edit ~/.zapbot/projects/<project-key>/project.json"
   echo "  2. cd ~/your-project && ~/.claude/skills/zapbot/start.sh ."
+  echo "     first validation can stay local-only with gateway/public/MoltZap unset"
   echo "  3. Register https://<gateway-url>/api/webhooks/github"
   echo "     in github-demo mode, or the direct public bridge URL if exposed"
   echo "     with the matching routes[].webhookSecret"

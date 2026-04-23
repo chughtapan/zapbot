@@ -11,7 +11,7 @@ orchestrator control loop.
 
 ```text
 GitHub issue_comment webhook
-  -> HMAC verify
+  -> validate configured GitHub webhook signature
   -> eligible direct-mention detection
   -> permission check
   -> ensure orchestrator session exists (`ao start` / `ao status`)
@@ -97,6 +97,8 @@ Worker-side spawn failures remain local to the orchestrator/worker lane:
   responses, or bridge-authored GitHub artifacts.
 - Once `GH_TOKEN` is available inside an AO child session, downstream tools and
   prompts in that session are outside the bridge's enforcement boundary.
+- Use least-privilege GitHub auth for that handoff: narrow PAT scopes or the
+  smallest-installation GitHub App that still satisfies the worker path.
 
 ## MoltZap boundary
 

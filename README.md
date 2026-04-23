@@ -2,9 +2,10 @@
 
 Zapbot is a thin GitHub webhook control bridge for the AO runtime (`ao`).
 
-GitHub keeps the durable task record. Zapbot verifies webhooks, checks repo
-permissions, and forwards control events into a persistent AO orchestrator
-session for each configured project.
+GitHub keeps the durable task record. Zapbot validates GitHub webhook
+signatures against the configured secret, checks repo permissions, and forwards
+control events into a persistent AO orchestrator session for each configured
+project.
 
 ## Plain-language terms
 
@@ -18,7 +19,8 @@ session for each configured project.
 ## Runtime flow
 
 1. GitHub sends `issue_comment` webhooks to `/api/webhooks/github`.
-2. Zapbot verifies the HMAC and detects an eligible direct `@zapbot` mention.
+2. Zapbot validates the configured GitHub webhook signature and detects an
+   eligible direct `@zapbot` mention.
 3. Zapbot checks that the commenter has write access.
 4. Zapbot ensures the project's AO orchestrator session is running.
 5. Zapbot forwards the GitHub control event into that orchestrator session.
@@ -80,6 +82,8 @@ config it needs, then starts AO on `bridge.aoPort` and the webhook bridge on
 
 In this README, every `start.sh .` example assumes you already `cd`'d into the
 target project checkout first. The `.` is the checkout path zapbot resolves.
+`/path/to/zapbot/start.sh /path/to/your-project` is the same launch with an
+explicit checkout path.
 
 Legacy checkout-local config artifacts are unsupported. If the project checkout
 still contains `.env` or `agent-orchestrator.yaml` from an older setup,
@@ -148,6 +152,9 @@ Worker env posture:
   session, downstream tools and prompts in that session are outside the
   bridge's enforcement boundary. Scope the token or App installation
   accordingly.
+- Treat forwarded `GH_TOKEN` as a high-value ambient credential inside the AO
+  child session. Use the narrowest PAT scopes or the smallest-installation
+  GitHub App you can; zapbot does not sandbox downstream session behavior.
 - Zapbot forwards `MOLTZAP_*` only when MoltZap is configured.
 - Zapbot does **not** forward `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`, or
   `GITHUB_APP_PRIVATE_KEY` into AO child processes.
@@ -293,6 +300,33 @@ cd /path/to/your-project
 /path/to/zapbot/start.sh .
 ```
 
+If you want a first-success path without public ingress or MoltZap, stop here
+and validate `local-only` mode before step 5:
+
+- leave `bridge.publicUrl`, `bridge.gatewayUrl`, `moltzap.serverUrl`, and
+  `moltzap.registrationSecret` as `null`
+- confirm the startup receipt shows `Mode: local-only`
+- prove the bridge is listening and the managed orchestrator exists:
+
+```bash
+cd /path/to/your-project
+PROJECT_KEY=your-project-key
+CONFIG_PATH="$HOME/.zapbot/projects/$PROJECT_KEY/project.json"
+BRIDGE_PORT="$(jq -r '.bridge.port' "$CONFIG_PATH")"
+REGISTRY="$HOME/.zapbot/projects/$PROJECT_KEY/state/.zapbot-managed-sessions.json"
+
+curl -fsS "http://127.0.0.1:$BRIDGE_PORT/healthz"
+ao status --json | jq '.[] | {name, role, status}'
+if [ -f "$REGISTRY" ]; then
+  jq '.records[] | {session: .tag.sessionName, scope: .tag.scope, phase: .phase}' "$REGISTRY"
+else
+  echo "registry missing; inspect /tmp/zapbot-ao.log and ao status --json"
+fi
+```
+
+That proves canonical local config loading, bridge bring-up, and orchestrator
+ownership before you add a gateway, public ingress, or MoltZap.
+
 5. If you want GitHub to reach the bridge, register the repo webhook after the
    bridge is up and `bridge.publicUrl` is reachable.
 
@@ -436,6 +470,18 @@ Safe manual cleanup rule:
 - `README.md` is the operator contract for startup, inspection, and teardown.
   `ARCHITECTURE.md` is the module map and lifecycle rationale.
 
+If the managed-session registry is missing, empty, or stale:
+
+- missing file: treat that as "startup has not produced a usable ledger yet."
+  Re-check the startup receipt, `ao status --json`, and `/tmp/zapbot-ao.log`
+  before you assume zapbot owns anything.
+- empty `records`: do not infer ownership from an empty ledger. Wait for
+  orchestrator startup to settle, re-run `ao status --json`, and inspect
+  `/tmp/zapbot-ao.log` if it stays empty.
+- stale record: if the registry shows a session that `ao status --json` does
+  not, treat the record as bookkeeping drift, not proof of a live session. Do
+  not kill tmux by name from a stale row alone.
+
 Registry field meanings:
 
 - `tag.sessionName` is the AO session identity.
@@ -450,8 +496,8 @@ Registry field meanings:
 
 This demo assumes you want `github-demo` mode with a reachable public bridge
 URL and a reachable MoltZap server. It fails closed if the bridge URL is
-missing or unreachable. Use a throwaway private repo for this demo; the final
-cleanup step deletes it.
+missing or unreachable. Use a throwaway private repo for this demo. The final
+cleanup step deletes that repo, so do not point this flow at a real project.
 
 1. Create a dummy project checkout, initialize zapbot, and start the stack:
 
@@ -459,6 +505,7 @@ cleanup step deletes it.
 ZAPBOT_DIR=/absolute/path/to/zapbot
 DEMO_OWNER="$(gh api user -q .login)"
 DEMO_REPO="$DEMO_OWNER/zapbot-demo"
+# This repo is disposable. Step 7 deletes it.
 mkdir -p /tmp/zapbot-demo
 cd /tmp/zapbot-demo
 git init -b main

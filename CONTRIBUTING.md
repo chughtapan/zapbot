@@ -41,6 +41,7 @@ Config contract:
   should not be recreated.
 - Once zapbot forwards `GH_TOKEN` into an AO child session, behavior inside
   that session is outside the bridge's enforcement boundary.
+- Use least-privilege GitHub auth for that forwarded `GH_TOKEN` path.
 
 ## Core commands
 
