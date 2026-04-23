@@ -18,9 +18,9 @@ the first self-contained success path:
 - zapbot started in `local-only` mode
 - bridge health and AO orchestrator state verified
 
-Hosted/platform and public-ingress paths are reference-only and are not part of
-this quickstart. See [CONTRIBUTING.md](CONTRIBUTING.md) and
-[ARCHITECTURE.md](ARCHITECTURE.md) for the broader operator/runtime contract.
+Hosted/platform and public-ingress paths are not part of this quickstart. For
+other deployment modes, see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 You need two checkouts:
 
@@ -30,10 +30,11 @@ You need two checkouts:
 
 Command grammar used in this quickstart:
 
-- run `./setup --server` from the zapbot checkout
-- run `bin/zapbot-team-init owner/repo` from the target project checkout
-- run `start.sh .` from the target project checkout, where `.` means "this
-  checkout is the project root"
+| Command | Run from | Meaning |
+|---|---|---|
+| `./setup --server` | zapbot checkout | prepare the bridge host |
+| `/path/to/zapbot/bin/zapbot-team-init owner/repo` | target project checkout | register one project under `~/.zapbot` |
+| `/path/to/zapbot/start.sh .` | target project checkout | start zapbot for this checkout; `.` means "this checkout is the project root" |
 
 Plain-language terms used below:
 
@@ -64,9 +65,14 @@ commands.
 runtime pieces zapbot adds itself. It does not replace the need for `git`,
 `gh`, `node`, `tmux`, `jq`, or `curl` to already exist on the bridge host.
 
+If one of those prerequisites is missing, install it with your normal OS
+package manager first, then rerun `./setup --server` and the post-setup
+readiness check below.
+
 `gh auth login` is only for the GitHub CLI on the bridge host. The repo token
-you place into `project.json` in step 3 is a separate runtime credential and
-may be the same PAT or a different one.
+you place into `project.json` in step 3 is a separate runtime credential.
+Prefer a separate PAT for zapbot runtime use rather than reusing the CLI
+credential.
 
 ### 1. Prepare the bridge host
 
@@ -116,34 +122,23 @@ That creates canonical local operator config under:
 `zapbot-team-init` does not write checkout-local `.env` or
 `agent-orchestrator.yaml`.
 
-`project.json` is secret-bearing local operator config. Keep it on the bridge
-host only and restrict it like any other local credential file.
+`project.json` is secret-bearing local operator config. It contains generated
+values such as `bridge.apiKey` and `routes[].webhookSecret` as well as the
+GitHub credential you add next. Keep it on the bridge host only, restrict it
+like any other local credential file, and rotate those secrets if you expose
+them.
 
 ### 3. Edit the minimum local-only config
 
 Edit exactly `~/.zapbot/projects/<project-key>/project.json` in place. Do not
-replace the whole file: preserve the generated `bridge.apiKey`,
-`routes[].webhookSecret`, and the existing `bridge.port` / `bridge.aoPort`
-values that `zapbot-team-init` already wrote for you. Keep public ingress and
-MoltZap unset. The minimum fields you should change for local-only mode look
-like:
+replace the whole file. For first success, change only these existing keys:
 
-```json
-{
-  "bridge": {
-    "publicUrl": null,
-    "gatewayUrl": null
-  },
-  "github": {
-    "mode": "token",
-    "token": "ghp_or_pat_with_repo_access"
-  },
-  "moltzap": {
-    "serverUrl": null,
-    "registrationSecret": null
-  }
-}
-```
+- `.bridge.publicUrl = null`
+- `.bridge.gatewayUrl = null`
+- `.github.mode = "token"`
+- `.github.token = "ghp_or_pat_with_repo_access"`
+- `.moltzap.serverUrl = null`
+- `.moltzap.registrationSecret = null`
 
 Notes:
 
@@ -174,7 +169,8 @@ GH_TOKEN=ghp_or_pat_with_repo_access gh api repos/owner/repo -q .full_name
 
 Run this from the target project checkout, not from the zapbot checkout. The
 script lives in the zapbot checkout; the `.` argument tells zapbot to use the
-current project checkout as the managed repo root:
+current project checkout as the managed repo root. Keep this shell open after
+startup:
 
 ```bash
 cd /path/to/your-project
@@ -193,8 +189,9 @@ zapbot fails closed until those files are removed.
 
 ### 5. Validate first success
 
-From the same project checkout, substitute the `<project-key>` printed by
-`zapbot-team-init` above or rediscovered with the `jq` command from step 2:
+Open a second shell in the same project checkout. Substitute the `<project-key>`
+printed by `zapbot-team-init` above or rediscovered with the `jq` command from
+step 2:
 
 ```bash
 cd /path/to/your-project
@@ -304,12 +301,6 @@ cd /path/to/other-project
 README intentionally stops at the self-contained local-only path. For
 additional operator scenarios, use [CONTRIBUTING.md](CONTRIBUTING.md) and
 [ARCHITECTURE.md](ARCHITECTURE.md).
-
-Local-only mode stores secret-bearing config in
-`~/.zapbot/projects/<project-key>/project.json`. Hosted/platform mode instead
-uses deployment-managed env such as `ZAPBOT_WEBHOOK_SECRET`,
-`ZAPBOT_GITHUB_TOKEN`, and `GITHUB_APP_*`, and is intentionally out of scope
-for this README.
 
 ## Development
 
