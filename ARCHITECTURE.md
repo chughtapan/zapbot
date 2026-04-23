@@ -13,7 +13,7 @@ orchestrator control loop.
 GitHub issue_comment webhook
   -> validate configured GitHub webhook signature
   -> eligible direct-mention detection
-  -> permission check
+  -> repo-write invocation gate
   -> ensure orchestrator session exists (`ao start` / `ao status`)
   -> ao send raw GitHub control prompt with placement context
   -> orchestrator decides whether to spawn workers via
@@ -26,6 +26,8 @@ Plain-language boundary split:
 - The bridge verifies GitHub input and forwards only allowed control events.
 - GitHub comment bodies remain untrusted input even after signature validation
   and repo-permission checks.
+- Repo write access is an invocation gate for the control path, not a trust
+  guarantee for comment content or downstream AO child-session behavior.
 - The orchestrator is the one persistent per-project session that decides
   whether more work is needed.
 - Workers are disposable task sessions; they do not own project lifecycle.

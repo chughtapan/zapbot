@@ -21,11 +21,10 @@ cd /path/to/zapbot
 cd /path/to/your-project
 /path/to/zapbot/bin/zapbot-team-init owner/repo
 # zapbot-team-init prints the canonical project key
+# keep gateway/public/MoltZap unset for first success
 # edit ~/.zapbot/projects/<project-key>/project.json
 /path/to/zapbot/start.sh .
-# then register https://<gateway-url>/api/webhooks/github
-# in the advanced public-ingress path, or the direct public bridge URL if you expose it
-# using the matching routes[].webhookSecret
+# validate /healthz plus ao status before any advanced ingress work
 ```
 
 Config contract:
@@ -37,12 +36,14 @@ Config contract:
   secrets, including required `ZAPBOT_CHECKOUT_PATH`.
 - Hosted/platform mode is deployment-owned and prerequisite-heavy; README keeps
   `local-only` as the only self-contained first-success path.
-- README owns the local `project.json` <-> hosted env field mapping table and
-  the end-to-end webhook setup steps.
+- README owns the local-only first-success path plus the advanced/reference
+  notes for hosted and public ingress.
 - Checkout-local `.env` and `agent-orchestrator.yaml` are legacy artifacts and
   should not be recreated.
 - GitHub comment bodies remain untrusted input even after signature and repo
   permission checks.
+- Repo write access gates invocation of the `@zapbot` path; it does not make
+  comment content trusted.
 - Once zapbot forwards `GH_TOKEN` into an AO child session, behavior inside
   that session is outside the bridge's enforcement boundary.
 - Use least-privilege GitHub auth for that forwarded `GH_TOKEN` path.
