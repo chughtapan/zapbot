@@ -24,7 +24,7 @@
 
 import type { AoSessionName, Result } from "../types.ts";
 import type { PeerChannelKind } from "../moltzap/role-topology.ts";
-import type { SessionRole } from "../moltzap/session-client.ts";
+import type { SessionRole } from "../moltzap/session-role.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 
 // ── Kinds ───────────────────────────────────────────────────────────
@@ -116,7 +116,7 @@ export function decodePeerMessage(
 
 /**
  * Encode a `PeerMessage` into the wire body text. Round-trips with
- * `decodePeerMessage`; a property test in `test/orchestrator-peer-message.property.test.ts`
+ * `decodePeerMessage`; a property test in `test/property/peer-message.property.test.ts`
  * gates the round-trip (Principle 1, Corollary §77.1 — algebraic property).
  */
 export function encodePeerMessage(msg: PeerMessage): string {

@@ -11,4 +11,5 @@ export * from "./bridge.ts";
 export * from "./identity-allowlist.ts";
 export * from "./supervisor.ts";
 export * from "./runtime.ts";
+export * from "./session-role.ts";
 export * from "./role-topology.ts";
