@@ -36,7 +36,7 @@ import type {
   PeerChannelKind,
   RoleTopologyError,
 } from "../moltzap/role-topology.ts";
-import type { SessionRole } from "../moltzap/session-client.ts";
+import type { SessionRole, WorkerRole } from "../moltzap/session-role.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import type { BudgetConfig, BudgetVerdict } from "./budget.ts";
 
@@ -49,10 +49,6 @@ export function asRosterId(s: string): RosterId {
 }
 
 /** The three non-orchestrator roles a roster may contain. */
-export type WorkerRole = Extract<
-  SessionRole,
-  "architect" | "implementer" | "reviewer"
->;
 
 // ── Public shapes ───────────────────────────────────────────────────
 

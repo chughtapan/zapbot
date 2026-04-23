@@ -18,7 +18,7 @@
 
 import type { Result } from "../types.ts";
 import { type SenderAllowlist } from "./identity-allowlist.ts";
-import type { SessionRole } from "./session-client.ts";
+import type { SessionRole } from "./session-role.ts";
 import type { MoltzapSenderId } from "./types.ts";
 
 // ── Peer-channel kinds ──────────────────────────────────────────────
