@@ -271,6 +271,8 @@ Hosted env is the env-shaped version of the same config contract:
 
 | Local `project.json` field | Hosted env | Notes |
 |---|---|---|
+| `checkoutPath` | `ZAPBOT_CHECKOUT_PATH` | required absolute checkout path on the host; zapbot uses it as the repo/worktree root in hosted mode |
+| `projectKey` | `ZAPBOT_PROJECT_KEY` | optional hosted override; defaults to the checkout basename slug when unset |
 | `bridge.port` | `ZAPBOT_PORT` | bridge HTTP port |
 | `bridge.aoPort` | `ZAPBOT_AO_PORT` | AO dashboard/runtime port |
 | `bridge.publicUrl` | `ZAPBOT_BRIDGE_URL` | public bridge URL the gateway forwards to in advanced `github-demo` mode |
@@ -296,16 +298,17 @@ environment, typically backed by GitHub repository or environment secrets.
 
 Canonical hosted startup path:
 
-- inject the hosted env from the mapping table above
+- inject the hosted env from the mapping table above, including required
+  `ZAPBOT_CHECKOUT_PATH=/path/to/your-project`
 - start the bridge directly from the zapbot checkout, not via `start.sh`:
 
 ```bash
 cd /path/to/zapbot
-bun run bridge -- --hosted --checkout /path/to/your-project
+bun run bridge -- --hosted
 ```
 
-`--checkout` should match the same checkout path you exported as
-`ZAPBOT_CHECKOUT_PATH`.
+Hosted mode reads the checkout path from `ZAPBOT_CHECKOUT_PATH`; it does not
+discover that path from `start.sh` or a checkout-local config file.
 
 4. Start the operator stack from the same project checkout in a foreground
    shell:
@@ -469,7 +472,7 @@ no separate zapbot lifecycle CLI in this README.
 From the project checkout:
 
 ```bash
-PROJECT_KEY=your-project
+PROJECT_KEY=your-project-key
 REGISTRY="$HOME/.zapbot/projects/$PROJECT_KEY/state/.zapbot-managed-sessions.json"
 
 jq '.records[] | {session: .tag.sessionName, scope: .tag.scope, phase: .phase, tmux: .tmuxName, worktree: .worktree}' \

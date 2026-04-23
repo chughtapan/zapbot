@@ -34,7 +34,7 @@ Config contract:
   `~/.zapbot/projects/<project-key>/project.json`.
 - Hosted/platform mode reads `ZAPBOT_*` plus GitHub auth env from the process
   environment, typically injected from GitHub repository or environment
-  secrets.
+  secrets, including required `ZAPBOT_CHECKOUT_PATH`.
 - README owns the local `project.json` <-> hosted env field mapping table and
   the end-to-end webhook setup steps.
 - Checkout-local `.env` and `agent-orchestrator.yaml` are legacy artifacts and

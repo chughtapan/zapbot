@@ -185,8 +185,8 @@ if $SERVER_MODE; then
   echo "     with the matching routes[].webhookSecret"
   echo ""
   echo "Hosted deployments should inject ZAPBOT_* and GitHub auth env from"
-  echo "GitHub repository/environment secrets and restart or redeploy when"
-  echo "those env values change."
+  echo "GitHub repository/environment secrets, including ZAPBOT_CHECKOUT_PATH,"
+  echo "and restart or redeploy when those env values change."
 else
   echo "  Zapbot skill v$(cat "$ZAPBOT_DIR/VERSION") installed!"
   echo "================================================"
