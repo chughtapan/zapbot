@@ -347,14 +347,27 @@ describe("startBridge reload", () => {
       stdoutWrites.push(String(chunk));
       return true;
     });
-    vi.spyOn(Bun, "serve").mockImplementation((((input: { readonly fetch: (req: Request) => Promise<Response> }) => {
+    const originalBun = (globalThis as typeof globalThis & {
+      Bun?: {
+        serve?: (input: { readonly fetch: (req: Request) => Promise<Response> }) => { stop(): void };
+      };
+    }).Bun;
+    const serveMock = vi.fn((input: { readonly fetch: (req: Request) => Promise<Response> }) => {
       capturedFetch = input.fetch;
       return {
         stop() {
           return undefined;
         },
       };
-    }) as typeof Bun.serve));
+    });
+    (globalThis as typeof globalThis & {
+      Bun?: {
+        serve?: typeof serveMock;
+      };
+    }).Bun = {
+      ...originalBun,
+      serve: serveMock,
+    };
 
     try {
       const callsA = {
@@ -458,6 +471,7 @@ describe("startBridge reload", () => {
 
       await running.stop();
     } finally {
+      (globalThis as typeof globalThis & { Bun?: typeof originalBun }).Bun = originalBun;
       stdoutWrite.mockRestore();
     }
   });
