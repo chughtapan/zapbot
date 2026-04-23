@@ -24,7 +24,7 @@ import type {
   ProjectName,
   Result,
 } from "../types.ts";
-import { asIssueNumber, asProjectName, err, ok } from "../types.ts";
+import { absurd, asIssueNumber, asProjectName, err, ok } from "../types.ts";
 import {
   fromSenderIds,
   type SenderAllowlist,
@@ -39,8 +39,23 @@ import {
   type WorkerRole,
 } from "../moltzap/session-role.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
-import type { BudgetConfig, BudgetVerdict } from "./budget.ts";
-import { asTokenCount, asIdleSeconds } from "./budget.ts";
+import type {
+  BudgetConfig,
+  BudgetEvent,
+  BudgetState,
+  BudgetVerdict,
+  TokenCount,
+  WallClockMs,
+} from "./budget.ts";
+import {
+  applyBudgetEvent,
+  asIdleSeconds,
+  asTokenCount,
+  asWallClockMs,
+  checkBudget,
+  initialBudgetState,
+  retireScopeFor,
+} from "./budget.ts";
 
 // ── Branded IDs ─────────────────────────────────────────────────────
 
@@ -161,6 +176,28 @@ export interface RosterManagerDeps {
 
 // ── Manager interface ──────────────────────────────────────────────
 
+/**
+ * Outcome of a single `stepBudget` evaluation. Surfaces the verdict
+ * and the retire that was applied (if any), so callers can log/audit.
+ * Principle 4: exhaustive over every path the roster manager takes.
+ */
+export type BudgetStepOutcome =
+  | { readonly _tag: "WithinBudget" }
+  | {
+      readonly _tag: "MemberRetired";
+      readonly session: AoSessionName;
+      readonly verdict: BudgetVerdict;
+    }
+  | {
+      readonly _tag: "RosterRetired";
+      readonly rosterId: RosterId;
+      readonly verdict: BudgetVerdict;
+    }
+  | {
+      readonly _tag: "StepFailed";
+      readonly reason: RosterTrackError | RosterRetireError;
+    };
+
 export interface RosterManager {
   readonly spawnRoster: (
     spec: RosterSpec,
@@ -177,6 +214,28 @@ export interface RosterManager {
     rosterId: RosterId,
     reason: RetireReason,
   ) => Promise<Result<void, RosterTrackError | RosterRetireError>>;
+
+  // ── Budget-event ingestion (SPEC §5(g); Invariant 6) ───────────────
+  //
+  // The roster manager owns the per-roster BudgetState. Callers fold
+  // events in through these methods; `stepBudget` evaluates both gates
+  // and applies any retire the verdict implies (code-level enforcement,
+  // per SPEC §5(g) "code, not policy").
+
+  readonly recordPeerMessageObserved: (
+    rosterId: RosterId,
+    session: AoSessionName,
+    atMs: WallClockMs,
+  ) => Result<void, RosterTrackError>;
+  readonly recordTokensConsumed: (
+    rosterId: RosterId,
+    session: AoSessionName,
+    tokens: TokenCount,
+  ) => Result<void, RosterTrackError>;
+  readonly stepBudget: (
+    rosterId: RosterId,
+    nowMs: WallClockMs,
+  ) => Promise<BudgetStepOutcome>;
 }
 
 // ── Decoder ────────────────────────────────────────────────────────
@@ -297,6 +356,7 @@ interface RosterRecord {
   readonly rosterId: RosterId;
   readonly spec: RosterSpec;
   readonly statuses: Map<AoSessionName, RosterMemberStatus>;
+  budgetState: BudgetState;
 }
 
 export function createRosterManager(deps: RosterManagerDeps): RosterManager {
@@ -422,10 +482,18 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     for (const m of spawned) {
       statuses.set(m.session, { _tag: "Live", member: m });
     }
+    // Seed the two-gate budget state machine. `deps.clock()` returns ms.
+    const spawnNowMs = asWallClockMs(deps.clock());
+    const budgetState = initialBudgetState(
+      spec.budget,
+      spawned.map((m) => m.session),
+      spawnNowMs,
+    );
     rosters.set(spec.rosterId, {
       rosterId: spec.rosterId,
       spec,
       statuses,
+      budgetState,
     });
 
     return ok(spawned);
@@ -465,11 +533,20 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     if (release._tag === "Err") {
       return err(release.error);
     }
+    const retiredAtMs = deps.clock();
     rec.statuses.set(session, {
       _tag: "Retired",
       member: current.member,
       reason,
-      retiredAtMs: deps.clock(),
+      retiredAtMs,
+    });
+    // Fold the MemberRetired event so checkBudget stops counting this
+    // session's idle clock and stops attributing tokens to a retired
+    // member (SPEC §5(g); Invariant 6).
+    rec.budgetState = applyBudgetEvent(rec.budgetState, {
+      _tag: "MemberRetired",
+      session,
+      atMs: asWallClockMs(retiredAtMs),
     });
     return ok(undefined);
   }
@@ -488,7 +565,108 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     return ok(undefined);
   }
 
-  return { spawnRoster, trackRoster, retireMember, retireRoster };
+  // ── Budget-event ingestion ───────────────────────────────────────
+
+  function foldBudgetEvent(
+    rosterId: RosterId,
+    event: BudgetEvent,
+  ): Result<void, RosterTrackError> {
+    const rec = rosters.get(rosterId);
+    if (!rec) return err({ _tag: "RosterNotFound", rosterId });
+    rec.budgetState = applyBudgetEvent(rec.budgetState, event);
+    return ok(undefined);
+  }
+
+  function recordPeerMessageObserved(
+    rosterId: RosterId,
+    session: AoSessionName,
+    atMs: WallClockMs,
+  ): Result<void, RosterTrackError> {
+    return foldBudgetEvent(rosterId, {
+      _tag: "PeerMessageObserved",
+      session,
+      atMs,
+    });
+  }
+
+  function recordTokensConsumed(
+    rosterId: RosterId,
+    session: AoSessionName,
+    tokens: TokenCount,
+  ): Result<void, RosterTrackError> {
+    return foldBudgetEvent(rosterId, {
+      _tag: "TokensConsumed",
+      session,
+      tokens,
+    });
+  }
+
+  async function stepBudget(
+    rosterId: RosterId,
+    nowMs: WallClockMs,
+  ): Promise<BudgetStepOutcome> {
+    const rec = rosters.get(rosterId);
+    if (!rec) {
+      return {
+        _tag: "StepFailed",
+        reason: { _tag: "RosterNotFound", rosterId },
+      };
+    }
+    const verdict = checkBudget(rec.budgetState, nowMs);
+    const scope = retireScopeFor(verdict);
+    switch (scope._tag) {
+      case "None":
+        return { _tag: "WithinBudget" };
+      case "RetireMember": {
+        if (scope.session === null) {
+          // Defensive: retireScopeFor always pairs RetireMember with a
+          // non-null session, but the type permits null so check.
+          return { _tag: "WithinBudget" };
+        }
+        const reason: RetireReason =
+          verdict._tag === "IdleTimeoutTripped"
+            ? { _tag: "IdleTimeoutTripped", idleSinceMs: verdict.idleForMs }
+            : { _tag: "RosterBudgetTripped", verdict };
+        const retireRes = await retireMember(rosterId, scope.session, reason);
+        if (retireRes._tag === "Err") {
+          return { _tag: "StepFailed", reason: retireRes.error };
+        }
+        return {
+          _tag: "MemberRetired",
+          session: scope.session,
+          verdict,
+        };
+      }
+      case "RetireRoster": {
+        const reason: RetireReason = {
+          _tag: "RosterBudgetTripped",
+          verdict,
+        };
+        const retireRes = await retireRoster(rosterId, reason);
+        if (retireRes._tag === "Err") {
+          return { _tag: "StepFailed", reason: retireRes.error };
+        }
+        return {
+          _tag: "RosterRetired",
+          rosterId,
+          verdict,
+        };
+      }
+      default:
+        // Principle 4: exhaustive over the scope tag union.
+        return absurd(scope._tag);
+    }
+  }
+
+  return {
+    spawnRoster,
+    trackRoster,
+    retireMember,
+    retireRoster,
+    recordPeerMessageObserved,
+    recordTokensConsumed,
+    stepBudget,
+  };
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────

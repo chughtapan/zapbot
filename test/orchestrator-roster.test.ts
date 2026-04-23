@@ -13,6 +13,7 @@ import {
 import {
   asIdleSeconds,
   asTokenCount,
+  asWallClockMs,
 } from "../src/orchestrator/budget.ts";
 import {
   fromSenderIds,
@@ -331,5 +332,120 @@ describe("roster.resolveRetiredRecipientRoute", () => {
     const orchestrator = asMoltzapSenderId("sender-o");
     const route = resolveRetiredRecipientRoute([], orchestrator);
     expect(route.orchestrator).toBe(orchestrator);
+  });
+});
+
+describe("roster budget wiring (SPEC §5(g) code-level enforcement)", () => {
+  it("stepBudget returns WithinBudget immediately after spawn", async () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    await mgr.spawnRoster(specFromValid());
+    const outcome = await mgr.stepBudget(ID, asWallClockMs(deps.clock()));
+    expect(outcome._tag).toBe("WithinBudget");
+  });
+
+  it("stepBudget trips RetireMember when a session idles past the ceiling", async () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("spawn failed");
+    // Validspec sets sessionIdleSeconds to 600 (10 min).
+    const t0 = deps.clock();
+    // Advance well past the idle ceiling (700s) with no peer events.
+    const outcome = await mgr.stepBudget(
+      ID,
+      asWallClockMs(t0 + 700 * 1000),
+    );
+    expect(outcome._tag).toBe("MemberRetired");
+    if (outcome._tag !== "MemberRetired") return;
+    expect(outcome.verdict._tag).toBe("IdleTimeoutTripped");
+  });
+
+  it("recordPeerMessageObserved holds the idle clock for that session", async () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("spawn failed");
+    const t0 = deps.clock();
+    // Reset each member's idle clock at t0 + 5 min.
+    for (const m of spawned.value) {
+      const r = mgr.recordPeerMessageObserved(
+        ID,
+        m.session,
+        asWallClockMs(t0 + 300 * 1000),
+      );
+      expect(r._tag).toBe("Ok");
+    }
+    // At t0 + 11 min, every member's idle is 6 min (< 10min ceiling).
+    const outcome = await mgr.stepBudget(
+      ID,
+      asWallClockMs(t0 + 660 * 1000),
+    );
+    expect(outcome._tag).toBe("WithinBudget");
+  });
+
+  it("recordTokensConsumed + stepBudget trips RetireRoster past the ceiling", async () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("spawn failed");
+    // Validspec sets rosterBudgetTokens to 1_000_000. Consume 1_100_000.
+    const session = spawned.value[0].session;
+    mgr.recordTokensConsumed(ID, session, asTokenCount(600_000));
+    mgr.recordTokensConsumed(ID, session, asTokenCount(500_000));
+    const outcome = await mgr.stepBudget(ID, asWallClockMs(deps.clock()));
+    expect(outcome._tag).toBe("RosterRetired");
+    if (outcome._tag !== "RosterRetired") return;
+    expect(outcome.verdict._tag).toBe("RosterTokenBudgetTripped");
+  });
+
+  it("retireMember folds MemberRetired so later stepBudget ignores the retired session", async () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("spawn failed");
+    // Retire one member so it's frozen in the budget state.
+    await mgr.retireMember(ID, spawned.value[0].session, { _tag: "ExplicitRetire" });
+    // Advance every other member's idle clock so they stay within budget.
+    const t0 = deps.clock();
+    for (const m of spawned.value.slice(1)) {
+      mgr.recordPeerMessageObserved(ID, m.session, asWallClockMs(t0 + 500_000));
+    }
+    // At t0 + 700s, the retired member's idle is 700s but it's frozen;
+    // the others' idle is 200s.
+    const outcome = await mgr.stepBudget(
+      ID,
+      asWallClockMs(t0 + 700_000),
+    );
+    expect(outcome._tag).toBe("WithinBudget");
+  });
+
+  it("stepBudget on an unknown roster returns StepFailed (RosterNotFound)", async () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const outcome = await mgr.stepBudget(
+      asRosterId("never-spawned"),
+      asWallClockMs(0),
+    );
+    expect(outcome._tag).toBe("StepFailed");
+    if (outcome._tag !== "StepFailed") return;
+    expect(outcome.reason._tag).toBe("RosterNotFound");
+  });
+
+  it("record* on an unknown roster returns RosterNotFound", () => {
+    const { deps } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const r1 = mgr.recordPeerMessageObserved(
+      asRosterId("ghost"),
+      asAoSessionName("s"),
+      asWallClockMs(0),
+    );
+    expect(r1._tag).toBe("Err");
+    const r2 = mgr.recordTokensConsumed(
+      asRosterId("ghost"),
+      asAoSessionName("s"),
+      asTokenCount(1),
+    );
+    expect(r2._tag).toBe("Err");
   });
 });
