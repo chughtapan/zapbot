@@ -76,6 +76,24 @@ export function resolveAoWebhookSecret(runtime: ResolvedProjectRuntime): string 
   return firstRoute?.webhookSecret ?? null;
 }
 
+export function resolveAoWebhookSecretBindings(runtime: ResolvedProjectRuntime): Record<string, string> {
+  return Object.fromEntries(
+    Array.from(runtime.routes.values()).map((route) => [
+      aoWebhookSecretEnvVar(route.repo),
+      route.webhookSecret,
+    ]),
+  );
+}
+
+export function aoWebhookSecretEnvVar(repo: RepoFullName): string {
+  const slug = (repo as string)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, "_")
+    .replace(/^_+/u, "")
+    .replace(/_+$/u, "");
+  return `ZAPBOT_WEBHOOK_SECRET_${slug}`;
+}
+
 function buildAoRuntimeYaml(runtime: ResolvedProjectRuntime): string {
   const projects = Object.fromEntries(
     Array.from(runtime.routes.values()).map((route) => [
@@ -88,7 +106,7 @@ function buildAoRuntimeYaml(runtime: ResolvedProjectRuntime): string {
           plugin: "github",
           webhook: {
             path: "/api/webhooks/github",
-            secretEnvVar: AO_WEBHOOK_SECRET_ENV_VAR,
+            secretEnvVar: aoWebhookSecretEnvVar(route.repo),
             signatureHeader: "x-hub-signature-256",
             eventHeader: "x-github-event",
           },

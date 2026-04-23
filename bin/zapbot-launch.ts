@@ -9,6 +9,7 @@ import {
   AO_WEBHOOK_SECRET_ENV_VAR,
   materializeAoRuntime,
   resolveAoWebhookSecret,
+  resolveAoWebhookSecretBindings,
   type AoRuntimeHandle,
 } from "../src/config/ao-runtime.ts";
 import { asRepoCheckoutPath, type ProjectRef } from "../src/config/home.ts";
@@ -25,36 +26,98 @@ interface LaunchSpawnOptions {
   readonly spawnImpl?: typeof spawn;
   readonly bridgeScriptPath?: string;
   readonly bunBinary?: string;
+  readonly baseEnv?: NodeJS.ProcessEnv;
 }
 
 interface LaunchProcessTree {
   readonly ao: ReturnType<typeof spawn>;
   readonly bridge: ReturnType<typeof spawn>;
   readonly env: NodeJS.ProcessEnv;
-  readonly reload: () => void;
   readonly cleanup: () => Promise<void>;
+}
+
+interface LoadedLaunchState {
+  readonly runtime: ResolvedProjectRuntime;
+  readonly aoRuntime: AoRuntimeHandle;
 }
 
 async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
-  const configService = createConfigService();
   const ref: ProjectRef = {
     checkoutPath: asRepoCheckoutPath(args.checkoutPath),
     ...(typeof args.projectKey === "string" ? { projectKey: args.projectKey as never } : {}),
   };
+  let active = await loadLaunchState(ref);
+  let launched = launchManagedProcesses(active.runtime, active.aoRuntime);
+  let generation = 0;
+  let settled = false;
+  let reloading = false;
+  let cleaningUp = false;
 
-  const runtime = await Effect.runPromise(configService.loadProjectRuntime(ref));
-  const aoRuntime = await Effect.runPromise(materializeAoRuntime(runtime));
-  const launched = launchManagedProcesses(runtime, aoRuntime);
+  const exitCode = await new Promise<number>((resolveExit) => {
+    const watch = (tree: LaunchProcessTree, treeGeneration: number) => {
+      for (const child of [tree.ao, tree.bridge]) {
+        child.once("exit", (code) => {
+          if (settled || reloading || cleaningUp || treeGeneration !== generation) {
+            return;
+          }
+          settled = true;
+          resolveExit(code ?? 0);
+        });
+        child.once("error", () => {
+          if (settled || reloading || cleaningUp || treeGeneration !== generation) {
+            return;
+          }
+          settled = true;
+          resolveExit(1);
+        });
+      }
+    };
 
-  process.on("SIGHUP", () => {
-    launched.reload();
+    watch(launched, generation);
+
+    const shutdown = (exitCode: number) => {
+      void (async () => {
+        if (settled || cleaningUp) {
+          return;
+        }
+        settled = true;
+        cleaningUp = true;
+        await launched.cleanup();
+        await Effect.runPromise(active.aoRuntime.dispose).catch(() => undefined);
+        resolveExit(exitCode);
+      })();
+    };
+
+    process.on("SIGINT", () => shutdown(0));
+    process.on("SIGTERM", () => shutdown(0));
+    process.on("SIGHUP", () => {
+      void (async () => {
+        if (settled || reloading || cleaningUp) {
+          return;
+        }
+        reloading = true;
+        try {
+          const next = await loadLaunchState(ref);
+          cleaningUp = true;
+          launched = await reloadManagedProcesses(launched, active.aoRuntime, next);
+          cleaningUp = false;
+          active = next;
+          generation += 1;
+          watch(launched, generation);
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+        } finally {
+          reloading = false;
+          cleaningUp = false;
+        }
+      })();
+    });
   });
-  process.on("SIGINT", () => void launched.cleanup());
-  process.on("SIGTERM", () => void launched.cleanup());
 
-  const exitCode = await waitForFirstExit(launched.ao, launched.bridge);
+  cleaningUp = true;
   await launched.cleanup();
+  await Effect.runPromise(active.aoRuntime.dispose).catch(() => undefined);
   process.exit(exitCode);
 }
 
@@ -89,7 +152,7 @@ export function launchManagedProcesses(
   options: LaunchSpawnOptions = {},
 ): LaunchProcessTree {
   const spawnImpl = options.spawnImpl ?? spawn;
-  const env = buildLauncherEnv(runtime, aoRuntime);
+  const env = buildLauncherEnv(runtime, aoRuntime, options.baseEnv);
   const ao = spawnImpl("ao", ["start"], {
     cwd: runtime.projectHome.checkoutPath as string,
     env,
@@ -114,9 +177,6 @@ export function launchManagedProcesses(
     ao,
     bridge,
     env,
-    reload() {
-      bridge.kill("SIGHUP");
-    },
     async cleanup() {
       if (cleaned) {
         return;
@@ -124,7 +184,6 @@ export function launchManagedProcesses(
       cleaned = true;
       ao.kill("SIGTERM");
       bridge.kill("SIGTERM");
-      await Effect.runPromise(aoRuntime.dispose).catch(() => undefined);
     },
   };
 }
@@ -145,6 +204,9 @@ export function buildLauncherEnv(
   if (webhookSecret !== null) {
     env[AO_WEBHOOK_SECRET_ENV_VAR] = webhookSecret;
   }
+  for (const [key, value] of Object.entries(resolveAoWebhookSecretBindings(runtime))) {
+    env[key] = value;
+  }
   for (const [key, value] of Object.entries(toRuntimeEnv(runtime))) {
     env[key] = value;
   }
@@ -153,6 +215,17 @@ export function buildLauncherEnv(
 
 export function resolveBridgeScriptPath(moduleUrl: string = import.meta.url): string {
   return resolve(fileURLToPath(new URL("./webhook-bridge.ts", moduleUrl)));
+}
+
+export async function reloadManagedProcesses(
+  current: LaunchProcessTree,
+  currentAoRuntime: AoRuntimeHandle,
+  next: LoadedLaunchState,
+  options: LaunchSpawnOptions = {},
+): Promise<LaunchProcessTree> {
+  await current.cleanup();
+  await Effect.runPromise(currentAoRuntime.dispose).catch(() => undefined);
+  return launchManagedProcesses(next.runtime, next.aoRuntime, options);
 }
 
 function toRuntimeEnv(runtime: ResolvedProjectRuntime): Record<string, string> {
@@ -169,13 +242,14 @@ function toRuntimeEnv(runtime: ResolvedProjectRuntime): Record<string, string> {
   };
 }
 
-async function waitForFirstExit(...children: Array<ReturnType<typeof spawn>>): Promise<number> {
-  return await new Promise((resolve) => {
-    for (const child of children) {
-      child.once("exit", (code) => resolve(code ?? 0));
-      child.once("error", () => resolve(1));
-    }
-  });
+async function loadLaunchState(ref: ProjectRef): Promise<LoadedLaunchState> {
+  const configService = createConfigService();
+  const runtime = await Effect.runPromise(configService.loadProjectRuntime(ref));
+  const aoRuntime = await Effect.runPromise(materializeAoRuntime(runtime));
+  return {
+    runtime,
+    aoRuntime,
+  };
 }
 
 const isMainModule =

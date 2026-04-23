@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Effect, Schema } from "effect";
 import {
+  resolveProjectHome,
   asOperatorProjectHomePath,
   asProjectKey,
   asRepoCheckoutPath,
@@ -33,7 +34,9 @@ export interface ProjectBootstrapReceipt {
 export type BootstrapConfigError =
   | { readonly _tag: "BootstrapConfigWriteFailed"; readonly cause: string }
   | { readonly _tag: "BootstrapConfigDecodeFailed"; readonly cause: string }
-  | { readonly _tag: "BootstrapSecretGenerationFailed"; readonly cause: string };
+  | { readonly _tag: "BootstrapSecretGenerationFailed"; readonly cause: string }
+  | { readonly _tag: "BootstrapProjectKeyRequired"; readonly checkoutPath: string }
+  | { readonly _tag: "BootstrapHomeMissing"; readonly path: string };
 
 export function initializeProjectConfig(
   request: ProjectBootstrapRequest,
@@ -71,43 +74,59 @@ export function initializeProjectConfig(
 export function appendProjectRoute(
   request: AppendProjectRouteRequest,
 ): Effect.Effect<ProjectBootstrapReceipt, BootstrapConfigError, never> {
-  return Effect.tryPromise({
-    try: async () => {
-      const checkoutPath = resolve(request.checkoutPath);
-      const projectKey = request.projectKey
-        ? asProjectKey(request.projectKey)
-        : defaultProjectKeyForCheckout(asRepoCheckoutPath(checkoutPath));
-      const homePath = resolveProjectHomePath(projectKey);
-      const configPath = projectConfigPath(asOperatorProjectHomePath(homePath));
-      const raw = await readFile(configPath, "utf8");
-      const parsed = Schema.decodeUnknownSync(OperatorProjectConfigSchema)(JSON.parse(raw));
-      if (parsed.routes.some((route) => route.repo === request.repo)) {
-        return {
-          projectKey,
-          projectHomePath: homePath,
-          configPath,
-        } satisfies ProjectBootstrapReceipt;
-      }
-      const next: OperatorProjectConfigDocument = {
-        ...parsed,
-        routes: [...parsed.routes, {
-        projectName: request.repo.split("/").pop() ?? request.repo,
-        repo: request.repo,
-        defaultBranch: "main",
-        webhookSecret: parsed.routes[0]?.webhookSecret ?? generateSecret(),
-        }],
-      };
-      await writeProjectDocument(configPath, next);
+  return Effect.gen(function* () {
+    const checkoutPath = resolve(request.checkoutPath);
+    const projectKey = yield* resolveAppendProjectKey(checkoutPath, request.projectKey);
+    const homePath = yield* resolveProjectHomePathForAppend(projectKey);
+    const configPath = projectConfigPath(asOperatorProjectHomePath(homePath));
+    const raw = yield* Effect.tryPromise({
+      try: async () => await readFile(configPath, "utf8"),
+      catch: (cause) => ({
+        _tag: "BootstrapConfigWriteFailed",
+        cause: cause instanceof Error ? cause.message : String(cause),
+      } satisfies BootstrapConfigError),
+    });
+    const parsed = yield* Effect.try({
+      try: () => Schema.decodeUnknownSync(OperatorProjectConfigSchema)(JSON.parse(raw)),
+      catch: (cause) => ({
+        _tag: "BootstrapConfigDecodeFailed",
+        cause: cause instanceof Error ? cause.message : String(cause),
+      } satisfies BootstrapConfigError),
+    });
+
+    if (parsed.routes.some((route) => route.repo === request.repo)) {
       return {
         projectKey,
         projectHomePath: homePath,
         configPath,
       } satisfies ProjectBootstrapReceipt;
-    },
-    catch: (cause) => ({
-      _tag: "BootstrapConfigWriteFailed",
-      cause: cause instanceof Error ? cause.message : String(cause),
-    } satisfies BootstrapConfigError),
+    }
+
+    const next: OperatorProjectConfigDocument = {
+      ...parsed,
+      routes: [
+        ...parsed.routes,
+        {
+          projectName: request.repo.split("/").pop() ?? request.repo,
+          repo: request.repo,
+          checkoutPath,
+          defaultBranch: "main",
+          webhookSecret: parsed.routes[0]?.webhookSecret ?? generateSecret(),
+        },
+      ],
+    };
+    yield* Effect.tryPromise({
+      try: async () => await writeProjectDocument(configPath, next),
+      catch: (cause) => ({
+        _tag: "BootstrapConfigWriteFailed",
+        cause: cause instanceof Error ? cause.message : String(cause),
+      } satisfies BootstrapConfigError),
+    });
+    return {
+      projectKey,
+      projectHomePath: homePath,
+      configPath,
+    } satisfies ProjectBootstrapReceipt;
   });
 }
 
@@ -179,10 +198,65 @@ function createInitialDocument(input: {
     routes: [{
       projectName: input.repo.split("/").pop() ?? input.repo,
       repo: input.repo,
+      checkoutPath: input.checkoutPath,
       defaultBranch: "main",
       webhookSecret,
     }],
   };
+}
+
+function resolveAppendProjectKey(
+  checkoutPath: string,
+  requestedProjectKey: string | undefined,
+): Effect.Effect<ProjectKey, BootstrapConfigError, never> {
+  if (typeof requestedProjectKey === "string" && requestedProjectKey.trim().length > 0) {
+    return Effect.succeed(asProjectKey(requestedProjectKey.trim()));
+  }
+  return Effect.gen(function* () {
+    const resolved = yield* Effect.either(resolveProjectHome({
+      checkoutPath: asRepoCheckoutPath(checkoutPath),
+    }));
+    if (resolved._tag === "Right") {
+      return resolved.right.projectKey;
+    }
+    switch (resolved.left._tag) {
+      case "ProjectHomeMissing":
+        return yield* Effect.fail<BootstrapConfigError>({
+          _tag: "BootstrapProjectKeyRequired",
+          checkoutPath,
+        });
+      case "ZapbotHomeMissing":
+        return yield* Effect.fail<BootstrapConfigError>({
+          _tag: "BootstrapHomeMissing",
+          path: resolved.left.path,
+        });
+      case "LegacyRepoLocalConfigUnsupported":
+      case "ConfigFileUnreadable":
+      case "ConfigDecodeFailed":
+      case "IngressConfigInvalid":
+        return yield* Effect.fail<BootstrapConfigError>({
+          _tag: "BootstrapConfigWriteFailed",
+          cause:
+            resolved.left._tag === "IngressConfigInvalid"
+              ? resolved.left.reason
+              : "cause" in resolved.left
+                ? resolved.left.cause
+                : resolved.left.path,
+        });
+    }
+  });
+}
+
+function resolveProjectHomePathForAppend(
+  projectKey: ProjectKey,
+): Effect.Effect<string, BootstrapConfigError, never> {
+  return Effect.try({
+    try: () => resolveProjectHomePath(projectKey),
+    catch: () => ({
+      _tag: "BootstrapHomeMissing",
+      path: "~/.zapbot",
+    } satisfies BootstrapConfigError),
+  });
 }
 
 async function writeProjectDocument(

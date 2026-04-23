@@ -72,6 +72,7 @@ export const GitHubAuthConfigSchema = Schema.Union(GitHubPatSchema, GitHubAppSch
 export const RouteConfigDocumentSchema = Schema.Struct({
   projectName: Schema.String,
   repo: Schema.String,
+  checkoutPath: Schema.optional(Schema.String),
   defaultBranch: Schema.String,
   webhookSecret: Schema.String,
 });

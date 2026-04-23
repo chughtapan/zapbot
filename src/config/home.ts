@@ -22,6 +22,7 @@ export interface OperatorProjectHome {
 interface ProjectHomeIndexRecord {
   readonly projectKey?: unknown;
   readonly checkoutPath?: unknown;
+  readonly routes?: unknown;
 }
 
 const PROJECTS_DIR = "projects";
@@ -69,18 +70,19 @@ export function projectStateDir(home: OperatorProjectHome | OperatorProjectHomeP
 }
 
 export function resolveZapbotHome(): Effect.Effect<ZapbotHomePath, ConfigServiceError, never> {
-  return Effect.sync(() => {
+  return Effect.try({
+    try: () => {
     const home = process.env.HOME;
     if (typeof home !== "string" || home.trim().length === 0) {
-      throw {
-        _tag: "ZapbotHomeMissing",
-        path: "~/.zapbot",
-      } satisfies ConfigServiceError;
+      throw new Error("HOME must be set for canonical ~/.zapbot config");
     }
     return asZapbotHomePath(join(home, ".zapbot"));
-  }).pipe(
-    Effect.mapError((error) => error as ConfigServiceError),
-  );
+    },
+    catch: () => ({
+        _tag: "ZapbotHomeMissing",
+        path: "~/.zapbot",
+      } satisfies ConfigServiceError),
+  });
 }
 
 export function resolveProjectHome(ref: ProjectRef): Effect.Effect<OperatorProjectHome, ConfigServiceError, never> {
@@ -130,7 +132,7 @@ export function resolveProjectHome(ref: ProjectRef): Effect.Effect<OperatorProje
       if (record === null) {
         continue;
       }
-      if (normalizeAbsolutePath(record.checkoutPath) === checkoutPath) {
+      if (record.checkoutPaths.some((candidate) => normalizeAbsolutePath(candidate) === checkoutPath)) {
         return {
           projectKey: asProjectKey(record.projectKey),
           homePath,
@@ -154,15 +156,26 @@ function normalizeAbsolutePath(path: string): string {
   return resolve(path);
 }
 
-function readProjectHomeIndexRecord(configPath: string): { readonly projectKey: string; readonly checkoutPath: string } | null {
+function readProjectHomeIndexRecord(
+  configPath: string,
+): { readonly projectKey: string; readonly checkoutPaths: ReadonlyArray<string> } | null {
   try {
     const parsed = JSON.parse(readFileSync(configPath, "utf8")) as ProjectHomeIndexRecord;
     if (typeof parsed.projectKey !== "string" || typeof parsed.checkoutPath !== "string") {
       return null;
     }
+    const routeCheckoutPaths = Array.isArray(parsed.routes)
+      ? parsed.routes.flatMap((route) => {
+        if (!route || typeof route !== "object") {
+          return [];
+        }
+        const checkoutPath = (route as { readonly checkoutPath?: unknown }).checkoutPath;
+        return typeof checkoutPath === "string" ? [checkoutPath] : [];
+      })
+      : [];
     return {
       projectKey: parsed.projectKey,
-      checkoutPath: parsed.checkoutPath,
+      checkoutPaths: [parsed.checkoutPath, ...routeCheckoutPaths],
     };
   } catch {
     return null;

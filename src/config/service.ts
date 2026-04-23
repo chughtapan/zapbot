@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import {
   asProjectKey,
@@ -6,6 +7,7 @@ import {
   defaultProjectKeyForCheckout,
   projectConfigPath,
   resolveProjectHome,
+  resolveZapbotHome,
   type ProjectRef,
 } from "./home.ts";
 import {
@@ -93,9 +95,11 @@ export function loadHostedBridgeRuntime(): Effect.Effect<ResolvedProjectRuntime,
   return Effect.gen(function* () {
     const env = yield* loadHostedEnv();
     const checkoutPath = asRepoCheckoutPath(env.ZAPBOT_CHECKOUT_PATH);
+    const zapbotHome = yield* resolveZapbotHome();
+    const projectKey = asProjectKey(env.ZAPBOT_PROJECT_KEY ?? defaultProjectKeyForCheckout(checkoutPath));
     const projectHome = {
-      projectKey: asProjectKey(env.ZAPBOT_PROJECT_KEY ?? defaultProjectKeyForCheckout(checkoutPath)),
-      homePath: `${process.env.HOME ?? ""}/.zapbot/projects/${env.ZAPBOT_PROJECT_KEY ?? defaultProjectKeyForCheckout(checkoutPath)}` as never,
+      projectKey,
+      homePath: join(zapbotHome as string, "projects", projectKey as string) as never,
       checkoutPath,
     };
     const ingress = yield* deriveIngress(
@@ -244,7 +248,7 @@ function buildRoutes(document: OperatorProjectConfigDocument): ReadonlyMap<RepoF
       {
         projectName: asProjectName(route.projectName),
         repo: asRepoFullName(route.repo),
-        checkoutPath: asRepoCheckoutPath(document.checkoutPath),
+        checkoutPath: asRepoCheckoutPath(route.checkoutPath ?? document.checkoutPath),
         defaultBranch: route.defaultBranch,
         webhookSecret: route.webhookSecret,
       } satisfies RouteConfig,

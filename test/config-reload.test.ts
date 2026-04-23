@@ -5,10 +5,11 @@ import { Effect } from "effect";
 import {
   buildLauncherEnv,
   launchManagedProcesses,
+  reloadManagedProcesses,
   resolveBridgeScriptPath,
 } from "../bin/zapbot-launch.ts";
 import {
-  AO_WEBHOOK_SECRET_ENV_VAR,
+  aoWebhookSecretEnvVar,
   materializeAoRuntime,
 } from "../src/config/ao-runtime.ts";
 import {
@@ -30,7 +31,7 @@ class FakeChildProcess extends EventEmitter {
 }
 
 describe("launcher/runtime integration surface", () => {
-  it("spawns the bridge from the launcher path and forwards reload to the live bridge process", async () => {
+  it("spawns the bridge from the launcher path", async () => {
     const runtime = createRuntime();
     let disposed = false;
     const aoRuntime = {
@@ -69,18 +70,95 @@ describe("launcher/runtime integration surface", () => {
       args: ["/srv/zapbot/bin/webhook-bridge.ts", "--checkout", "/srv/worktrees/repo"],
       cwd: "/srv/worktrees/repo",
     });
-    expect(calls[1]?.env?.[AO_WEBHOOK_SECRET_ENV_VAR]).toBe("webhook-secret");
-
-    launched.reload();
-    expect(bridge.signals).toEqual(["SIGHUP"]);
+    expect(calls[1]?.env?.[aoWebhookSecretEnvVar(asRepoFullName("owner/repo"))]).toBe("webhook-secret");
 
     await launched.cleanup();
     expect(ao.signals).toEqual(["SIGTERM"]);
-    expect(bridge.signals).toEqual(["SIGHUP", "SIGTERM"]);
-    expect(disposed).toBe(true);
+    expect(bridge.signals).toEqual(["SIGTERM"]);
+    expect(disposed).toBe(false);
   });
 
-  it("builds a coherent AO runtime env and generated config", async () => {
+  it("restarts AO and bridge with fresh AO runtime/env on reload", async () => {
+    const firstRuntime = createRuntime();
+    const secondRuntime = createRuntime({
+      projectHomeCheckoutPath: "/srv/worktrees/secondary",
+      routes: [
+        {
+          repo: "owner/repo",
+          projectName: "repo",
+          checkoutPath: "/srv/worktrees/secondary",
+          webhookSecret: "updated-secret",
+        },
+        {
+          repo: "owner/extra-repo",
+          projectName: "extra-repo",
+          checkoutPath: "/srv/worktrees/extra",
+          webhookSecret: "extra-secret",
+        },
+      ],
+    });
+    let disposedFirst = false;
+    const firstAoRuntime = {
+      configPath: "/tmp/zapbot/first.yaml",
+      registryPath: "/tmp/zapbot/first-registry.json",
+      dispose: Effect.sync(() => {
+        disposedFirst = true;
+      }),
+    };
+    const secondAoRuntime = {
+      configPath: "/tmp/zapbot/second.yaml",
+      registryPath: "/tmp/zapbot/second-registry.json",
+      dispose: Effect.sync(() => undefined),
+    };
+    const children = Array.from({ length: 4 }, () => new FakeChildProcess());
+    const calls: Array<{ command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv }> = [];
+    const spawnImpl: typeof import("node:child_process").spawn = ((command, args, options) => {
+      calls.push({
+        command,
+        args: [...args],
+        cwd: options?.cwd,
+        env: options?.env as NodeJS.ProcessEnv,
+      });
+      return children[calls.length - 1] as never;
+    }) as never;
+
+    const launched = launchManagedProcesses(firstRuntime, firstAoRuntime, {
+      spawnImpl,
+      bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
+      bunBinary: "/usr/local/bin/bun",
+    });
+    const reloaded = await reloadManagedProcesses(launched, firstAoRuntime, {
+      runtime: secondRuntime,
+      aoRuntime: secondAoRuntime,
+    }, {
+      spawnImpl,
+      bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
+      bunBinary: "/usr/local/bin/bun",
+    });
+
+    expect(children[0]?.signals).toEqual(["SIGTERM"]);
+    expect(children[1]?.signals).toEqual(["SIGTERM"]);
+    expect(disposedFirst).toBe(true);
+    expect(calls).toHaveLength(4);
+    expect(calls[2]).toMatchObject({
+      command: "ao",
+      args: ["start"],
+      cwd: "/srv/worktrees/secondary",
+    });
+    expect(calls[3]).toMatchObject({
+      command: "/usr/local/bin/bun",
+      args: ["/srv/zapbot/bin/webhook-bridge.ts", "--checkout", "/srv/worktrees/secondary"],
+      cwd: "/srv/worktrees/secondary",
+    });
+    expect(calls[3]?.env?.AO_CONFIG_PATH).toBe("/tmp/zapbot/second.yaml");
+    expect(calls[3]?.env?.ZAPBOT_MANAGED_SESSION_REGISTRY_PATH).toBe("/tmp/zapbot/second-registry.json");
+    expect(calls[3]?.env?.[aoWebhookSecretEnvVar(asRepoFullName("owner/repo"))]).toBe("updated-secret");
+    expect(calls[3]?.env?.[aoWebhookSecretEnvVar(asRepoFullName("owner/extra-repo"))]).toBe("extra-secret");
+
+    await reloaded.cleanup();
+  });
+
+  it("builds a coherent AO runtime env and generated config for multi-repo projects", async () => {
     const runtime = createRuntime();
     const aoRuntime = await Effect.runPromise(materializeAoRuntime(runtime));
 
@@ -92,10 +170,12 @@ describe("launcher/runtime integration surface", () => {
       expect(env.ZAPBOT_MANAGED_SESSION_REGISTRY_PATH).toBe(
         "/srv/operator/.zapbot/projects/demo/state/.zapbot-managed-sessions.json",
       );
-      expect(env[AO_WEBHOOK_SECRET_ENV_VAR]).toBe("webhook-secret");
-      expect(env.__CANONICAL_ZAPBOT_WEBHOOK_SECRET__).toBeUndefined();
-
-      expect(yamlText).toContain(`secretEnvVar: ${AO_WEBHOOK_SECRET_ENV_VAR}`);
+      expect(env[aoWebhookSecretEnvVar(asRepoFullName("owner/repo"))]).toBe("webhook-secret");
+      expect(env[aoWebhookSecretEnvVar(asRepoFullName("owner/second-repo"))]).toBe("second-secret");
+      expect(yamlText).toContain("path: /srv/worktrees/repo");
+      expect(yamlText).toContain("path: /srv/worktrees/second");
+      expect(yamlText).toContain(`secretEnvVar: ${aoWebhookSecretEnvVar(asRepoFullName("owner/repo"))}`);
+      expect(yamlText).toContain(`secretEnvVar: ${aoWebhookSecretEnvVar(asRepoFullName("owner/second-repo"))}`);
       expect(aoRuntime.registryPath).toBe(
         "/srv/operator/.zapbot/projects/demo/state/.zapbot-managed-sessions.json",
       );
@@ -111,12 +191,20 @@ describe("launcher/runtime integration surface", () => {
   });
 });
 
-function createRuntime(): ResolvedProjectRuntime {
+function createRuntime(overrides: {
+  readonly projectHomeCheckoutPath?: string;
+  readonly routes?: ReadonlyArray<{
+    readonly repo: string;
+    readonly projectName: string;
+    readonly checkoutPath: string;
+    readonly webhookSecret: string;
+  }>;
+} = {}): ResolvedProjectRuntime {
   return {
     projectHome: {
       projectKey: asProjectKey("demo"),
       homePath: asOperatorProjectHomePath("/srv/operator/.zapbot/projects/demo"),
-      checkoutPath: asRepoCheckoutPath("/srv/worktrees/repo"),
+      checkoutPath: asRepoCheckoutPath(overrides.projectHomeCheckoutPath ?? "/srv/worktrees/repo"),
     },
     bridgePort: 3000,
     aoPort: 3001,
@@ -139,13 +227,29 @@ function createRuntime(): ResolvedProjectRuntime {
     logLevel: "info",
     apiKey: "api-key",
     routes: new Map([
-      [asRepoFullName("owner/repo"), {
-        projectName: asProjectName("repo"),
-        repo: asRepoFullName("owner/repo"),
-        checkoutPath: asRepoCheckoutPath("/srv/worktrees/repo"),
-        defaultBranch: "main",
-        webhookSecret: "webhook-secret",
-      }],
+      ...(overrides.routes ?? [
+        {
+          repo: "owner/repo",
+          projectName: "repo",
+          checkoutPath: "/srv/worktrees/repo",
+          webhookSecret: "webhook-secret",
+        },
+        {
+          repo: "owner/second-repo",
+          projectName: "second-repo",
+          checkoutPath: "/srv/worktrees/second",
+          webhookSecret: "second-secret",
+        },
+      ]).map((route) => [
+        asRepoFullName(route.repo),
+        {
+          projectName: asProjectName(route.projectName),
+          repo: asRepoFullName(route.repo),
+          checkoutPath: asRepoCheckoutPath(route.checkoutPath),
+          defaultBranch: "main",
+          webhookSecret: route.webhookSecret,
+        },
+      ]),
     ]),
   };
 }

@@ -56,7 +56,7 @@ That creates canonical local operator config under:
 `agent-orchestrator.yaml`. To add another repo later, use:
 
 ```bash
-/path/to/zapbot/bin/zapbot-team-init --add-repo owner/other-repo
+/path/to/zapbot/bin/zapbot-team-init --project-key <project-key> --add-repo owner/other-repo
 ```
 
 ### Start the stack with `start.sh .`
@@ -517,7 +517,7 @@ From the additional project checkout:
 
 ```bash
 cd /path/to/other-project
-/path/to/zapbot/bin/zapbot-team-init --add-repo owner/other-repo
+/path/to/zapbot/bin/zapbot-team-init --project-key <existing-project-key> --add-repo owner/other-repo
 ```
 
 ## GitHub App setup
