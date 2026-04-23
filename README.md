@@ -7,6 +7,9 @@ signatures, uses repo write access as an invocation gate for `@zapbot`, and
 forwards allowed control events into one persistent AO orchestrator session per
 project.
 
+Those checks gate who can invoke the bridge. They do not make the forwarded
+comment body trusted once AO receives it.
+
 README is the canonical local-only quickstart. It is intentionally scoped to
 the first self-contained success path:
 
@@ -25,11 +28,23 @@ You need two checkouts:
   `start.sh`
 - the target project checkout that zapbot should control
 
+Command grammar used in this quickstart:
+
+- run `./setup --server` from the zapbot checkout
+- run `bin/zapbot-team-init owner/repo` from the target project checkout
+- run `start.sh .` from the target project checkout, where `.` means "this
+  checkout is the project root"
+
 Plain-language terms used below:
 
 - `ao` is the CLI/runtime zapbot uses to keep agent sessions alive.
 - the orchestrator is the one long-lived AO session for a project.
 - workers are short-lived AO sessions spawned later for task-specific work.
+
+In the local-only path below, zapbot starts exactly two local things for you:
+
+- the webhook bridge process
+- one persistent AO orchestrator session for the project
 
 ## First Success (Local-only)
 
@@ -44,6 +59,14 @@ Bridge operators need:
 `bun` and `ao` do not need to exist yet. `./setup --server` below is the step
 that provisions the `bun` + `ao` runtime used by the later quickstart
 commands.
+
+`./setup --server` validates the host prerequisites above and installs the
+runtime pieces zapbot adds itself. It does not replace the need for `git`,
+`gh`, `node`, `tmux`, `jq`, or `curl` to already exist on the bridge host.
+
+`gh auth login` is only for the GitHub CLI on the bridge host. The repo token
+you place into `project.json` in step 3 is a separate runtime credential and
+may be the same PAT or a different one.
 
 ### 1. Prepare the bridge host
 
@@ -128,17 +151,22 @@ Notes:
   `zapbot-team-init`.
 - `bridge.port` and `bridge.aoPort` are also already present in the generated
   file; the quickstart reuses those values in step 5.
+- Only change the keys shown in the snippet above for first success. Leave the
+  rest of the generated file in place.
 - Keep `bridge.publicUrl`, `bridge.gatewayUrl`, `moltzap.serverUrl`, and
   `moltzap.registrationSecret` set to `null` for first success.
-- In token mode, use a PAT with repo write access to the target repo. Minimum
-  practical scope is whatever lets the worker read and write issues, pull
-  requests, and contents for that repo.
-- Optional token check before startup:
+- In token mode, use one of these:
+  - a classic PAT with `repo`
+  - a fine-grained PAT for the target repo with read/write access to Issues,
+    Pull requests, and Contents
+- Optional token reachability check before startup:
 
 ```bash
-GH_TOKEN=ghp_or_pat_with_repo_access gh api repos/owner/repo >/dev/null
+GH_TOKEN=ghp_or_pat_with_repo_access gh api repos/owner/repo -q .full_name
 ```
 
+- That check only proves the token can reach the target repo. Zapbot still
+  applies its own repo-write invocation gate at runtime.
 - Switch `github.mode` to `app` only if you already have an installed GitHub
   App and know its `appId`, `installationId`, and `privateKeyPem`.
 
@@ -177,11 +205,6 @@ REGISTRY="$HOME/.zapbot/projects/$PROJECT_KEY/state/.zapbot-managed-sessions.jso
 
 curl -fsS "http://127.0.0.1:$BRIDGE_PORT/healthz"
 ao status --json | jq '.[] | {name, role, status}'
-if [ -f "$REGISTRY" ]; then
-  jq '.records[] | {session: .tag.sessionName, scope: .tag.scope, phase: .phase}' "$REGISTRY"
-else
-  echo "registry missing; inspect /tmp/zapbot-ao.log and ao status --json"
-fi
 ```
 
 Expected local-only signals in the same foreground shell that ran `start.sh`:
@@ -196,21 +219,29 @@ AO ready on port 3001
 ```
 
 - `curl` to `/healthz` returns `ok`
-- `ao status --json` shows the project orchestrator session
-- if the managed-session registry exists, it contains the zapbot-managed
-  orchestrator record
+- `ao status --json` shows the project orchestrator session, for example:
 
-If the managed-session registry is missing, empty, or stale:
+```json
+[
+  {
+    "name": "zap-orchestrator-1",
+    "role": "orchestrator",
+    "status": "running"
+  }
+]
+```
 
-- missing file: treat that as "startup has not produced a usable ledger yet."
-  Re-check the startup receipt, `ao status --json`, and `/tmp/zapbot-ao.log`
-  before you assume zapbot owns anything.
-- empty `records`: do not infer ownership from an empty ledger. Wait for
-  orchestrator startup to settle, re-run `ao status --json`, and inspect
-  `/tmp/zapbot-ao.log` if it stays empty.
-- stale record: if the registry shows a session that `ao status --json` does
-  not, treat the record as bookkeeping drift, not proof of a live session. Do
-  not kill tmux by name from a stale row alone.
+Optional deeper ownership check:
+
+```bash
+if [ -f "$REGISTRY" ]; then
+  jq '.records[] | {session: .tag.sessionName, scope: .tag.scope, phase: .phase}' "$REGISTRY"
+fi
+```
+
+If that file is missing or stale, do not treat it as proof that startup failed.
+Use the startup receipt, `/healthz`, and `ao status --json` as the primary
+first-success checks.
 
 First success in README stops here. In `local-only` mode you have proven:
 
@@ -270,20 +301,15 @@ cd /path/to/other-project
 /path/to/zapbot/bin/zapbot-team-init --project-key <existing-project-key> --add-repo owner/other-repo
 ```
 
-## Advanced paths
-
 README intentionally stops at the self-contained local-only path. For
-hosted/platform, GitHub App auth, public ingress (`github-demo`), and MoltZap
-operator reference, use:
+additional operator scenarios, use [CONTRIBUTING.md](CONTRIBUTING.md) and
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) for operator and repo-maintainer guidance
-- [ARCHITECTURE.md](ARCHITECTURE.md) for runtime/module boundaries and config
-  contracts
-
-Those reference docs describe different secret custody models. The local-only
-quickstart here uses secret-bearing `~/.zapbot/projects/<project-key>/project.json`
-on the bridge host. Hosted/platform mode instead uses deployment-managed
-environment variables and is intentionally out of scope for this README.
+Local-only mode stores secret-bearing config in
+`~/.zapbot/projects/<project-key>/project.json`. Hosted/platform mode instead
+uses deployment-managed env such as `ZAPBOT_WEBHOOK_SECRET`,
+`ZAPBOT_GITHUB_TOKEN`, and `GITHUB_APP_*`, and is intentionally out of scope
+for this README.
 
 ## Development
 
