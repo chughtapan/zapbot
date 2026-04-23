@@ -23,10 +23,18 @@ import { asBotUsername, asProjectName, asRepoFullName } from "../src/types.ts";
 class FakeChildProcess extends EventEmitter {
   readonly signals: string[] = [];
   pid = 1;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
 
   kill(signal?: number | NodeJS.Signals): boolean {
     this.signals.push(String(signal ?? "SIGTERM"));
     return true;
+  }
+
+  exit(code = 0): void {
+    this.exitCode = code;
+    this.emit("exit", code);
+    this.emit("close", code);
   }
 }
 
@@ -72,13 +80,16 @@ describe("launcher/runtime integration surface", () => {
     });
     expect(calls[1]?.env?.[aoWebhookSecretEnvVar(asRepoFullName("owner/repo"))]).toBe("webhook-secret");
 
-    await launched.cleanup();
+    const cleanupPromise = launched.cleanup();
+    ao.exit(0);
+    bridge.exit(0);
+    await cleanupPromise;
     expect(ao.signals).toEqual(["SIGTERM"]);
     expect(bridge.signals).toEqual(["SIGTERM"]);
     expect(disposed).toBe(false);
   });
 
-  it("restarts AO and bridge with fresh AO runtime/env on reload", async () => {
+  it("waits for the old pair to exit before disposing AO runtime or spawning replacements", async () => {
     const firstRuntime = createRuntime();
     const secondRuntime = createRuntime({
       projectHomeCheckoutPath: "/srv/worktrees/secondary",
@@ -127,7 +138,7 @@ describe("launcher/runtime integration surface", () => {
       bridgeScriptPath: "/srv/zapbot/bin/webhook-bridge.ts",
       bunBinary: "/usr/local/bin/bun",
     });
-    const reloaded = await reloadManagedProcesses(launched, firstAoRuntime, {
+    const reloadedPromise = reloadManagedProcesses(launched, firstAoRuntime, {
       runtime: secondRuntime,
       aoRuntime: secondAoRuntime,
     }, {
@@ -138,6 +149,18 @@ describe("launcher/runtime integration surface", () => {
 
     expect(children[0]?.signals).toEqual(["SIGTERM"]);
     expect(children[1]?.signals).toEqual(["SIGTERM"]);
+    expect(disposedFirst).toBe(false);
+    expect(calls).toHaveLength(2);
+
+    await Promise.resolve();
+    children[0]?.exit(0);
+    await Promise.resolve();
+    expect(disposedFirst).toBe(false);
+    expect(calls).toHaveLength(2);
+
+    children[1]?.exit(0);
+    const reloaded = await reloadedPromise;
+
     expect(disposedFirst).toBe(true);
     expect(calls).toHaveLength(4);
     expect(calls[2]).toMatchObject({
@@ -155,7 +178,12 @@ describe("launcher/runtime integration surface", () => {
     expect(calls[3]?.env?.[aoWebhookSecretEnvVar(asRepoFullName("owner/repo"))]).toBe("updated-secret");
     expect(calls[3]?.env?.[aoWebhookSecretEnvVar(asRepoFullName("owner/extra-repo"))]).toBe("extra-secret");
 
-    await reloaded.cleanup();
+    const reloadedAo = children[2];
+    const reloadedBridge = children[3];
+    const cleanupPromise = reloaded.cleanup();
+    reloadedAo?.exit(0);
+    reloadedBridge?.exit(0);
+    await cleanupPromise;
   });
 
   it("builds a coherent AO runtime env and generated config for multi-repo projects", async () => {

@@ -1,5 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createGitHubStateService } from "../src/github-state.ts";
+import type {
+  GitHubClient,
+  GitHubIssueEventRecord,
+  GitHubIssueRecord,
+} from "../src/github/client.ts";
 import {
   asBotUsername,
   asIssueNumber,
@@ -10,44 +15,59 @@ import { createLogger } from "../src/logger.ts";
 const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
 
-const originalFetch = globalThis.fetch;
-
-function installFetchStub(handler: (url: string, init?: RequestInit) => Promise<Response> | Response) {
-  globalThis.fetch = (async (input: any, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    return handler(url, init);
-  }) as typeof globalThis.fetch;
+interface FakeClientState {
+  issues: ReadonlyArray<GitHubIssueRecord>;
+  issueRecord: GitHubIssueRecord;
+  issueEvents: ReadonlyArray<ReadonlyArray<GitHubIssueEventRecord>>;
 }
 
+let state: FakeClientState;
+
 function makeService() {
-  return createGitHubStateService(
-    { _tag: "GitHubPat", token: "fake-token" },
-    createLogger("github-state-test", "info"),
-  );
+  const client: Pick<GitHubClient, "getIssue" | "listIssuesWithLabel" | "listIssueEvents" | "postComment"> = {
+    getIssue: async () => state.issueRecord,
+    listIssuesWithLabel: async () => state.issues,
+    listIssueEvents: async (_repo, _issueNumber, page) => state.issueEvents[page - 1] ?? [],
+    postComment: async () => ({ id: 99 }),
+  };
+  return createGitHubStateService(client, createLogger("github-state-test", "info"));
 }
 
 beforeEach(() => {
-  globalThis.fetch = originalFetch;
+  state = {
+    issueRecord: {
+      number: 42,
+      state: "open",
+      labels: ["bug", "docs"],
+      assignees: ["zapbot[bot]", "alice"],
+      body: "hi",
+      author: "carol",
+      pullRequest: false,
+    },
+    issues: [],
+    issueEvents: [],
+  };
 });
 
 afterEach(() => {
-  globalThis.fetch = originalFetch;
+  state = {
+    issueRecord: {
+      number: 42,
+      state: "open",
+      labels: [],
+      assignees: [],
+      body: "",
+      author: "",
+      pullRequest: false,
+    },
+    issues: [],
+    issueEvents: [],
+  };
 });
 
 describe("GitHubStateService", () => {
   it("returns a mapped snapshot on getIssue", async () => {
-    installFetchStub(() =>
-      Response.json({
-        number: 42,
-        state: "open",
-        labels: [{ name: "bug" }, "docs"],
-        assignees: [{ login: "zapbot[bot]" }, { login: "alice" }],
-        body: "hi",
-        user: { login: "carol" },
-      }),
-    );
-    const service = makeService();
-    const result = await service.getIssue(repo, issue);
+    const result = await makeService().getIssue(repo, issue);
     expect(result._tag).toBe("Ok");
     if (result._tag === "Ok") {
       expect(result.value.labels).toEqual(["bug", "docs"]);
@@ -56,16 +76,6 @@ describe("GitHubStateService", () => {
   });
 
   it("returns claimed when the bot is assigned", async () => {
-    installFetchStub(() =>
-      Response.json({
-        number: 42,
-        state: "open",
-        labels: [],
-        assignees: [{ login: "zapbot[bot]" }],
-        body: "",
-        user: { login: "carol" },
-      }),
-    );
     const result = await makeService().getAgentClaim(repo, issue, asBotUsername("zapbot[bot]"));
     expect(result).toEqual({
       _tag: "Ok",
@@ -74,20 +84,26 @@ describe("GitHubStateService", () => {
   });
 
   it("filters out pull requests when listing issues", async () => {
-    installFetchStub(() =>
-      Response.json([
-        { number: 1, state: "open", labels: ["bug"], assignees: [], body: "", user: { login: "a" } },
-        {
-          number: 2,
-          state: "open",
-          labels: ["bug"],
-          assignees: [],
-          body: "",
-          user: { login: "b" },
-          pull_request: { url: "..." },
-        },
-      ]),
-    );
+    state.issues = [
+      {
+        number: 1,
+        state: "open",
+        labels: ["bug"],
+        assignees: [],
+        body: "",
+        author: "a",
+        pullRequest: false,
+      },
+      {
+        number: 2,
+        state: "open",
+        labels: ["bug"],
+        assignees: [],
+        body: "",
+        author: "b",
+        pullRequest: true,
+      },
+    ];
     const result = await makeService().listOpenIssuesWithLabel(repo, "bug");
     expect(result._tag).toBe("Ok");
     if (result._tag === "Ok") {
@@ -96,33 +112,33 @@ describe("GitHubStateService", () => {
   });
 
   it("returns the latest linked pull request number", async () => {
-    installFetchStub((url) => {
-      const parsedUrl = new URL(url);
-      if (parsedUrl.pathname.includes("/issues/42/events") && parsedUrl.searchParams.get("page") === "1") {
-        return Response.json([
-          {
-            event: "cross-referenced",
-            created_at: "2026-04-20T10:00:00Z",
-            source: { type: "pull_request", pull_request: { number: 17 } },
-          },
-          ...Array.from({ length: 99 }, (_, index) => ({
-            event: "labeled",
-            created_at: `2026-04-20T10:${String(index % 60).padStart(2, "0")}:00Z`,
-            source: null,
-          })),
-        ]);
-      }
-      if (parsedUrl.pathname.includes("/issues/42/events") && parsedUrl.searchParams.get("page") === "2") {
-        return Response.json([
-          {
-            event: "cross-referenced",
-            created_at: "2026-04-20T11:00:00Z",
-            source: { type: "pull_request", pull_request: { number: 23 } },
-          },
-        ]);
-      }
-      throw new Error(`unexpected url ${url}`);
-    });
+    state.issueEvents = [
+      [
+        {
+          event: "cross-referenced",
+          createdAt: "2026-04-20T10:00:00Z",
+          sourceType: "pull_request",
+          sourcePullRequestNumber: 17,
+          sourceIssueNumber: null,
+        },
+        ...Array.from({ length: 99 }, (_, index) => ({
+          event: "labeled",
+          createdAt: `2026-04-20T10:${String(index % 60).padStart(2, "0")}:00Z`,
+          sourceType: null,
+          sourcePullRequestNumber: null,
+          sourceIssueNumber: null,
+        })),
+      ],
+      [
+        {
+          event: "cross-referenced",
+          createdAt: "2026-04-20T11:00:00Z",
+          sourceType: "pull_request",
+          sourcePullRequestNumber: 23,
+          sourceIssueNumber: null,
+        },
+      ],
+    ];
 
     const result = await makeService().getLinkedPullRequest(repo, issue);
     expect(result).toEqual({

@@ -43,7 +43,7 @@ export function createRuntimeServices(
       })),
     );
     const stateLog = loggerFactory.create("github-state");
-    const githubState = createGitHubStateService(runtime.githubAuth, stateLog);
+    const githubState = createGitHubStateService(client, stateLog);
     return {
       loggerFactory,
       githubClient: client,

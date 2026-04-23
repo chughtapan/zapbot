@@ -17,14 +17,34 @@ export interface GitHubClient {
   addReaction(repo: string, commentId: number, reaction: string): Promise<void>;
   addIssueReaction(repo: string, issueNumber: number, reaction: string): Promise<void>;
   assignIssue(repo: string, issueNumber: number, assignees: string[]): Promise<void>;
-  getIssue(repo: string, issueNumber: number): Promise<{ state: "open" | "closed"; body: string }>;
+  getIssue(repo: string, issueNumber: number): Promise<GitHubIssueRecord>;
   getIssueState(repo: string, issueNumber: number): Promise<"open" | "closed">;
   getIssueBody(repo: string, issueNumber: number): Promise<string>;
+  listIssuesWithLabel(repo: string, label: string): Promise<ReadonlyArray<GitHubIssueRecord>>;
+  listIssueEvents(repo: string, issueNumber: number, page: number, perPage: number): Promise<ReadonlyArray<GitHubIssueEventRecord>>;
   getUserPermission(repo: string, username: string): Promise<string>;
   listWebhooks(repo: string): Promise<Array<{ id: number; config: { url?: string } }>>;
   createWebhook(repo: string, config: WebhookConfig): Promise<number>;
   updateWebhook(repo: string, hookId: number, config: Partial<WebhookConfig>): Promise<void>;
   deactivateWebhook(repo: string, hookId: number): Promise<void>;
+}
+
+export interface GitHubIssueRecord {
+  readonly number: number;
+  readonly state: "open" | "closed";
+  readonly labels: ReadonlyArray<string>;
+  readonly assignees: ReadonlyArray<string>;
+  readonly body: string;
+  readonly author: string;
+  readonly pullRequest: boolean;
+}
+
+export interface GitHubIssueEventRecord {
+  readonly event: string | null;
+  readonly createdAt: string | null;
+  readonly sourceType: string | null;
+  readonly sourcePullRequestNumber: number | null;
+  readonly sourceIssueNumber: number | null;
 }
 
 export interface WebhookConfig {
@@ -203,8 +223,13 @@ function wrapOctokit(octokit: Octokit, log: Logger): GitHubClient {
       const r = splitRepo(repo);
       const { data } = await octokit.rest.issues.get({ ...r, issue_number: issueNumber });
       return {
+        number: data.number,
         state: data.state === "closed" ? "closed" as const : "open" as const,
+        labels: extractLabels(data.labels ?? []),
+        assignees: extractAssignees(data.assignees ?? null),
         body: data.body || "",
+        author: data.user?.login ?? "",
+        pullRequest: Boolean(data.pull_request),
       };
     },
 
@@ -214,6 +239,44 @@ function wrapOctokit(octokit: Octokit, log: Logger): GitHubClient {
 
     async getIssueBody(repo, issueNumber) {
       return (await this.getIssue(repo, issueNumber)).body;
+    },
+
+    async listIssuesWithLabel(repo, label) {
+      const r = splitRepo(repo);
+      const { data } = await octokit.rest.issues.listForRepo({
+        owner: r.owner,
+        repo: r.repo,
+        state: "open",
+        labels: label,
+        per_page: 100,
+      });
+      return data.map((row) => ({
+        number: row.number,
+        state: row.state === "closed" ? "closed" as const : "open" as const,
+        labels: extractLabels(row.labels ?? []),
+        assignees: extractAssignees(row.assignees ?? null),
+        body: row.body ?? "",
+        author: row.user?.login ?? "",
+        pullRequest: Boolean(row.pull_request),
+      }));
+    },
+
+    async listIssueEvents(repo, issueNumber, page, perPage) {
+      const r = splitRepo(repo);
+      const response = await octokit.rest.issues.listEvents({
+        owner: r.owner,
+        repo: r.repo,
+        issue_number: issueNumber,
+        per_page: perPage,
+        page,
+      });
+      return response.data.map((event) => ({
+        event: event.event ?? null,
+        createdAt: event.created_at ?? null,
+        sourceType: readIssueEventSource(event).type,
+        sourcePullRequestNumber: readIssueEventSource(event).pullRequestNumber,
+        sourceIssueNumber: readIssueEventSource(event).issueNumber,
+      }));
     },
 
     async getUserPermission(repo, username) {
@@ -258,6 +321,44 @@ function wrapOctokit(octokit: Octokit, log: Logger): GitHubClient {
       const r = splitRepo(repo);
       await octokit.rest.repos.updateWebhook({ ...r, hook_id: hookId, active: false });
     },
+  };
+}
+
+function extractLabels(labels: Array<string | { name?: string | null }>): string[] {
+  return labels
+    .map((label) => (typeof label === "string" ? label : label.name ?? ""))
+    .filter((label) => label.length > 0);
+}
+
+function extractAssignees(assignees: Array<{ login: string } | null> | null): string[] {
+  return (assignees ?? [])
+    .map((assignee) => assignee?.login ?? "")
+    .filter((assignee) => assignee.length > 0);
+}
+
+function readIssueEventSource(event: unknown): {
+  readonly type: string | null;
+  readonly pullRequestNumber: number | null;
+  readonly issueNumber: number | null;
+} {
+  if (!event || typeof event !== "object") {
+    return {
+      type: null,
+      pullRequestNumber: null,
+      issueNumber: null,
+    };
+  }
+  const source = (event as {
+    readonly source?: {
+      readonly type?: unknown;
+      readonly pull_request?: { readonly number?: unknown } | null;
+      readonly issue?: { readonly number?: unknown } | null;
+    } | null;
+  }).source;
+  return {
+    type: typeof source?.type === "string" ? source.type : null,
+    pullRequestNumber: typeof source?.pull_request?.number === "number" ? source.pull_request.number : null,
+    issueNumber: typeof source?.issue?.number === "number" ? source.issue.number : null,
   };
 }
 

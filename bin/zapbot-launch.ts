@@ -184,6 +184,10 @@ export function launchManagedProcesses(
       cleaned = true;
       ao.kill("SIGTERM");
       bridge.kill("SIGTERM");
+      await Promise.all([
+        waitForChildExit(ao),
+        waitForChildExit(bridge),
+      ]);
     },
   };
 }
@@ -250,6 +254,27 @@ async function loadLaunchState(ref: ProjectRef): Promise<LoadedLaunchState> {
     runtime,
     aoRuntime,
   };
+}
+
+function waitForChildExit(child: ReturnType<typeof spawn>): Promise<void> {
+  const existingExitCode = child.exitCode;
+  const existingSignalCode = child.signalCode;
+  if (existingExitCode !== null || existingSignalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      resolve();
+    };
+    child.once("exit", finish);
+    child.once("close", finish);
+    child.once("error", finish);
+  });
 }
 
 const isMainModule =

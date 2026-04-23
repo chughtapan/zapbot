@@ -248,7 +248,7 @@ function buildRoutes(document: OperatorProjectConfigDocument): ReadonlyMap<RepoF
       {
         projectName: asProjectName(route.projectName),
         repo: asRepoFullName(route.repo),
-        checkoutPath: asRepoCheckoutPath(route.checkoutPath ?? document.checkoutPath),
+        checkoutPath: asRepoCheckoutPath(route.checkoutPath),
         defaultBranch: route.defaultBranch,
         webhookSecret: route.webhookSecret,
       } satisfies RouteConfig,

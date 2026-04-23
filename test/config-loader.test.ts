@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -66,6 +66,35 @@ describe("canonical config service", () => {
     expect(runtime.projectHome.checkoutPath).toBe(secondCheckoutPath);
     expect(runtime.routes.get("owner/primary-repo")?.checkoutPath).toBe(checkoutPath);
     expect(runtime.routes.get("owner/secondary-repo")?.checkoutPath).toBe(secondCheckoutPath);
+  });
+
+  it("fails closed when a canonical route is missing checkoutPath", async () => {
+    const receipt = await Effect.runPromise(initializeProjectConfig({
+      checkoutPath,
+      repo: "owner/primary-repo",
+    }));
+    const config = JSON.parse(readFileSync(receipt.configPath, "utf8")) as {
+      routes: Array<Record<string, unknown>>;
+    };
+    const [firstRoute, ...rest] = config.routes;
+    if (!firstRoute) {
+      throw new Error("expected first route");
+    }
+    const { checkoutPath: _ignored, ...routeWithoutCheckoutPath } = firstRoute;
+    writeFileSync(receipt.configPath, `${JSON.stringify({
+      ...config,
+      routes: [routeWithoutCheckoutPath, ...rest],
+    }, null, 2)}\n`, "utf8");
+
+    const result = await Effect.runPromise(Effect.either(createConfigService().loadProjectRuntime({
+      checkoutPath: asRepoCheckoutPath(checkoutPath),
+    })));
+    expect(result._tag).toBe("Left");
+    if (result._tag === "Left") {
+      expect(result.left).toMatchObject({
+        _tag: "ConfigDecodeFailed",
+      });
+    }
   });
 
   it("fails closed when repo-local legacy config artifacts are present", async () => {
