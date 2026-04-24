@@ -21,6 +21,7 @@ import type { AoSessionName, ProjectName, Result } from "../types.ts";
 import { err, ok } from "../types.ts";
 import type { OrchestratorControlPrompt } from "./control-event.ts";
 import type {
+  RosterId,
   RosterManager,
   RosterManagerDeps,
   RosterMember,
@@ -503,7 +504,7 @@ export interface RosterBudgetCoordinator {
 }
 
 export interface RosterBudgetTickOutcome {
-  readonly rosterId: string;
+  readonly rosterId: RosterId;
   readonly outcomeTag: string;
 }
 
@@ -541,14 +542,14 @@ export function createRosterBudgetCoordinator(
   ): Promise<readonly RosterBudgetTickOutcome[]> {
     const t = asWallClockMs(nowMs ?? nowFn());
     const ids = manager.listActiveRosterIds();
-    const outcomes: RosterBudgetTickOutcome[] = [];
-    for (const rosterId of ids) {
-      const outcome = await manager.stepBudget(rosterId, t);
-      outcomes.push({
-        rosterId: rosterId as unknown as string,
-        outcomeTag: outcome._tag,
-      });
-    }
+    // Rosters are independent; step in parallel so a single slow
+    // retireSession on one roster doesn't block the others.
+    const outcomes = await Promise.all(
+      ids.map(async (rosterId) => {
+        const outcome = await manager.stepBudget(rosterId, t);
+        return { rosterId, outcomeTag: outcome._tag };
+      }),
+    );
     return outcomes;
   }
 

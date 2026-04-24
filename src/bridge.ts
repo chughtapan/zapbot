@@ -228,14 +228,15 @@ async function handleMention(
       }
       const session = forwarded.value.session;
       // SPEC §5(g) wiring: a forwarded control prompt is a peer event
-      // on the orchestrator's session; record it and step all active
-      // budgets. Observer routes only to rosters that track this
-      // session (no-op for project-wide forwards).
+      // on the orchestrator's session; fold it into the coordinator's
+      // idle-clock state via observeInboundPeerMessage. Budget-trip
+      // evaluation runs on the periodic tick set up in `runBridge`
+      // (30s interval); firing tick synchronously per-event would
+      // stack async work under load without changing correctness.
       ctx.rosterBudgetCoordinator.observeInboundPeerMessage({
         session,
         atMs: Date.now(),
       });
-      void ctx.rosterBudgetCoordinator.tickAllBudgets();
       await postDurableStatusComment(
         { repo: c.repo, issue: c.issue },
         `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`,
