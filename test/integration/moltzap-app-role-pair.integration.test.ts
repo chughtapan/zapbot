@@ -116,16 +116,17 @@ describe("moltzap app-sdk integration — role-pair routing", () => {
     httpBase = http;
     wsBase = ws;
 
-    const orch = await registerAgent(httpBase, "orch");
-    const arch = await registerAgent(httpBase, "architect");
-    const impl = await registerAgent(httpBase, "implementer");
-    const rev = await registerAgent(httpBase, "reviewer");
-
     // The @moltzap/client WebSocket path appends `/ws` to the server
-    // URL (see `vendor/moltzap/client/src/ws-client.ts:341`). Pass the
-    // base URL — not a `/api/v1/ws` path — so the client builds
-    // `ws://host:port/ws`.
+    // URL (see `vendor/moltzap/client/src/ws-client.ts:341`); pass the
+    // base URL so the client builds `ws://host:port/ws`.
     const wsUrl = wsBase;
+
+    const [orch, arch, impl, rev] = await Promise.all([
+      registerAgent(httpBase, "orch"),
+      registerAgent(httpBase, "architect"),
+      registerAgent(httpBase, "implementer"),
+      registerAgent(httpBase, "reviewer"),
+    ]);
 
     orchestratorApp = new MoltZapApp({
       serverUrl: wsUrl,
@@ -133,28 +134,24 @@ describe("moltzap app-sdk integration — role-pair routing", () => {
       manifest: buildOrchestratorManifest(identity),
       invitedAgentIds: [arch.agentId, impl.agentId, rev.agentId],
     });
-    architectApp = new MoltZapApp({
-      serverUrl: wsUrl,
-      agentKey: arch.apiKey,
-      manifest: buildWorkerManifest(identity, "architect"),
-    });
-    implementerApp = new MoltZapApp({
-      serverUrl: wsUrl,
-      agentKey: impl.apiKey,
-      manifest: buildWorkerManifest(identity, "implementer"),
-    });
-    reviewerApp = new MoltZapApp({
-      serverUrl: wsUrl,
-      agentKey: rev.apiKey,
-      manifest: buildWorkerManifest(identity, "reviewer"),
-    });
+    const buildWorker = (role: "architect" | "implementer" | "reviewer", creds: AgentCreds) =>
+      new MoltZapApp({
+        serverUrl: wsUrl,
+        agentKey: creds.apiKey,
+        manifest: buildWorkerManifest(identity, role),
+      });
+    architectApp = buildWorker("architect", arch);
+    implementerApp = buildWorker("implementer", impl);
+    reviewerApp = buildWorker("reviewer", rev);
 
-    // Order matters: orchestrator creates the session (via invitedAgentIds
-    // on start). Workers must join AFTER invites are on the server.
+    // Orchestrator starts first because it creates the session (via
+    // invitedAgentIds on start). Workers can parallelize afterwards.
     const orchSession = await Effect.runPromise(orchestratorApp.start());
-    const archSession = await Effect.runPromise(architectApp.start());
-    const implSession = await Effect.runPromise(implementerApp.start());
-    const revSession = await Effect.runPromise(reviewerApp.start());
+    const [archSession, implSession, revSession] = await Promise.all([
+      Effect.runPromise(architectApp.start()),
+      Effect.runPromise(implementerApp.start()),
+      Effect.runPromise(reviewerApp.start()),
+    ]);
 
     orchestratorHandle = wrap("orchestrator", orchestratorApp, orchSession);
     architectHandle = wrap("architect", architectApp, archSession);

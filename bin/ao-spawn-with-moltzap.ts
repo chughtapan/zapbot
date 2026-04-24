@@ -7,7 +7,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { scrubMoltzapForbiddenEnv } from "../src/moltzap/runtime.ts";
-import { decodeSessionRole } from "../src/moltzap/session-role.ts";
+import {
+  decodeSessionRole,
+  type SessionRole,
+} from "../src/moltzap/session-role.ts";
 
 const rawArgs = process.argv.slice(2);
 if (rawArgs.length === 0) {
@@ -97,7 +100,7 @@ function listSessionNames(dataDir: string): string[] {
 
 interface PartitionedArgs {
   readonly spawnArgs: string[];
-  readonly sessionRole: string | null;
+  readonly sessionRole: SessionRole | null;
   readonly displayLabel: string | null;
   readonly projectArg: string | null;
 }
@@ -115,7 +118,7 @@ interface PartitionedArgs {
  */
 function partitionArgs(args: readonly string[]): PartitionedArgs {
   const spawnArgs: string[] = [];
-  let sessionRole: string | null = null;
+  let sessionRole: SessionRole | null = null;
   let displayLabel: string | null = null;
   let projectArg: string | null = null;
 
@@ -157,7 +160,7 @@ interface BuildWorkerEnvOptions {
   readonly apiKey: string;
   readonly orchestratorSenderId: string;
   readonly localSenderId?: string;
-  readonly sessionRole?: string;
+  readonly sessionRole?: SessionRole;
 }
 
 /**
