@@ -9,9 +9,11 @@
 import { describe, it } from "vitest";
 
 describe("bridge-silence: type discriminator", () => {
+  // Rev 2 correction: `tagWorker` / `requireWorker` / worker-tag branch
+  // removed when workers moved to `@moltzap/claude-code-channel`. Only
+  // the bridge-tag branch survives; worker identity is owned by the
+  // channel-plugin, not the app-sdk tag. See rev 4 §2.5.
   it.todo("tagBridge returns a handle with __tag === 'bridge'");
-  it.todo("tagWorker returns a handle with __tag === 'worker'");
-  it.todo("requireWorker on a bridge-tagged handle is a compile-time error");
 });
 
 describe("bridge-silence: integration-level invariant", () => {

@@ -31,3 +31,15 @@ describe("union-manifest: verification", () => {
     "verifyUnionManifest reports extra keys when manifest declares unknown keys",
   );
 });
+
+describe("union-manifest: §8.2 dead-key invariant (rev 4)", () => {
+  // Rev 4 §8.2 resolution: 5 directional keys retained, but
+  // `coord-worker-to-orch` is declared DEAD under reply-on-inbound —
+  // no organic publisher exists in v1. The assertion below gates the
+  // dead-key claim: if the repo ever gains an organic publisher on
+  // this key (e.g. a worker-initiated push), the assertion fails and
+  // §8.2 is re-opened.
+  it.todo(
+    "zero source files under src/ and bin/ publish on 'coord-worker-to-orch' (grep-time check)",
+  );
+});

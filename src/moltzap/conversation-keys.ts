@@ -5,16 +5,25 @@
  * per directional role-pair"; OQ #3 resolution (per-role-pair keys, no
  * receive-side defensive check).
  *
- * This module owns the finite, named set of coordination-channel keys that
- * zapbot declares in every `AppManifest` registered with `@moltzap/app-sdk`.
- * It is the single authoritative place where role-pair directionality is
- * encoded; role-scoped manifests (src/moltzap/manifest.ts) project a subset
- * of this set per `SessionRole`.
+ * This module owns the finite, named set of coordination-channel keys
+ * that the bridge declares in its single union `AppManifest` registered
+ * with `@moltzap/app-sdk`. It is the authoritative place where role-pair
+ * key NAMES live; directionality is a publisher-intent label, not a
+ * server-enforced send filter.
  *
- * Invariant 6 (verbatim): "the conversation key carries the role-pair; the
- * receiver trusts the key, not a role field in the payload body." This module
- * declares the key set; `manifest.ts` binds each key to the roles that may
- * send/receive on it.
+ * Rev 3 §5.5 / §8.6 reconciliation: under `participantFilter: "all"` +
+ * the absence of upstream per-participant send permissions, directional
+ * flow is enforced by (a) the bridge's `apps/create({invitedAgentIds})`
+ * admission control, (b) the channel-plugin's reply-on-inbound
+ * semantic (MCP `reply` tool targets the inbound's `chat_id`), and (c)
+ * publisher-code convention — NOT by a role-scoped manifest or
+ * server-side send-set. The rev 1 prose that claimed "role-scoped
+ * manifest + send-set enforce the sender side" is superseded.
+ *
+ * Dead-key note: `coord-worker-to-orch` is retained in the set for
+ * spec-churn minimization but has no organic publisher in v1 under
+ * reply-on-inbound. See rev 4 §8.2 + the assertion in
+ * `test/moltzap-union-manifest.test.ts`.
  *
  * Implementation stubs. Architect stage — bodies throw.
  */
@@ -34,6 +43,10 @@ import type { SessionRole } from "./session-role.ts";
  */
 export type ConversationKey =
   | "coord-orch-to-worker"
+  // Dead key in v1 — no organic publisher under the channel-plugin's
+  // reply-on-inbound semantic. Retained for manifest stability (see rev
+  // 4 §8.2). Asserted zero organic publishers via the `it.todo` in
+  // `test/moltzap-union-manifest.test.ts`.
   | "coord-worker-to-orch"
   | "coord-architect-peer"
   | "coord-implementer-to-architect"
@@ -50,13 +63,18 @@ export const ALL_CONVERSATION_KEYS: readonly ConversationKey[] = [
 // ── Role-pair directionality ────────────────────────────────────────
 
 /**
- * For each key, the roles that may send on it and the roles that may receive
- * on it. Used to build role-scoped manifests in `manifest.ts` and to gate
- * send-time calls in `app-client.ts`.
+ * For each key, the roles that conventionally publish on it and the
+ * roles that conventionally receive on it. **Client-convention only**:
+ * v1 does not project role-scoped manifests and does not ship a
+ * send-side gate. The table remains useful for documentation,
+ * roster-builder bookkeeping, and any future per-role MCP transport
+ * scoping that lands outside sbd#199's scope.
  *
- * Invariant 6: directionality is declared here, not at the receive site.
- * Receivers trust the key; the send-set + the role-scoped manifest registered
- * with the server enforce the sender side.
+ * Rev 4 §8.6: directionality is not server-enforced. The rev 1 claim
+ * that "the send-set + the role-scoped manifest registered with the
+ * server enforce the sender side" is superseded — there is no
+ * role-scoped manifest in v1 (union manifest only), and there is no
+ * server-side per-participant send filter.
  */
 export interface RolePairBinding {
   readonly key: ConversationKey;

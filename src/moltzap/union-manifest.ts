@@ -26,11 +26,22 @@
  *
  * Trade-off accepted: the union manifest declares ALL 5 conversation
  * keys with `participantFilter: "all"`. Every invited worker is admitted
- * to every key the manifest declares — least-privilege at the key level
- * is provided by the zapbot SEND-side gate (`sendableKeysForRole` in
- * `app-client.ts`), not by the manifest. Consistent with OQ #3
- * resolution from spec rev 2 (per-role-pair keys carry directionality;
- * no client-side receive gate).
+ * to every key the manifest declares. There is NO per-key send-side gate
+ * in v1 — workers use the `@moltzap/claude-code-channel` plugin whose
+ * MCP `reply` tool targets the inbound's `chat_id`, so "which key to
+ * publish on" is not a caller-facing decision. Directional flow is
+ * enforced by (a) the bridge's `apps/create({invitedAgentIds})`
+ * admission control, (b) the channel-plugin's reply-on-inbound
+ * semantic, and (c) publisher-code convention — see rev 4 §5.5 + §8.6
+ * for the trust-boundary acceptance.
+ *
+ * §8.2 (rev 4): 5 directional keys retained; `coord-worker-to-orch` is
+ * a **dead key** in v1 (no organic publisher under reply-on-inbound —
+ * nothing publishes first on that key, so workers never receive an
+ * inbound `chat_id` there to reply against). It is declared in the
+ * manifest for spec-churn minimization and migration-footprint
+ * preservation; revisit if a concrete orchestrator-initiated worker
+ * push appears.
  */
 
 import type { AppManifest } from "@moltzap/app-sdk";
@@ -41,8 +52,10 @@ import type { AppIdentity } from "./manifest.ts";
  * `ALL_CONVERSATION_KEYS` with `participantFilter: "all"`.
  *
  * The bridge passes this manifest to `new MoltZapApp({ manifest })` at
- * boot. Workers do NOT pass a manifest; they connect raw and join
- * sessions the bridge created (see `worker-app.ts`).
+ * boot. Workers do NOT pass a manifest; they connect via
+ * `@moltzap/claude-code-channel`'s `bootClaudeCodeChannel(...)` and are
+ * admitted to bridge-owned conversations by prior
+ * `apps/create({invitedAgentIds})` calls (see `worker-channel.ts`).
  *
  * Principle 4 exhaustiveness: implementation iterates
  * `ALL_CONVERSATION_KEYS` so adding a new `ConversationKey` is a

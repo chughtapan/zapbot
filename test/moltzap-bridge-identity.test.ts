@@ -29,15 +29,10 @@ describe("bridge-identity: registerBridgeAgent", () => {
   it.todo(
     "registerBridgeAgent returns BridgeRegistrationDecodeFailed on malformed response body",
   );
-  it.todo(
-    "registerBridgeAgent persists the minted agentKey to persistencePath when set",
-  );
-  it.todo(
-    "registerBridgeAgent reuses a previously persisted agentKey blob on subsequent boots",
-  );
-  it.todo(
-    "registerBridgeAgent returns BridgeRegistrationPersistFailed if disk write rejects",
-  );
+  // Rev 3 §8.1 path (A): no persistence in v1. Every bridge boot mints a
+  // fresh agentKey. The rev 1 / rev 2-base persistence stubs
+  // (`persistencePath`, reuse-on-subsequent-boot, `BridgeRegistrationPersistFailed`)
+  // are dissolved by construction. See rev 4 §8.1.
 });
 
 describe("bridge-identity: branded type", () => {

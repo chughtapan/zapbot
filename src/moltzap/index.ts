@@ -22,12 +22,17 @@ export * from "./session-role.ts";
 export * from "./role-topology.ts";
 
 // sbd#199 architect cycle (bridge identity per A+C(2) + zapbot#336 path b
-// + literal-string fallback removal). Stubs only; bodies are implemented
-// by the corresponding implement-staff PR. Carried alongside the sbd#186
-// stubs above so consumers can transition from `bootApp(role)` to
-// `bootBridgeApp` / `joinWorkerSession` in a single PR.
+// + literal-string fallback removal + workers-via-channel-plugin). Stubs
+// only; bodies are implemented by the corresponding implement-staff PR.
+// Carried alongside the sbd#186 stubs above so consumers can transition
+// from `bootApp(role)` to `bootBridgeApp` / `bootWorkerChannel` in a
+// single PR.
+//
+// Rev 2 correction (operator directive, 2026-04-24): `worker-app.ts`
+// deleted in favour of `worker-channel.ts` — workers are
+// `@moltzap/claude-code-channel` peers, not `MoltZapApp` instances.
 export * from "./bridge-identity.ts";
 export * from "./bridge-app.ts";
-export * from "./worker-app.ts";
+export * from "./worker-channel.ts";
 export * from "./bridge-silence.ts";
 export * from "./union-manifest.ts";
