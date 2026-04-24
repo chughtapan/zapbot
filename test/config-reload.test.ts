@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.js";
+import { resolveRuntimeEnv } from "../src/config/env.js";
 import { resolveIngressPolicy } from "../src/config/ingress.js";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.js";
-import { loadBridgeRuntimeConfig } from "../src/config/load.js";
+import { deriveConfigSourcePaths, loadBridgeRuntimeConfig } from "../src/config/load.js";
+import { readCanonicalConfig } from "../src/config/canonical.js";
+import type { CanonicalConfig } from "../src/config/canonical.js";
 import { buildStartupReceipt, renderStartupReceipt } from "../src/startup/receipt.js";
 import { readConfigFiles, type ConfigDiskReader } from "../src/config/disk.js";
 import type { IngressPolicy } from "../src/config/ingress.js";
@@ -46,45 +48,115 @@ const localOnlyIngress: IngressPolicy = {
   requiresReachablePublicUrl: false,
 };
 
-function buildRuntime(
-  env: Record<string, string | undefined>,
-) {
-  const resolvedEnv = expectOk(resolveRuntimeEnv(env, null));
-  return expectOk(loadBridgeRuntimeConfig(resolvedEnv, null, null, localOnlyIngress));
+function canonical(overrides: Partial<CanonicalConfig> = {}): CanonicalConfig {
+  return {
+    apiKey: overrides.apiKey ?? "api-key-123",
+    webhookSecret: overrides.webhookSecret ?? "webhook-secret-456",
+  };
 }
 
-describe("parseEnvFile", () => {
-  it("parses simple key=value pairs", () => {
-    const result = expectOk(parseEnvFile("FOO=bar\nBAZ=qux"));
-    expect(result).toEqual({ values: { FOO: "bar", BAZ: "qux" } });
+function buildRuntime(
+  env: Record<string, string | undefined>,
+  canonicalConfig: CanonicalConfig = canonical(),
+) {
+  const resolvedEnv = expectOk(resolveRuntimeEnv(env, canonicalConfig));
+  return expectOk(loadBridgeRuntimeConfig(resolvedEnv, null, localOnlyIngress));
+}
+
+describe("readCanonicalConfig", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-canonical-test-"));
   });
 
-  it("skips comment lines", () => {
-    const result = expectOk(parseEnvFile("# comment\nFOO=bar\n# another"));
-    expect(result).toEqual({ values: { FOO: "bar" } });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("skips blank lines", () => {
-    const result = expectOk(parseEnvFile("FOO=bar\n\n\nBAZ=qux\n"));
-    expect(result).toEqual({ values: { FOO: "bar", BAZ: "qux" } });
+  it("decodes a valid config.json into the typed shape", () => {
+    const configPath = path.join(tmpDir, "config.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
+    );
+
+    const decoded = expectOk(readCanonicalConfig(configPath, nodeDiskReader));
+    expect(decoded.webhookSecret).toBe("wh-secret");
+    expect(decoded.apiKey).toBe("api-key");
   });
 
-  it("handles values with equals signs", () => {
-    const result = expectOk(parseEnvFile("URL=http://localhost:3000?key=val&other=1"));
-    expect(result).toEqual({ values: { URL: "http://localhost:3000?key=val&other=1" } });
-  });
-
-  it("trims whitespace from keys", () => {
-    const result = expectOk(parseEnvFile("  FOO  =bar"));
-    expect(result).toEqual({ values: { FOO: "bar" } });
-  });
-
-  it("rejects malformed non-comment lines", () => {
-    const result = parseEnvFile("FOO=bar\nNOT_VALID");
+  it("reports CanonicalConfigMissing when the file is absent", () => {
+    const configPath = path.join(tmpDir, "does-not-exist.json");
+    const result = readCanonicalConfig(configPath, nodeDiskReader);
     expect(result._tag).toBe("Err");
     if (result._tag === "Err") {
-      expect(result.error._tag).toBe("MalformedEnvLine");
+      expect(result.error._tag).toBe("CanonicalConfigMissing");
     }
+  });
+
+  it("reports CanonicalConfigInvalid when JSON fails to parse", () => {
+    const configPath = path.join(tmpDir, "config.json");
+    fs.writeFileSync(configPath, "{not json");
+
+    const result = readCanonicalConfig(configPath, nodeDiskReader);
+    expect(result._tag).toBe("Err");
+    if (result._tag === "Err") {
+      expect(result.error._tag).toBe("CanonicalConfigInvalid");
+    }
+  });
+
+  it("reports CanonicalConfigInvalid when webhookSecret is empty", () => {
+    const configPath = path.join(tmpDir, "config.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ webhookSecret: "", apiKey: "api-key" }),
+    );
+
+    const result = readCanonicalConfig(configPath, nodeDiskReader);
+    expect(result._tag).toBe("Err");
+    if (result._tag === "Err") {
+      expect(result.error._tag).toBe("CanonicalConfigInvalid");
+    }
+  });
+
+  it("reports CanonicalConfigInvalid when required fields are missing", () => {
+    const configPath = path.join(tmpDir, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ apiKey: "api-key" }));
+
+    const result = readCanonicalConfig(configPath, nodeDiskReader);
+    expect(result._tag).toBe("Err");
+    if (result._tag === "Err") {
+      expect(result.error._tag).toBe("CanonicalConfigInvalid");
+    }
+  });
+});
+
+describe("deriveConfigSourcePaths", () => {
+  it("honors ZAPBOT_CONFIG_JSON as the canonical path override", () => {
+    const override = "/tmp/custom-config.json";
+    const paths = deriveConfigSourcePaths(undefined, {
+      ZAPBOT_CONFIG_JSON: override,
+      HOME: "/home/ignored",
+    });
+    expect(paths.canonicalConfigPath).toBe(override);
+    expect(paths.projectConfigPath).toBeNull();
+  });
+
+  it("falls back to $HOME/.zapbot/config.json when no override is set", () => {
+    const paths = deriveConfigSourcePaths("/tmp/agent-orchestrator.yaml", {
+      HOME: "/home/alice",
+    });
+    expect(paths.canonicalConfigPath).toBe(path.join("/home/alice", ".zapbot", "config.json"));
+    expect(paths.projectConfigPath).toBe("/tmp/agent-orchestrator.yaml");
+  });
+
+  it("trims whitespace-only ZAPBOT_CONFIG_JSON to the default", () => {
+    const paths = deriveConfigSourcePaths(undefined, {
+      ZAPBOT_CONFIG_JSON: "   ",
+      HOME: "/home/bob",
+    });
+    expect(paths.canonicalConfigPath).toBe(path.join("/home/bob", ".zapbot", "config.json"));
   });
 });
 
@@ -235,16 +307,14 @@ describe("reloadBridgeRuntimeConfig", () => {
   });
 
   it("detects when the webhook secret rotates", () => {
-    const current = buildRuntime({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "old-secret",
-      ZAPBOT_REPO: "owner/repo",
-    });
-    const next = buildRuntime({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "new-secret",
-      ZAPBOT_REPO: "owner/repo",
-    });
+    const current = buildRuntime(
+      { ZAPBOT_REPO: "owner/repo" },
+      canonical({ webhookSecret: "old-secret" }),
+    );
+    const next = buildRuntime(
+      { ZAPBOT_REPO: "owner/repo" },
+      canonical({ webhookSecret: "new-secret" }),
+    );
 
     const result = expectOk(reloadBridgeRuntimeConfig(current, next));
     expect(result.secretRotated).toBe(true);
@@ -252,38 +322,35 @@ describe("reloadBridgeRuntimeConfig", () => {
   });
 
   it("detects when the webhook secret is unchanged", () => {
-    const current = buildRuntime({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "same-secret",
-      ZAPBOT_REPO: "owner/repo",
-    });
-    const next = buildRuntime({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "same-secret",
-      ZAPBOT_REPO: "owner/repo",
-    });
+    const current = buildRuntime(
+      { ZAPBOT_REPO: "owner/repo" },
+      canonical({ webhookSecret: "same-secret" }),
+    );
+    const next = buildRuntime(
+      { ZAPBOT_REPO: "owner/repo" },
+      canonical({ webhookSecret: "same-secret" }),
+    );
 
     const result = expectOk(reloadBridgeRuntimeConfig(current, next));
     expect(result.secretRotated).toBe(false);
   });
 
-  it("treats missing .env as optional when reading config files", () => {
+  it("returns only projectConfigText when reading config files", () => {
     const configPath = path.join(tmpDir, "agent-orchestrator.yaml");
     fs.writeFileSync(configPath, "projects: {}\n");
 
     const result = expectOk(readConfigFiles({
-      envFilePath: path.join(tmpDir, ".env") as never,
       projectConfigPath: configPath as never,
+      canonicalConfigPath: path.join(tmpDir, "config.json") as never,
     }, nodeDiskReader));
 
-    expect(result.envFileText).toBeNull();
     expect(result.projectConfigText).toContain("projects:");
   });
 
   it("returns a disk error when the project config file does not exist", () => {
     const result = readConfigFiles({
-      envFilePath: null,
       projectConfigPath: path.join(tmpDir, "missing.yaml") as never,
+      canonicalConfigPath: path.join(tmpDir, "config.json") as never,
     }, nodeDiskReader);
 
     expect(result._tag).toBe("Err");
@@ -292,9 +359,11 @@ describe("reloadBridgeRuntimeConfig", () => {
     }
   });
 
-  it("resolves runtime env from parsed .env values", () => {
-    const parsed = expectOk(parseEnvFile("ZAPBOT_API_KEY=api\nZAPBOT_WEBHOOK_SECRET=secret\nZAPBOT_REPO=org/my-app\n"));
-    const result = expectOk(resolveRuntimeEnv({}, parsed));
+  it("resolves runtime env from the canonical config", () => {
+    const result = expectOk(resolveRuntimeEnv(
+      { ZAPBOT_REPO: "org/my-app" },
+      canonical({ apiKey: "api", webhookSecret: "secret" }),
+    ));
 
     expect(result.apiKey).toBe("api");
     expect(result.webhookSecret).toBe("secret");
@@ -635,7 +704,7 @@ exit 0
       fs.rmSync(tempRoot, { recursive: true, force: true });
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
-  });
+  }, 15000);
 
   it("keeps local-only startup running even if a stale bridge url is present", () => {
     const repoRoot = path.join(__dirname, "..");

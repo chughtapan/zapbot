@@ -5,20 +5,15 @@ import type {
 } from "../types.ts";
 import type { IngressPolicy } from "./ingress.ts";
 
-export type EnvFilePath = string & { readonly __brand: "EnvFilePath" };
 export type ProjectConfigPath = string & { readonly __brand: "ProjectConfigPath" };
+export type CanonicalConfigPath = string & { readonly __brand: "CanonicalConfigPath" };
 
 export interface ConfigSourcePaths {
-  readonly envFilePath: EnvFilePath | null;
   readonly projectConfigPath: ProjectConfigPath | null;
-}
-
-export interface ParsedEnvFile {
-  readonly values: Readonly<Record<string, string>>;
+  readonly canonicalConfigPath: CanonicalConfigPath;
 }
 
 export interface RawConfigFiles {
-  readonly envFileText: string | null;
   readonly projectConfigText: string | null;
 }
 
@@ -70,15 +65,21 @@ export interface ReloadedRuntimeConfig {
   readonly secretRotated: boolean;
 }
 
+export type CanonicalSecretField = "apiKey" | "webhookSecret";
+
 export type ConfigEnvError =
-  | { readonly _tag: "MalformedEnvLine"; readonly line: string }
-  | { readonly _tag: "MissingRequiredEnv"; readonly key: string }
   | { readonly _tag: "InvalidPort"; readonly raw: string }
-  | { readonly _tag: "SecretCollision"; readonly left: string; readonly right: string };
+  | {
+      readonly _tag: "SecretCollision";
+      readonly left: CanonicalSecretField;
+      readonly right: CanonicalSecretField;
+    };
 
 export type ConfigDiskError =
   | { readonly _tag: "ConfigFileUnreadable"; readonly path: string; readonly cause: string }
   | { readonly _tag: "ConfigFileInvalid"; readonly path: string; readonly cause: string }
+  | { readonly _tag: "CanonicalConfigMissing"; readonly path: string }
+  | { readonly _tag: "CanonicalConfigInvalid"; readonly path: string; readonly cause: string }
   | { readonly _tag: "DeprecatedSecretBinding"; readonly projectName: string; readonly secretEnvVar: string };
 
 export type ConfigLoadError = ConfigEnvError | ConfigDiskError;

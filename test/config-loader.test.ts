@@ -8,6 +8,7 @@ import {
   type ConfigDiskReader,
 } from "../src/config/disk.js";
 import { resolveRuntimeEnv } from "../src/config/env.js";
+import type { CanonicalConfig } from "../src/config/canonical.js";
 import {
   deriveConfigSourcePaths,
   loadBridgeRuntimeConfig,
@@ -15,6 +16,13 @@ import {
 import type { IngressPolicy } from "../src/config/ingress.js";
 import type { ConfigDiskError } from "../src/config/types.js";
 import type { Result } from "../src/types.js";
+
+function canonical(overrides: Partial<CanonicalConfig> = {}): CanonicalConfig {
+  return {
+    apiKey: overrides.apiKey ?? "api-key-123",
+    webhookSecret: overrides.webhookSecret ?? "webhook-secret-456",
+  };
+}
 
 function expectOk<T, E>(result: Result<T, E>): T {
   if (result._tag === "Err") {
@@ -80,11 +88,9 @@ projects:
 
     const document = expectOk(parseProjectConfig(configPath, yaml));
     const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
       ZAPBOT_CONFIG: configPath,
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document, localOnlyIngress));
+    }, canonical()));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, document, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(1);
     expect(runtime.routes.has("chughtapan/zapbot")).toBe(true);
@@ -120,11 +126,8 @@ projects:
 `;
 
     const document = expectOk(parseProjectConfig("agent-orchestrator.yaml", yaml));
-    const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, document, localOnlyIngress));
+    const env = expectOk(resolveRuntimeEnv({}, canonical()));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, document, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(2);
     expect(runtime.routes.get("chughtapan/zapbot")!.projectName).toBe("zapbot");
@@ -134,11 +137,9 @@ projects:
 
   it("retains the single-repo fallback when no project config is present", () => {
     const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
       ZAPBOT_REPO: "owner/my-repo",
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null, localOnlyIngress));
+    }, canonical()));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(1);
     expect(runtime.routes.has("owner/my-repo")).toBe(true);
@@ -146,24 +147,18 @@ projects:
   });
 
   it("returns empty routes when neither project config nor ZAPBOT_REPO is provided", () => {
-    const env = expectOk(resolveRuntimeEnv({
-      ZAPBOT_API_KEY: "api-key-123",
-      ZAPBOT_WEBHOOK_SECRET: "webhook-secret-456",
-    }, null));
-    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, null, localOnlyIngress));
+    const env = expectOk(resolveRuntimeEnv({}, canonical()));
+    const runtime = expectOk(loadBridgeRuntimeConfig(env, null, localOnlyIngress));
 
     expect(runtime.routes.size).toBe(0);
   });
 
-  it("derives .env next to the config path", () => {
-    const paths = deriveConfigSourcePaths("/tmp/project/agent-orchestrator.yaml");
-    expect(paths.projectConfigPath).toBe("/tmp/project/agent-orchestrator.yaml");
-    expect(paths.envFilePath).toBe("/tmp/project/.env");
-  });
-
   it("returns a disk error when the project config path is unreadable", () => {
     const result = readConfigFiles(
-      deriveConfigSourcePaths("/nonexistent/path/agent-orchestrator.yaml"),
+      deriveConfigSourcePaths(
+        "/nonexistent/path/agent-orchestrator.yaml",
+        { HOME: "/tmp" },
+      ),
       nodeDiskReader,
     );
 
