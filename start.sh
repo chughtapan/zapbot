@@ -27,6 +27,17 @@ if [ ! -f "$PROJECT_DIR/agent-orchestrator.yaml" ]; then
   exit 1
 fi
 
+# Source project .env for non-secret operator env vars (gateway URLs, MoltZap
+# settings, etc.). Shared secrets come from ~/.zapbot/config.json below; the
+# bridge no longer parses .env on its own (zap#323), so start.sh must load it
+# here to match the systemd path's `EnvironmentFile=-PROJECT_DIR/.env`.
+if [ -f "$PROJECT_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090,SC1091
+  . "$PROJECT_DIR/.env"
+  set +a
+fi
+
 # Load secrets from ~/.zapbot/config.json
 if [ ! -f "$HOME/.zapbot/config.json" ]; then
   echo "ERROR: $HOME/.zapbot/config.json not found."
