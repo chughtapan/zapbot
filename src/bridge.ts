@@ -801,6 +801,20 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID ??
     process.env.MOLTZAP_LOCAL_SENDER_ID ??
     "zapbot-orchestrator";
+  if (
+    !process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID &&
+    !process.env.MOLTZAP_LOCAL_SENDER_ID
+  ) {
+    // Stamina round 3 finding: registration-backed MoltZap deployments
+    // assign senderIds at runtime; neither env var will be set and
+    // the derived "zapbot-orchestrator" fallback won't match the real
+    // registered id. Log loudly so operators see the mismatch before
+    // rosters are exercised and silently drop traffic.
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[bridge] MOLTZAP_ORCHESTRATOR_SENDER_ID / MOLTZAP_LOCAL_SENDER_ID are unset; RosterManager is seeding the orchestrator-side allowlist with the literal fallback 'zapbot-orchestrator'. Registration-backed deployments will see orchestrator→worker traffic dropped until these env vars are set to the real registered sender id. Follow-up: register-and-emit path needed for the bridge to read the real id at boot (cross-process gap documented in sbd#149 PR body).",
+    );
+  }
   const rosterManagerDeps = createAoCliRosterManagerDeps(
     {
       configPath: current.aoConfigPath,

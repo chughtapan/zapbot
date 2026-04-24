@@ -662,9 +662,26 @@ export function createAoCliRosterManagerDeps(
         });
       }
       const sessionName = match[1] as AoSessionName;
-      const senderId = asMoltzapSenderId(
-        `${rosterId as string}-${member.displayLabel}`,
+      // Parse the worker's REAL runtime-assigned MOLTZAP_LOCAL_SENDER_ID
+      // from the wrapper's stdout (bin/ao-spawn-with-moltzap.ts emits
+      // a `MOLTZAP_LOCAL_SENDER_ID=<id>` line after reading the worker
+      // metadata). Fall back to a derived id only if the wrapper did
+      // not emit the line — in which case allowlist matches will fail
+      // downstream and a diagnostic is logged.
+      const senderMatch = stdout.match(
+        /MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/,
       );
+      const senderId = senderMatch && senderMatch[1]
+        ? asMoltzapSenderId(senderMatch[1])
+        : asMoltzapSenderId(
+            `${rosterId as string}-${member.displayLabel}`,
+          );
+      if (!senderMatch || !senderMatch[1]) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${senderId as string}). Peer allowlist matches may fail until bin/ao-spawn-with-moltzap.ts emits it.`,
+        );
+      }
       const rosterMember: RosterMember = {
         rosterId,
         session: sessionName,
