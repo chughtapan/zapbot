@@ -10,6 +10,24 @@ import { err, ok } from "../types.ts";
 import type { MoltzapSdkHandle, MoltzapSenderId } from "./types.ts";
 import { asMoltzapSenderId } from "./types.ts";
 
+/**
+ * Binary boot-endpoint role (orchestrator vs. worker). This is the
+ * COEXISTING, older role discriminant used at plugin-boot time by
+ * `loadSessionClientEnv` / `connectSessionClient`. It is distinct from
+ * the four-value `SessionRole` in `./session-role.ts` that governs
+ * per-peer-channel addressing (SPEC r4.1 §5(a), architect plan #148 §2.1).
+ *
+ * Intentional coexistence: the new 4-value enum is additive; existing
+ * `moltzap-*.test.ts` assert `role: "worker"` and stamina review
+ * required those tests pass unchanged. Future collapse path: when
+ * every boot caller has migrated to declaring a WorkerRole
+ * ("architect" | "implementer" | "reviewer") at the boot seam, this
+ * binary form can delete its "worker" arm and re-export from
+ * `./session-role.ts` directly.
+ *
+ * DO NOT USE this type for peer-channel addressing; import
+ * `SessionRole` from `./session-role.ts` for that.
+ */
 export type SessionRole = "orchestrator" | "worker";
 
 export interface SessionClientEnv {

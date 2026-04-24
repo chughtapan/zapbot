@@ -57,6 +57,21 @@ await ensureWorkerChannelsReady({
   serverUrl,
 });
 
+// Emit the worker's real runtime-assigned MOLTZAP_LOCAL_SENDER_ID to
+// stdout so the bridge-side RosterManager can record the actual sender
+// id (not a fabricated one). Format is a stable key=value line that
+// `src/orchestrator/runtime.ts` parses (stamina round 3 P1 fix).
+try {
+  const finalMetadata = readMetadata(spawnedSession);
+  const finalSenderId = finalMetadata.get("moltzap_sender_id");
+  if (finalSenderId !== undefined) {
+    process.stdout.write(`MOLTZAP_LOCAL_SENDER_ID=${finalSenderId}\n`);
+  }
+} catch {
+  // Metadata read is best-effort here; the bridge falls back to a
+  // derived sender id and logs a diagnostic if this line is missing.
+}
+
 function listSessionNames(dataDir: string): string[] {
   if (!existsSync(dataDir)) return [];
   return readdirSync(dataDir).filter((name) => !name.startsWith("."));

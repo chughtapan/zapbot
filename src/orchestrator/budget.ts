@@ -20,14 +20,17 @@
  *   - `IdleTimeoutTripped`  → caller retires ONLY the stalled member.
  *   - `RosterTokenBudgetTripped` → caller retires the entire roster.
  *
- * This module is pure: data in, `BudgetVerdict` out. It performs no I/O,
- * schedules no timers, and writes no receipts. The roster manager owns
- * `retireMember` / `retireRoster`; this module owns only the verdict.
+ * OQ3 resolution: `checkBudget` returns the FIRST trip encountered;
+ * `retireScopeFor` narrows to member-vs-roster. Two-gate independence
+ * holds at the evaluation level (both gates are considered on every
+ * `checkBudget` call), not at the return-shape level.
  *
- * Architect phase only: public surface, no implementation.
+ * This module is pure: data in, `BudgetVerdict` out. It performs no I/O,
+ * schedules no timers, and writes no receipts.
  */
 
 import type { AoSessionName, Result } from "../types.ts";
+import { absurd, err, ok } from "../types.ts";
 
 // ── Branded scalars ─────────────────────────────────────────────────
 
@@ -105,74 +108,198 @@ export type BudgetVerdict =
       readonly ceilingTokens: TokenCount;
     };
 
-// ── State (opaque) ──────────────────────────────────────────────────
+// ── State ───────────────────────────────────────────────────────────
+
+interface BudgetStateInternal {
+  readonly __brand: "BudgetState";
+  readonly config: BudgetConfig;
+  readonly lastPeerAtMs: ReadonlyMap<AoSessionName, WallClockMs>;
+  readonly tokensConsumed: ReadonlyMap<AoSessionName, TokenCount>;
+  readonly retired: ReadonlySet<AoSessionName>;
+  readonly rosterTokensConsumed: TokenCount;
+}
 
 /**
- * Opaque roster-wide budget state. Holds:
- *   - per-session last-peer-event wall-clock,
- *   - per-session token consumption,
- *   - roster-wide token sum,
- *   - per-session retired flag.
- *
- * Callers never inspect internals. Only `initialBudgetState` /
- * `applyBudgetEvent` / `checkBudget` touch it.
+ * Opaque roster-wide budget state. Callers never inspect internals.
  */
 export interface BudgetState {
   readonly __brand: "BudgetState";
 }
 
-// ── Public surface ──────────────────────────────────────────────────
+function asInternal(state: BudgetState): BudgetStateInternal {
+  return state as BudgetStateInternal;
+}
 
-/**
- * Decode `BudgetConfig` from an env-like record. Principle 2.
- * `declaredMemberCount` comes from the roster spec, not env.
- */
+// ── Decoders ────────────────────────────────────────────────────────
+
+const MAX_SAFE_NON_NEGATIVE = Number.MAX_SAFE_INTEGER;
+
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (!/^[0-9]+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n <= 0 || n > MAX_SAFE_NON_NEGATIVE) return null;
+  return n;
+}
+
 export function decodeBudgetConfigFromEnv(
   env: Record<string, string | undefined>,
   declaredMemberCount: number,
 ): Result<BudgetConfig, BudgetConfigDecodeError> {
-  throw new Error("not implemented");
+  if (
+    !Number.isInteger(declaredMemberCount) ||
+    declaredMemberCount <= 0 ||
+    declaredMemberCount > MAX_SAFE_NON_NEGATIVE
+  ) {
+    return err({ _tag: "InvalidMemberCount", raw: declaredMemberCount });
+  }
+
+  const rawIdle = env.MOLTZAP_SESSION_IDLE_SECONDS;
+  let idle: IdleSeconds;
+  if (rawIdle === undefined || rawIdle.trim().length === 0) {
+    idle = DEFAULT_BUDGET_CONFIG.sessionIdleSeconds;
+  } else {
+    const parsed = parsePositiveInt(rawIdle);
+    if (parsed === null) {
+      return err({ _tag: "InvalidIdleSeconds", raw: rawIdle });
+    }
+    idle = parsed as IdleSeconds;
+  }
+
+  const rawTokens = env.MOLTZAP_ROSTER_BUDGET_TOKENS;
+  let tokens: TokenCount;
+  if (rawTokens === undefined || rawTokens.trim().length === 0) {
+    tokens = DEFAULT_BUDGET_CONFIG.rosterBudgetTokens;
+  } else {
+    const parsed = parsePositiveInt(rawTokens);
+    if (parsed === null) {
+      return err({ _tag: "InvalidRosterTokens", raw: rawTokens });
+    }
+    tokens = parsed as TokenCount;
+  }
+
+  return ok({
+    sessionIdleSeconds: idle,
+    rosterBudgetTokens: tokens,
+    declaredMemberCount,
+  });
 }
 
-/**
- * Construct a fresh `BudgetState` at roster-spawn time. `nowMs` seeds the
- * last-peer-event clock for every session to `nowMs`, so a session that
- * never sends a peer event trips idle-timeout `sessionIdleSeconds` after
- * spawn (Acceptance (g) bullet 1).
- */
+// ── State transitions ──────────────────────────────────────────────
+
 export function initialBudgetState(
   config: BudgetConfig,
   members: readonly AoSessionName[],
   nowMs: WallClockMs,
 ): BudgetState {
-  throw new Error("not implemented");
+  const lastPeerAtMs = new Map<AoSessionName, WallClockMs>();
+  const tokensConsumed = new Map<AoSessionName, TokenCount>();
+  for (const m of members) {
+    lastPeerAtMs.set(m, nowMs);
+    tokensConsumed.set(m, 0 as TokenCount);
+  }
+  const internal: BudgetStateInternal = {
+    __brand: "BudgetState",
+    config,
+    lastPeerAtMs,
+    tokensConsumed,
+    retired: new Set<AoSessionName>(),
+    rosterTokensConsumed: 0 as TokenCount,
+  };
+  return internal as BudgetState;
 }
 
-/**
- * Fold a `BudgetEvent` into the state. Pure; returns a new state reference.
- * Unknown sessions are a no-op (retired-and-forgotten guard).
- */
 export function applyBudgetEvent(state: BudgetState, event: BudgetEvent): BudgetState {
-  throw new Error("not implemented");
+  const s = asInternal(state);
+  switch (event._tag) {
+    case "PeerMessageObserved": {
+      if (!s.lastPeerAtMs.has(event.session)) return state;
+      if (s.retired.has(event.session)) return state;
+      const next = new Map(s.lastPeerAtMs);
+      next.set(event.session, event.atMs);
+      return {
+        ...s,
+        lastPeerAtMs: next,
+      } as BudgetState;
+    }
+    case "TokensConsumed": {
+      if (!s.tokensConsumed.has(event.session)) return state;
+      if (s.retired.has(event.session)) return state;
+      const prior = (s.tokensConsumed.get(event.session) ?? 0) as number;
+      const next = new Map(s.tokensConsumed);
+      next.set(event.session, (prior + (event.tokens as number)) as TokenCount);
+      const rosterNext = ((s.rosterTokensConsumed as number) +
+        (event.tokens as number)) as TokenCount;
+      return {
+        ...s,
+        tokensConsumed: next,
+        rosterTokensConsumed: rosterNext,
+      } as BudgetState;
+    }
+    case "MemberRetired": {
+      if (!s.lastPeerAtMs.has(event.session)) return state;
+      if (s.retired.has(event.session)) return state;
+      const retired = new Set(s.retired);
+      retired.add(event.session);
+      return { ...s, retired } as BudgetState;
+    }
+    default:
+      return absurd(event);
+  }
 }
 
-/**
- * Evaluate both gates against the given wall-clock. Returns the FIRST trip
- * encountered (implementation chooses ordering). If neither trips,
- * `WithinBudget`. Invariant 6: both gates are checked; neither subsumes the
- * other.
- */
 export function checkBudget(state: BudgetState, nowMs: WallClockMs): BudgetVerdict {
-  throw new Error("not implemented");
+  const s = asInternal(state);
+
+  // Roster-token gate first? No — OQ3 resolution: first-trip ordering.
+  // We evaluate both gates in a deterministic order: roster-token, then
+  // per-session idle. The order is documented but not semantic — two-gate
+  // independence means either trip is sufficient (Invariant 6).
+
+  if ((s.rosterTokensConsumed as number) >= (s.config.rosterBudgetTokens as number)) {
+    return {
+      _tag: "RosterTokenBudgetTripped",
+      consumedTokens: s.rosterTokensConsumed,
+      ceilingTokens: s.config.rosterBudgetTokens,
+    };
+  }
+
+  const idleCeilingMs = (s.config.sessionIdleSeconds as number) * 1000;
+  let worstSession: AoSessionName | null = null;
+  let worstIdleMs = -1;
+  for (const [session, lastAt] of s.lastPeerAtMs) {
+    if (s.retired.has(session)) continue;
+    const idleMs = (nowMs as number) - (lastAt as number);
+    if (idleMs >= idleCeilingMs && idleMs > worstIdleMs) {
+      worstSession = session;
+      worstIdleMs = idleMs;
+    }
+  }
+  if (worstSession !== null) {
+    return {
+      _tag: "IdleTimeoutTripped",
+      session: worstSession,
+      idleForMs: worstIdleMs,
+    };
+  }
+
+  return { _tag: "WithinBudget" };
 }
 
-/**
- * Narrow a verdict to the per-session action the roster manager must take.
- * Principle 4: exhaustive over the `BudgetVerdict` union.
- */
 export function retireScopeFor(verdict: BudgetVerdict): {
   readonly _tag: "None" | "RetireMember" | "RetireRoster";
   readonly session: AoSessionName | null;
 } {
-  throw new Error("not implemented");
+  switch (verdict._tag) {
+    case "WithinBudget":
+      return { _tag: "None", session: null };
+    case "IdleTimeoutTripped":
+      return { _tag: "RetireMember", session: verdict.session };
+    case "RosterTokenBudgetTripped":
+      return { _tag: "RetireRoster", session: null };
+    default:
+      return absurd(verdict);
+  }
 }
