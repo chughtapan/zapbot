@@ -6,88 +6,46 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
-import { scrubMoltzapForbiddenEnv } from "../src/moltzap/runtime.ts";
-import {
-  decodeSessionRole,
-  type SessionRole,
-} from "../src/moltzap/session-role.ts";
 
-const rawArgs = process.argv.slice(2);
-if (rawArgs.length === 0) {
+const spawnArgs = process.argv.slice(2);
+if (spawnArgs.length === 0) {
   fatal("usage: bun run bin/ao-spawn-with-moltzap.ts <issue-number> | --prompt <text>");
 }
-
-// Parse zapbot-level flags that the orchestrator injects (see
-// `src/orchestrator/runtime.ts:647-658`). These flags are NOT consumed by
-// `ao spawn` itself (run `ao spawn --help` to verify). Leaving them in the
-// argv passed to `ao` meant `ao` silently ignored them AND the worker
-// subprocess inherited `AO_CALLER_TYPE=orchestrator` from the bridge, so
-// every worker's `resolveRole()` returned "orchestrator" — the
-// showstopper flagged in reviewer-328's Blocker #1.
-//
-// Extract `--role <role>` into `ZAPBOT_SESSION_ROLE` on the child env.
-// `--label <label>` and `--project <project>` are currently informational
-// only and are stripped so they do not pollute `ao spawn`'s positional
-// args.
-const { spawnArgs, sessionRole, displayLabel, projectArg } = partitionArgs(rawArgs);
-
-// `--role` is now required. The spawn wrapper is the single
-// construction point for `ZAPBOT_SESSION_ROLE`, and
-// `bin/moltzap-claude-channel.ts :: resolveRole()` fatals without it
-// (the legacy `AO_CALLER_TYPE=worker` fallback was removed — B4).
-// Failing here means the wrapper refuses to launch the `ao spawn`
-// subprocess at all, rather than letting AO succeed and having the
-// worker die at MoltZap channel boot.
-if (sessionRole === null) {
-  fatal(
-    "--role <orchestrator|architect|implementer|reviewer> is required; orchestrator spawns must thread member.role through the wrapper",
-  );
-}
-// Bind the narrowed value to a fresh const — TypeScript doesn't
-// propagate the `SessionRole | null` → `SessionRole` narrowing through
-// closure captures (`restartWorkerWithResume`), and `ZAPBOT_SESSION_ROLE`
-// must be a real role on both the initial-spawn and resume paths.
-const declaredRole: SessionRole = sessionRole;
 
 const moltzapEnvFile = readZapbotEnvFile();
 const MOLTZAP_ENV_FALLBACKS = {
   MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
   MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
+  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
+  MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
 } as const;
 
 const sessionDataDir = requireEnv("AO_DATA_DIR");
 const currentSession = requireEnv("AO_SESSION");
-// Prefer the explicit `--project` flag over ambient `AO_PROJECT_ID`
-// so multi-project bridges cannot leak the orchestrator's own project
-// into a spawned worker's env and corrupt later AO status/kill routing.
-const projectId = projectArg ?? trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
+const projectId = trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
 const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
 const orchestratorSenderId = resolveMetadataValue(
   currentSession,
   "moltzap_sender_id",
 ) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
 const serverUrl = requireEnv("MOLTZAP_SERVER_URL");
-// Spec rev 2 Invariant 4: `MOLTZAP_REGISTRATION_SECRET` must NEVER reach
-// a worker. The wrapper requires a pre-minted `MOLTZAP_API_KEY` in its own
-// env (minted by the bridge via `buildMoltzapSpawnEnv` in
-// `src/moltzap/runtime.ts`). If a caller still sets the secret in parent
-// env (legacy bridge configs), `buildWorkerEnv` explicitly scrubs it from
-// the child env so every worker path is safe regardless of caller hygiene.
-const apiKey = requireEnv("MOLTZAP_API_KEY");
-const localSenderIdFromEnv = trimEnv(process.env.MOLTZAP_LOCAL_SENDER_ID);
+const registrationSecret = requireEnv("MOLTZAP_REGISTRATION_SECRET");
 const beforeSessions = new Set(listSessionNames(sessionDataDir));
 
-void displayLabel; // currently informational only; stripped from `ao spawn` argv
+const childEnv: Record<string, string> = {
+  ...process.env,
+  AO_CONFIG_PATH: configPath,
+  AO_PROJECT_ID: projectId,
+  MOLTZAP_SERVER_URL: serverUrl,
+  MOLTZAP_REGISTRATION_SECRET: registrationSecret,
+  MOLTZAP_ORCHESTRATOR_SENDER_ID: orchestratorSenderId,
+};
+delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
-const childEnv = buildWorkerEnv({
-  aoConfigPath: configPath,
-  aoProjectId: projectId,
-  serverUrl,
-  apiKey,
-  orchestratorSenderId,
-  localSenderId: localSenderIdFromEnv ?? undefined,
-  sessionRole: declaredRole,
-});
+const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS");
+if (allowedSenders !== null) {
+  childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
+}
 
 const spawnedSession = await runAoSpawn(spawnArgs, childEnv);
 await ensureWorkerChannelsReady({
@@ -117,117 +75,6 @@ try {
 function listSessionNames(dataDir: string): string[] {
   if (!existsSync(dataDir)) return [];
   return readdirSync(dataDir).filter((name) => !name.startsWith("."));
-}
-
-interface PartitionedArgs {
-  readonly spawnArgs: string[];
-  readonly sessionRole: SessionRole | null;
-  readonly displayLabel: string | null;
-  readonly projectArg: string | null;
-}
-
-/**
- * Strip zapbot-level flags (`--role`, `--label`, `--project`) from the
- * argv and return them alongside the remaining args that get forwarded to
- * `ao spawn`. Blocker #1 fix (reviewer-328): the role flag was previously
- * forwarded blindly to `ao spawn` (which ignored it), so
- * `ZAPBOT_SESSION_ROLE` never reached the worker and every spawned worker
- * inherited `AO_CALLER_TYPE=orchestrator` from the bridge.
- *
- * The `--role` value is validated against the `SessionRole` decoder so a
- * typo fails fast in the wrapper instead of misrouting at the worker.
- */
-function partitionArgs(args: readonly string[]): PartitionedArgs {
-  const spawnArgs: string[] = [];
-  let sessionRole: SessionRole | null = null;
-  let displayLabel: string | null = null;
-  let projectArg: string | null = null;
-
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--role" || arg === "--label" || arg === "--project") {
-      const value = args[index + 1];
-      if (typeof value !== "string" || value.length === 0) {
-        fatal(`${arg} requires a value`);
-      }
-      index += 1;
-      if (arg === "--role") {
-        const decoded = decodeSessionRole(value);
-        if (decoded._tag === "Err") {
-          fatal(
-            `--role must be one of orchestrator|architect|implementer|reviewer (got "${value}")`,
-          );
-        }
-        sessionRole = decoded.value;
-      } else if (arg === "--label") {
-        displayLabel = value;
-      } else {
-        projectArg = value;
-      }
-      continue;
-    }
-    spawnArgs.push(arg);
-  }
-
-  return { spawnArgs, sessionRole, displayLabel, projectArg };
-}
-
-interface BuildWorkerEnvOptions {
-  readonly aoSessionOverride?: string;
-  readonly aoDataDir?: string;
-  readonly aoConfigPath: string;
-  readonly aoProjectId: string;
-  readonly serverUrl: string;
-  readonly apiKey: string;
-  readonly orchestratorSenderId: string;
-  readonly localSenderId?: string;
-  readonly sessionRole?: SessionRole;
-}
-
-/**
- * Single construction point for the env every worker child process (both
- * the initial `ao spawn` and the `tmux new-session` resume restart)
- * receives. Spreads `process.env`, overwrites zapbot/MoltZap-owned keys,
- * runs `scrubMoltzapForbiddenEnv` to drop anything from
- * `MOLTZAP_WORKER_FORBIDDEN_ENV` (Invariant 4), and drops
- * `AO_CALLER_TYPE` so workers do NOT inherit the bridge's
- * `AO_CALLER_TYPE=orchestrator` (Blocker #1 fix — see `partitionArgs`).
- *
- * When `sessionRole` is provided it is written as `ZAPBOT_SESSION_ROLE`
- * on the child env so `bin/moltzap-claude-channel.ts :: resolveRole`
- * picks the correct 4-value role instead of falling back to the legacy
- * binary `AO_CALLER_TYPE` path (now deleted — Blocker #4 fix).
- */
-function buildWorkerEnv(
-  options: BuildWorkerEnvOptions,
-): Record<string, string> {
-  const env: Record<string, string> = {
-    ...process.env,
-    AO_CONFIG_PATH: options.aoConfigPath,
-    AO_PROJECT_ID: options.aoProjectId,
-    MOLTZAP_SERVER_URL: options.serverUrl,
-    MOLTZAP_API_KEY: options.apiKey,
-    MOLTZAP_ORCHESTRATOR_SENDER_ID: options.orchestratorSenderId,
-  };
-  if (options.aoSessionOverride !== undefined) {
-    env.AO_SESSION = options.aoSessionOverride;
-  }
-  if (options.aoDataDir !== undefined) {
-    env.AO_DATA_DIR = options.aoDataDir;
-  }
-  if (options.localSenderId !== undefined) {
-    env.MOLTZAP_LOCAL_SENDER_ID = options.localSenderId;
-  }
-  if (options.sessionRole !== undefined) {
-    env.ZAPBOT_SESSION_ROLE = options.sessionRole;
-  }
-  // Workers do NOT inherit `AO_CALLER_TYPE` from the bridge. The bridge
-  // sets it to `"orchestrator"`, which — left in place — would make
-  // every worker's `resolveRole()` short-circuit to "orchestrator"
-  // (reviewer-328 Blocker #1).
-  delete env.AO_CALLER_TYPE;
-  scrubMoltzapForbiddenEnv(env);
-  return env;
 }
 
 async function runAoSpawn(
@@ -389,23 +236,19 @@ async function restartWorkerWithResume(options: {
     "server:moltzap",
   ].join(" ");
 
-  // Blocker #2 (reviewer-328): the resume path previously only scrubbed
-  // `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` while the initial-spawn
-  // path correctly scrubbed the registration secret. Any restart leaked
-  // the secret that the initial spawn had just suppressed. Both paths
-  // now go through the same `buildWorkerEnv` so the Invariant 4 scrub
-  // cannot drift.
-  const env = buildWorkerEnv({
-    aoSessionOverride: options.sessionName,
-    aoDataDir: options.sessionDataDir,
-    aoConfigPath: options.configPath,
-    aoProjectId: options.projectId,
-    serverUrl: options.serverUrl,
-    apiKey: options.apiKey,
-    orchestratorSenderId: options.orchestratorSenderId,
-    localSenderId: options.localSenderId,
-    sessionRole: declaredRole,
-  });
+  const env: Record<string, string> = {
+    ...process.env,
+    AO_SESSION: options.sessionName,
+    AO_DATA_DIR: options.sessionDataDir,
+    AO_PROJECT_ID: options.projectId,
+    AO_CONFIG_PATH: options.configPath,
+    AO_CALLER_TYPE: "agent",
+    MOLTZAP_SERVER_URL: options.serverUrl,
+    MOLTZAP_API_KEY: options.apiKey,
+    MOLTZAP_LOCAL_SENDER_ID: options.localSenderId,
+    MOLTZAP_ORCHESTRATOR_SENDER_ID: options.orchestratorSenderId,
+  };
+  delete env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
   const command = [
     "python3",

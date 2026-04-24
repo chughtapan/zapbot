@@ -1,5 +1,5 @@
 /**
- * moltzap/runtime — zapbot-side MoltZap config + session provisioning.
+ * v2/moltzap/runtime — zapbot-side MoltZap config + session provisioning.
  *
  * This module owns two boundaries only:
  *   1. Decode zapbot env/config into a typed MoltZap runtime config.
@@ -116,41 +116,8 @@ export async function buildMoltzapSpawnEnv(
   }
 }
 
-/**
- * Materialize the MoltZap-related parent-process env that `ao start` / `ao spawn`
- * should inherit before the session-local Claude channel server provisions its
- * own runtime identity.
- */
-export function buildMoltzapProcessEnv(
-  config: MoltzapRuntimeConfig,
-): Record<string, string> {
-  switch (config._tag) {
-    case "MoltzapDisabled":
-      return {};
-    case "MoltzapStatic":
-      return {
-        MOLTZAP_SERVER_URL: config.serverUrl,
-        MOLTZAP_API_KEY: config.apiKey,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
-      };
-    case "MoltzapRegistration":
-      return {
-        MOLTZAP_SERVER_URL: config.serverUrl,
-        MOLTZAP_REGISTRATION_SECRET: config.registrationSecret,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
-      };
-    default:
-      return absurd(config);
-  }
-}
-
 interface RegistrationResponse {
   readonly apiKey: string;
-  readonly agentId: string;
 }
 
 async function registerSessionAgent(
@@ -201,43 +168,30 @@ async function registerSessionAgent(
   if (apiKey === null) {
     return err({
       _tag: "MoltzapProvisionFailed",
-      cause: "registration response missing string apiKey or agentId.",
+      cause: "registration response missing string apiKey.",
     });
   }
 
-  return ok(toSpawnEnv(config.serverUrl, apiKey.apiKey, config.allowlistCsv, apiKey.agentId));
+  return ok(toSpawnEnv(config.serverUrl, apiKey, config.allowlistCsv));
 }
 
-function decodeRegistrationResponse(
-  payload: unknown,
-): { readonly apiKey: string; readonly agentId: string } | null {
+function decodeRegistrationResponse(payload: unknown): string | null {
   if (payload === null || typeof payload !== "object") {
     return null;
   }
-  const apiKey = (payload as RegistrationResponse).apiKey;
-  const agentId = (payload as RegistrationResponse).agentId;
-  if (typeof apiKey !== "string" || apiKey.length === 0) {
-    return null;
-  }
-  if (typeof agentId !== "string" || agentId.length === 0) {
-    return null;
-  }
-  return { apiKey, agentId };
+  const candidate = (payload as RegistrationResponse).apiKey;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
 }
 
 function toSpawnEnv(
   serverUrl: string,
   apiKey: string,
   allowlistCsv: string | null,
-  localSenderId?: string,
 ): Record<string, string> {
   const env: Record<string, string> = {
     MOLTZAP_SERVER_URL: serverUrl,
     MOLTZAP_API_KEY: apiKey,
   };
-  if (typeof localSenderId === "string" && localSenderId.length > 0) {
-    env.MOLTZAP_LOCAL_SENDER_ID = localSenderId;
-  }
   if (allowlistCsv !== null) {
     env.MOLTZAP_ALLOWED_SENDERS = allowlistCsv;
   }
@@ -270,10 +224,18 @@ function normalizeCsv(raw: string | undefined): string | null {
 }
 
 function toHttpBaseUrl(serverUrl: string): string {
-  return serverUrl
-    .replace(/^wss:/, "https:")
-    .replace(/^ws:/, "http:")
-    .replace(/\/+$/, "");
+  const url = new URL(serverUrl);
+  if (url.protocol === "wss:") url.protocol = "https:";
+  if (url.protocol === "ws:") url.protocol = "http:";
+  url.search = "";
+  url.hash = "";
+
+  // MoltZap sessions connect over `/ws`, but registration is exposed from the
+  // HTTP API root. Keep the websocket URL for spawned sessions and strip only
+  // the transport endpoint when calling the auth API.
+  url.pathname = url.pathname.replace(/\/ws\/?$/, "/");
+
+  return url.toString().replace(/\/+$/, "");
 }
 
 function buildAgentName(ctx: MoltzapSpawnContext): string {

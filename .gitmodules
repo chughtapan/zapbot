@@ -1,0 +1,3 @@
+[submodule "vendor/moltzap"]
+	path = vendor/moltzap
+	url = https://github.com/chughtapan/moltzap.git

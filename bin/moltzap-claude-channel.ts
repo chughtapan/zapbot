@@ -1,311 +1,117 @@
 #!/usr/bin/env bun
-
 /**
- * bin/moltzap-claude-channel — worker/orchestrator MCP channel for Claude.
- *
- * Anchors: sbd#170 SPEC rev 2 §5; architect DESIGN (issue#170, comment
- * 4311770151) §2 "bin/moltzap-claude-channel.ts" row. Boots a single
- * `MoltZapApp` via `@moltzap/app-sdk`, wires role-scoped `app.onMessage`
- * handlers through `mcp-adapter`, and exposes the MCP reply tool.
- *
- * Spec §5 ties:
- *   - imports `MoltZapApp` (not `MoltZapService` / `MoltZapWsClient`).
- *   - bridge holds the orchestrator manifest; worker holds a role-specific
- *     manifest.
- *   - OQ #6: every boot caller declares a full 4-value `SessionRole`.
+ * moltzap-claude-channel — zapbot's AO session entry for the MoltZap Claude
+ * channel. Post-sbd#172 this is a thin adapter over
+ * `@moltzap/claude-code-channel` (spec A8: ≤ 150 LOC).
  */
 
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { Effect } from "effect";
+import { bootClaudeCodeChannel } from "@moltzap/claude-code-channel";
+import { resolveChannelBootstrap } from "../src/moltzap/boot-env.ts";
 import {
-  bootApp,
-  onMessageForKey,
-  onSessionReady,
-  resolveConversationIdToKey,
-  resolveKeyToConversationId,
-  sendOnKey,
-  shutdownApp,
-} from "../src/moltzap/app-client.ts";
-import {
-  makeMcpForwardHandler,
-  wireMcpAdapter,
-  type McpAdapterContext,
-} from "../src/moltzap/mcp-adapter.ts";
-import {
-  receivableKeysForRole,
-  sendableKeysForRole,
-} from "../src/moltzap/conversation-keys.ts";
-import {
-  decodeSessionRole,
-  isWorkerRole,
-  type SessionRole,
-} from "../src/moltzap/session-role.ts";
-import {
-  asMoltzapConversationId,
-  asMoltzapSenderId,
-  type MoltzapSenderId,
-} from "../src/moltzap/types.ts";
-import { bootClaudeChannelServer } from "../src/claude-channel/server.ts";
-import { err, ok } from "../src/types.ts";
+  buildSenderAllowlistGate,
+  fromSenderIds,
+} from "../src/moltzap/identity-allowlist.ts";
+import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 
 const debugLogPath = resolveDebugLogPath(process.env);
 logDebug("boot");
 
-process.on("beforeExit", (code) => {
-  logDebug(`beforeExit code=${code}`);
-});
-process.on("exit", (code) => {
-  logDebug(`exit code=${code}`);
-});
-process.on("uncaughtException", (cause) => {
-  logDebug(`uncaughtException ${stringifyCause(cause)}`);
-});
-process.on("unhandledRejection", (cause) => {
-  logDebug(`unhandledRejection ${stringifyCause(cause)}`);
-});
+const bootstrap = await resolveChannelBootstrap(process.env);
+if (bootstrap._tag === "Err") fatal(bootstrap.error);
 
-const role = resolveRole(process.env);
-const serverUrl = requireEnv("MOLTZAP_SERVER_URL");
-const agentKey = requireEnv("MOLTZAP_API_KEY");
-const localSenderId = asMoltzapSenderId(
-  requireEnv("MOLTZAP_LOCAL_SENDER_ID"),
+const allowlistIds = parseAllowlistCsv(process.env.MOLTZAP_ALLOWED_SENDERS);
+const logger = {
+  info: (...args: unknown[]) => console.error("[moltzap-channel]", ...args),
+  warn: (...args: unknown[]) => console.error("[moltzap-channel]", ...args),
+  error: (...args: unknown[]) => console.error("[moltzap-channel]", ...args),
+};
+
+const booted = await bootClaudeCodeChannel({
+  serverUrl: bootstrap.value.serverUrl,
+  agentKey: bootstrap.value.apiKey,
+  logger,
+  ...(allowlistIds.length > 0
+    ? { gateInbound: buildSenderAllowlistGate(fromSenderIds(allowlistIds)) }
+    : {}),
+});
+if (booted._tag === "Err") fatal(`${booted.error._tag}: ${booted.error.cause}`);
+const handle = booted.value;
+
+writeMetadataKey("moltzap_sender_id", bootstrap.value.localSenderId);
+writeMetadataKey("moltzap_api_key", bootstrap.value.apiKey);
+writeMetadataKey("moltzap_server_url", bootstrap.value.serverUrl);
+
+const role = process.env.AO_CALLER_TYPE === "orchestrator" ? "orchestrator" : "worker";
+console.error(
+  `[moltzap-channel] ready agent=${bootstrap.value.localSenderId} server=${bootstrap.value.serverUrl} role=${role}`,
 );
-const orchestratorSenderRaw = trimEnv(
-  process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID,
-);
-if (isWorkerRole(role) && orchestratorSenderRaw === null) {
-  fatal("MOLTZAP_ORCHESTRATOR_SENDER_ID is required for worker sessions");
+logDebug(`ready role=${role}`);
+
+const keepAlive = setInterval(() => {}, 1_000);
+async function shutdown(signal: string): Promise<void> {
+  clearInterval(keepAlive);
+  console.error(`[moltzap-channel] stopping on ${signal}`);
+  logDebug(`shutdown ${signal}`);
+  await Effect.runPromise(handle.stop()).catch(() => undefined);
+  process.exit(0);
 }
-const orchestratorSenderId: MoltzapSenderId | null =
-  orchestratorSenderRaw === null
-    ? null
-    : asMoltzapSenderId(orchestratorSenderRaw);
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-// Boot MCP channel server BEFORE app.start() so the reply tool surface is
-// live by the time inbound messages start arriving.
-const channelBoot = await bootClaudeChannelServer(
-  {
-    serverName: "moltzap",
-    instructions: buildInstructions(role, orchestratorSenderId),
-    enableReplyTool: true,
-    enableDirectMessageTool: false,
-    enablePermissionRelay: false,
-  },
-  {
-    sendReply: async ({ conversationId, text }) => {
-      // Blocker #3 fix (reviewer-328): the reply tool previously called
-      // `handle.__unsafeInner.sendTo(conversationId, parts)` directly,
-      // bypassing the send-side role gate that Invariant 6 requires.
-      // Route every reply through `sendOnKey`: reverse-lookup the
-      // ConversationKey from the inbound conversationId, then let
-      // `sendOnKey` apply `sendableKeysForRole(handle.role)`. A role
-      // that receives on a key but does NOT send on it (e.g., a worker
-      // trying to reply on `coord-orch-to-worker`) fails with the typed
-      // `KeyDisallowedForRole` instead of a generic `SendRpcFailed`.
-      const handle = latestHandle;
-      if (handle === null) {
-        return err({
-          _tag: "ReplyFailed",
-          cause: "MoltZap app is not booted",
-        });
-      }
-      const key = resolveConversationIdToKey(
-        handle,
-        conversationId as unknown as string,
-      );
-      if (key === null) {
-        return err({
-          _tag: "ReplyFailed",
-          cause: `conversationId ${conversationId as unknown as string} is not in the current session`,
-        });
-      }
-      const outcome = await Effect.runPromise(
-        Effect.either(sendOnKey(handle, key, [{ type: "text", text }])),
-      );
-      if (outcome._tag === "Left") {
-        return err({
-          _tag: "ReplyFailed",
-          cause: `sendOnKey(${key}) rejected: ${outcome.left._tag}`,
-        });
-      }
-      return ok(undefined);
-    },
-  },
-);
-if (channelBoot._tag === "Err") {
-  fatal(channelBoot.error.cause);
-}
-const channel = channelBoot.value;
-
-writeMetadataKey("moltzap_sender_id", localSenderId as string);
-writeMetadataKey("moltzap_api_key", agentKey);
-writeMetadataKey("moltzap_server_url", serverUrl);
-
-import type { ZapbotMoltZapAppHandle } from "../src/moltzap/app-client.ts";
-let latestHandle: ZapbotMoltZapAppHandle | null = null;
-
-async function bootAppAsync(): Promise<ZapbotMoltZapAppHandle> {
-  return Effect.runPromise(
-    bootApp({
-      serverUrl,
-      agentKey,
-      role,
-      env: process.env,
-    }).pipe(
-      Effect.mapError((e) => new Error(`bootApp failed: ${e._tag}`)),
-    ),
-  );
-}
-
-try {
-  latestHandle = await bootAppAsync();
-
-  const ctx: McpAdapterContext = {
-    channel,
-    localSenderId,
-    orchestratorSenderId,
-  };
-
-  const receivable = [...receivableKeysForRole(role)];
-  const wired = wireMcpAdapter(ctx, receivable);
-  for (const key of wired) {
-    const reg = onMessageForKey(
-      latestHandle,
-      key,
-      makeMcpForwardHandler(key, ctx),
-    );
-    if (reg !== null) {
-      // Registration is best-effort — log and continue so a
-      // HandlerAlreadyRegistered on re-wire does not crash the session.
-      console.error(
-        `[moltzap-channel] onMessage(${key}) registration returned ${reg._tag}`,
-      );
-    }
-  }
-
-  onSessionReady(latestHandle, (session) => {
-    logDebug(`sessionReady id=${session.id} status=${session.status}`);
-  });
-
-  console.error(
-    `[moltzap-channel] ready agent=${localSenderId as string} server=${serverUrl} role=${role} sendable=${[
-      ...sendableKeysForRole(role),
-    ].join(",")} receivable=${receivable.join(",")}`,
-  );
-
-  async function shutdown(signal: string): Promise<void> {
-    console.error(`[moltzap-channel] stopping on ${signal}`);
-    logDebug(`shutdown ${signal}`);
-    try {
-      await Effect.runPromise(shutdownApp());
-    } catch (cause) {
-      logDebug(`shutdownApp err ${stringifyCause(cause)}`);
-    }
-    await channel.stop().catch(() => undefined);
-    process.exit(0);
-  }
-
-  process.on("SIGINT", () => {
-    void shutdown("SIGINT");
-  });
-  process.on("SIGTERM", () => {
-    void shutdown("SIGTERM");
-  });
-  // Hold the event loop until signals arrive.
-  setInterval(() => {}, 1_000);
-} catch (cause) {
-  await channel.stop().catch(() => undefined);
-  fatal(stringifyCause(cause));
-}
-
-// ── helpers ────────────────────────────────────────────────────────
-
-function resolveRole(env: Record<string, string | undefined>): SessionRole {
-  // Blocker #4 (reviewer-328) + Invariant 10 (no migration shims in
-  // pre-product code): the legacy `AO_CALLER_TYPE` → role fallback has
-  // been removed. `AO_CALLER_TYPE=worker` silently collapsed every
-  // non-orchestrator role to "implementer" and masked the showstopper
-  // where workers inherited the bridge's `AO_CALLER_TYPE=orchestrator`
-  // (Blocker #1). The spawn wrapper
-  // (`bin/ao-spawn-with-moltzap.ts :: buildWorkerEnv`) is the single
-  // construction point for the worker env now; it always sets
-  // `ZAPBOT_SESSION_ROLE` explicitly from the orchestrator-supplied
-  // `--role` flag.
-  const rawRole = trimEnv(env.ZAPBOT_SESSION_ROLE) ?? trimEnv(env.AO_ROLE);
-  if (rawRole === null) {
-    fatal(
-      "session role unresolvable: set ZAPBOT_SESSION_ROLE (orchestrator|architect|implementer|reviewer)",
-    );
-  }
-  const decoded = decodeSessionRole(rawRole);
-  if (decoded._tag === "Err") {
-    fatal(`unknown ZAPBOT_SESSION_ROLE/AO_ROLE: ${rawRole}`);
-  }
-  return decoded.value;
-}
-
-function buildInstructions(
-  role: SessionRole,
-  orchestrator: MoltzapSenderId | null,
-): string {
-  const sendable = [...sendableKeysForRole(role)].join(", ");
-  const receivable = [...receivableKeysForRole(role)].join(", ");
-  return [
-    `This session is connected to MoltZap as a ${role}.`,
-    "Messages from other agents arrive over this Claude channel.",
-    "Use the reply tool to answer the current MoltZap conversation.",
-    `Sendable conversation keys: ${sendable || "(none)"}.`,
-    `Receivable conversation keys: ${receivable || "(none)"}.`,
-    orchestrator !== null
-      ? `The orchestrator sender ID is ${orchestrator as string}.`
-      : "This process IS the orchestrator.",
-  ].join("\n\n");
-}
-
-function requireEnv(name: string): string {
-  const value = trimEnv(process.env[name]);
-  if (value === null) {
-    fatal(`${name} is required`);
-  }
-  return value;
-}
-
-function trimEnv(value: string | undefined): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+function parseAllowlistCsv(raw: string | undefined) {
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map(asMoltzapSenderId);
 }
 
 function writeMetadataKey(key: string, value: string): void {
-  const dataDir = trimEnv(process.env.AO_DATA_DIR);
-  const sessionId = trimEnv(process.env.AO_SESSION);
+  const dataDir = trim(process.env.AO_DATA_DIR);
+  const sessionId = trim(process.env.AO_SESSION);
   if (dataDir === null || sessionId === null) return;
   const path = `${dataDir}/${sessionId}`;
   let lines: string[] = [];
   try {
-    lines = readFileSync(path, "utf8").split("\n").filter((line) => line.length > 0);
+    lines = readFileSync(path, "utf8").split("\n").filter((l) => l.length > 0);
   } catch {
     return;
   }
-  const nextLine = `${key}=${value}`;
-  const updated: string[] = [];
+  const next = `${key}=${value}`;
   let replaced = false;
-  for (const line of lines) {
-    if (line.startsWith(`${key}=`)) {
-      updated.push(nextLine);
-      replaced = true;
-    } else {
-      updated.push(line);
-    }
-  }
-  if (!replaced) updated.push(nextLine);
+  const updated = lines.map((l) =>
+    l.startsWith(`${key}=`) ? ((replaced = true), next) : l,
+  );
+  if (!replaced) updated.push(next);
   writeFileSync(path, `${updated.join("\n")}\n`, "utf8");
 }
 
-function stringifyCause(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+function trim(v: string | undefined): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length > 0 ? t : null;
+}
+
+function resolveDebugLogPath(env: NodeJS.ProcessEnv): string {
+  const explicit = trim(env.MOLTZAP_CHANNEL_DEBUG_LOG_PATH);
+  if (explicit !== null) return explicit;
+  const name =
+    trim(env.AO_SESSION_NAME) ?? trim(env.AO_SESSION) ?? `pid-${process.pid}`;
+  return join("/tmp", `moltzap-channel-${name}.log`);
+}
+
+function logDebug(message: string): void {
+  try {
+    mkdirSync(dirname(debugLogPath), { recursive: true });
+    appendFileSync(debugLogPath, `[${new Date().toISOString()}] ${message}\n`, "utf8");
+  } catch {
+    // best-effort
+  }
 }
 
 function fatal(message: string): never {
@@ -313,29 +119,3 @@ function fatal(message: string): never {
   console.error(`[moltzap-channel] ${message}`);
   process.exit(1);
 }
-
-function resolveDebugLogPath(
-  env: Record<string, string | undefined>,
-): string {
-  const explicit = trimEnv(env.MOLTZAP_CHANNEL_DEBUG_LOG_PATH);
-  if (explicit !== null) return explicit;
-  const sessionName =
-    trimEnv(env.AO_SESSION_NAME) ??
-    trimEnv(env.AO_SESSION) ??
-    `pid-${process.pid}`;
-  return join("/tmp", `moltzap-channel-${sessionName}.log`);
-}
-
-function logDebug(message: string): void {
-  const line = `[${new Date().toISOString()}] ${message}\n`;
-  try {
-    mkdirSync(dirname(debugLogPath), { recursive: true });
-    appendFileSync(debugLogPath, line, "utf8");
-  } catch {
-    // best-effort only
-  }
-}
-
-// Silence unused-export lints for helpers kept for potential future use.
-void resolveKeyToConversationId;
-void asMoltzapConversationId;

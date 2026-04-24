@@ -1,8 +1,5 @@
 node_modules/
 dist/
-# Locally-staged MoltZap workspace packages (bootstrapped by
-# scripts/bootstrap-moltzap.sh from ~/moltzap/packages/*).
-vendor/moltzap/
 *.db
 *.db-journal
 .zapbot/

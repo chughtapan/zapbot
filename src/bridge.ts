@@ -826,14 +826,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     },
     {
       orchestratorSenderId: asMoltzapSenderId(orchestratorSenderIdEnv),
-      moltzap: current.moltzap,
-      // Bridge serves multiple repos; the per-worker agent name encodes
-      // project + issue (not repo). Pass a stable placeholder so spec
-      // rev 2 Invariant 3 ("single provisioning primitive") reads
-      // symmetrically with the dispatcher path (dispatcher.ts passes
-      // its ctx.repo). If/when per-repo agent naming lands, thread the
-      // real repo through here.
-      repo: asRepoFullName("bridge/multi"),
     },
   );
   const rosterManager = createRosterManager(rosterManagerDeps);
