@@ -116,6 +116,20 @@ export type SessionReadyHandler = (
 // ── Invariant 1 singleton ───────────────────────────────────────────
 
 let __singleton: ZapbotMoltZapAppHandle | null = null;
+/**
+ * Blocker #5 (reviewer-328): the raceable check-then-set below allowed
+ * two concurrent `bootApp` callers to both observe `__singleton === null`
+ * and both construct + start a `MoltZapApp`, leaking the first.
+ *
+ * The in-flight promise is set synchronously in `bootApp` before any
+ * async work, so a second caller observes `__inflight !== null` and
+ * fails with `AppBootAlreadyBooted` without racing the manifest build
+ * or the `app.start()` RPC. The settled handle lands in `__singleton`
+ * the moment `app.start()` resolves; subsequent callers see
+ * `__singleton !== null` and fail via the same tag. On failure we clear
+ * both slots so a caller can retry with a valid config.
+ */
+let __inflight: Promise<ZapbotMoltZapAppHandle> | null = null;
 const __handlersRegistered = new Set<ConversationKey>();
 
 /**
@@ -126,76 +140,120 @@ const __handlersRegistered = new Set<ConversationKey>();
  *   4. `new MoltZapApp({...}).start()`.
  *
  * Invariant 1: a second call to `bootApp` in the same process returns
- * `AppBootAlreadyBooted` without connecting.
+ * `AppBootAlreadyBooted` without connecting — whether the first call
+ * has resolved (`__singleton !== null`) or is still in flight
+ * (`__inflight !== null`).
  */
 export function bootApp(
   config: AppBootConfig,
 ): Effect.Effect<ZapbotMoltZapAppHandle, AppBootError> {
-  if (__singleton !== null) {
-    return Effect.fail<AppBootError>({ _tag: "AppBootAlreadyBooted" });
-  }
-  const env = config.env ?? process.env;
-  const identityResult = loadAppIdentity(env);
-  if ("_tag" in identityResult) {
-    return Effect.fail<AppBootError>({
-      _tag: "AppBootManifestInvalid",
-      reason: identityResult.reason,
+  // Wrap in `Effect.suspend` so the check-and-reserve runs at Effect
+  // execution time, not at `bootApp()` call time. Within `suspend`'s
+  // synchronous body we synchronously set `__inflight` before any
+  // `await`, so a second concurrent `runPromise(bootApp(...))` cannot
+  // observe the reserved slot as null. JS is single-threaded; the
+  // `if`-then-set pair is atomic w.r.t. other callers.
+  return Effect.suspend<ZapbotMoltZapAppHandle, AppBootError, never>(() => {
+    if (__singleton !== null || __inflight !== null) {
+      return Effect.fail<AppBootError>({ _tag: "AppBootAlreadyBooted" });
+    }
+    let settleInflight: (handle: ZapbotMoltZapAppHandle) => void = () => {
+      // replaced below
+    };
+    let rejectInflight: (error: AppBootError) => void = () => {
+      // replaced below
+    };
+    __inflight = new Promise<ZapbotMoltZapAppHandle>((resolve, reject) => {
+      settleInflight = resolve;
+      rejectInflight = reject;
     });
-  }
-  const identity = identityResult;
-  const manifest =
-    config.role === "orchestrator"
-      ? buildOrchestratorManifest(identity)
-      : buildWorkerManifest(identity, config.role);
-  const mismatch = verifyManifestKeys(
-    manifest,
-    expectedKeysForRole(config.role),
-  );
-  if (mismatch !== null) {
-    return Effect.fail<AppBootError>({
-      _tag: "AppBootManifestInvalid",
-      reason: `manifest keys mismatch: expected=${JSON.stringify(
-        mismatch.expected,
-      )} declared=${JSON.stringify(mismatch.declared)}`,
-    });
-  }
-  // Worker roles never carry invitedAgentIds: only the session
-  // initiator (bridge) invites others at apps/create time.
-  const invitedAgentIds = isWorkerRole(config.role)
-    ? []
-    : (config.invitedAgentIds ?? []).map((s) => s as unknown as string);
+    // The promise is owned by `bootApp`; we don't want node to kill
+    // the process if a downstream fail is handled via Effect rather
+    // than via awaiting `__inflight` directly (it is never awaited —
+    // it is purely a sentinel for the singleton gate).
+    __inflight.catch(() => undefined);
 
-  const app = new MoltZapApp({
-    serverUrl: config.serverUrl,
-    agentKey: config.agentKey,
-    manifest,
-    logger: config.logger,
-    invitedAgentIds,
-  });
+    const clearInflight = (): void => {
+      __inflight = null;
+    };
 
-  return app.start().pipe(
-    Effect.mapError<unknown, AppBootError>((e) => {
-      const cause = e instanceof Error ? e.message : String(e);
-      const tag = e instanceof Error ? e.name : "unknown";
-      if (tag === "AuthError") {
-        return { _tag: "AppBootConnectFailed", cause };
-      }
-      if (tag === "ManifestRegistrationError") {
-        return { _tag: "AppBootManifestInvalid", reason: cause };
-      }
-      return { _tag: "AppBootSessionFailed", cause };
-    }),
-    Effect.map((session: AppSessionHandle) => {
-      const handle: ZapbotMoltZapAppHandle = {
-        role: config.role,
-        __unsafeInner: app,
-        session,
+    const env = config.env ?? process.env;
+    const identityResult = loadAppIdentity(env);
+    if ("_tag" in identityResult) {
+      const failure: AppBootError = {
+        _tag: "AppBootManifestInvalid",
+        reason: identityResult.reason,
       };
-      __singleton = handle;
-      __handlersRegistered.clear();
-      return handle;
-    }),
-  );
+      rejectInflight(failure);
+      clearInflight();
+      return Effect.fail<AppBootError>(failure);
+    }
+    const identity = identityResult;
+    const manifest =
+      config.role === "orchestrator"
+        ? buildOrchestratorManifest(identity)
+        : buildWorkerManifest(identity, config.role);
+    const mismatch = verifyManifestKeys(
+      manifest,
+      expectedKeysForRole(config.role),
+    );
+    if (mismatch !== null) {
+      const failure: AppBootError = {
+        _tag: "AppBootManifestInvalid",
+        reason: `manifest keys mismatch: expected=${JSON.stringify(
+          mismatch.expected,
+        )} declared=${JSON.stringify(mismatch.declared)}`,
+      };
+      rejectInflight(failure);
+      clearInflight();
+      return Effect.fail<AppBootError>(failure);
+    }
+    // Worker roles never carry invitedAgentIds: only the session
+    // initiator (bridge) invites others at apps/create time.
+    const invitedAgentIds = isWorkerRole(config.role)
+      ? []
+      : (config.invitedAgentIds ?? []).map((s) => s as unknown as string);
+
+    const app = new MoltZapApp({
+      serverUrl: config.serverUrl,
+      agentKey: config.agentKey,
+      manifest,
+      logger: config.logger,
+      invitedAgentIds,
+    });
+
+    return app.start().pipe(
+      Effect.mapError<unknown, AppBootError>((e) => {
+        const cause = e instanceof Error ? e.message : String(e);
+        const tag = e instanceof Error ? e.name : "unknown";
+        if (tag === "AuthError") {
+          return { _tag: "AppBootConnectFailed", cause };
+        }
+        if (tag === "ManifestRegistrationError") {
+          return { _tag: "AppBootManifestInvalid", reason: cause };
+        }
+        return { _tag: "AppBootSessionFailed", cause };
+      }),
+      Effect.tapError((failure) =>
+        Effect.sync(() => {
+          rejectInflight(failure);
+          clearInflight();
+        }),
+      ),
+      Effect.map((session: AppSessionHandle) => {
+        const handle: ZapbotMoltZapAppHandle = {
+          role: config.role,
+          __unsafeInner: app,
+          session,
+        };
+        __singleton = handle;
+        __handlersRegistered.clear();
+        settleInflight(handle);
+        clearInflight();
+        return handle;
+      }),
+    );
+  });
 }
 
 /** Return the booted app handle, or `null` if `bootApp` has not run. */
@@ -212,6 +270,7 @@ export function shutdownApp(): Effect.Effect<void, never> {
   const h = __singleton;
   if (h === null) return Effect.succeed(undefined);
   __singleton = null;
+  __inflight = null;
   __handlersRegistered.clear();
   return h.__unsafeInner.stop();
 }
@@ -308,10 +367,40 @@ export function resolveKeyToConversationId(
   return asMoltzapConversationId(raw);
 }
 
+/**
+ * Reverse lookup: given a raw conversationId from an inbound message,
+ * return the typed `ConversationKey` it maps to in the current session —
+ * or `null` if the id is not part of this session's conversation map.
+ *
+ * Blocker #3 tie (reviewer-328): the MCP `reply` tool receives the
+ * conversationId of the inbound message and must reply on the SAME
+ * conversation. Before this helper existed, the reply path called
+ * `handle.__unsafeInner.sendTo(conversationId, parts)` directly,
+ * bypassing the send-side role gate in `sendOnKey`. Callers now use
+ * this helper to recover the `ConversationKey` and route through
+ * `sendOnKey` so `KeyDisallowedForRole` / `KeyNotInSession` apply.
+ */
+export function resolveConversationIdToKey(
+  handle: ZapbotMoltZapAppHandle,
+  conversationId: string,
+): ConversationKey | null {
+  const map = handle.session.conversations as Record<string, string>;
+  for (const rawKey of Object.keys(map)) {
+    if (map[rawKey] === conversationId) {
+      // rawKey is typed as string in the SDK surface, but the session
+      // was built from our own manifest which only declares members of
+      // `ConversationKey`. Narrow via the closed union.
+      return rawKey as ConversationKey;
+    }
+  }
+  return null;
+}
+
 // Test-only hook: reset the singleton between test runs. NOT part of the
 // public boot surface — Invariant 1 still holds in production.
 export function __resetAppSingletonForTests(): void {
   __singleton = null;
+  __inflight = null;
   __handlersRegistered.clear();
 }
 

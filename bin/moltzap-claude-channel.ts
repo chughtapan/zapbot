@@ -23,6 +23,7 @@ import {
   bootApp,
   onMessageForKey,
   onSessionReady,
+  resolveConversationIdToKey,
   resolveKeyToConversationId,
   sendOnKey,
   shutdownApp,
@@ -94,6 +95,15 @@ const channelBoot = await bootClaudeChannelServer(
   },
   {
     sendReply: async ({ conversationId, text }) => {
+      // Blocker #3 fix (reviewer-328): the reply tool previously called
+      // `handle.__unsafeInner.sendTo(conversationId, parts)` directly,
+      // bypassing the send-side role gate that Invariant 6 requires.
+      // Route every reply through `sendOnKey`: reverse-lookup the
+      // ConversationKey from the inbound conversationId, then let
+      // `sendOnKey` apply `sendableKeysForRole(handle.role)`. A role
+      // that receives on a key but does NOT send on it (e.g., a worker
+      // trying to reply on `coord-orch-to-worker`) fails with the typed
+      // `KeyDisallowedForRole` instead of a generic `SendRpcFailed`.
       const handle = latestHandle;
       if (handle === null) {
         return err({
@@ -101,19 +111,26 @@ const channelBoot = await bootClaudeChannelServer(
           cause: "MoltZap app is not booted",
         });
       }
-      try {
-        await Effect.runPromise(
-          handle.__unsafeInner.sendTo(conversationId as unknown as string, [
-            { type: "text", text },
-          ]),
-        );
-        return ok(undefined);
-      } catch (cause) {
+      const key = resolveConversationIdToKey(
+        handle,
+        conversationId as unknown as string,
+      );
+      if (key === null) {
         return err({
           _tag: "ReplyFailed",
-          cause: stringifyCause(cause),
+          cause: `conversationId ${conversationId as unknown as string} is not in the current session`,
         });
       }
+      const outcome = await Effect.runPromise(
+        Effect.either(sendOnKey(handle, key, [{ type: "text", text }])),
+      );
+      if (outcome._tag === "Left") {
+        return err({
+          _tag: "ReplyFailed",
+          cause: `sendOnKey(${key}) rejected: ${outcome.left._tag}`,
+        });
+      }
+      return ok(undefined);
     },
   },
 );
@@ -206,29 +223,27 @@ try {
 // ── helpers ────────────────────────────────────────────────────────
 
 function resolveRole(env: Record<string, string | undefined>): SessionRole {
+  // Blocker #4 (reviewer-328) + Invariant 10 (no migration shims in
+  // pre-product code): the legacy `AO_CALLER_TYPE` → role fallback has
+  // been removed. `AO_CALLER_TYPE=worker` silently collapsed every
+  // non-orchestrator role to "implementer" and masked the showstopper
+  // where workers inherited the bridge's `AO_CALLER_TYPE=orchestrator`
+  // (Blocker #1). The spawn wrapper
+  // (`bin/ao-spawn-with-moltzap.ts :: buildWorkerEnv`) is the single
+  // construction point for the worker env now; it always sets
+  // `ZAPBOT_SESSION_ROLE` explicitly from the orchestrator-supplied
+  // `--role` flag.
   const rawRole = trimEnv(env.ZAPBOT_SESSION_ROLE) ?? trimEnv(env.AO_ROLE);
-  if (rawRole !== null) {
-    const decoded = decodeSessionRole(rawRole);
-    if (decoded._tag === "Ok") {
-      return decoded.value;
-    }
+  if (rawRole === null) {
+    fatal(
+      "session role unresolvable: set ZAPBOT_SESSION_ROLE (orchestrator|architect|implementer|reviewer)",
+    );
+  }
+  const decoded = decodeSessionRole(rawRole);
+  if (decoded._tag === "Err") {
     fatal(`unknown ZAPBOT_SESSION_ROLE/AO_ROLE: ${rawRole}`);
   }
-  // Fallback legacy decoder (OQ #6 migration path): `AO_CALLER_TYPE`
-  // carried the binary orchestrator/worker split. In the 4-value world,
-  // a bare "worker" is ambiguous — default to "implementer" with a
-  // loud stderr note so operators migrate.
-  const caller = trimEnv(env.AO_CALLER_TYPE);
-  if (caller === "orchestrator") return "orchestrator";
-  if (caller === "worker") {
-    console.error(
-      `[moltzap-channel] AO_CALLER_TYPE=worker is ambiguous under 4-value SessionRole; defaulting to "implementer". Set ZAPBOT_SESSION_ROLE to choose explicitly.`,
-    );
-    return "implementer";
-  }
-  fatal(
-    "session role unresolvable: set ZAPBOT_SESSION_ROLE (orchestrator|architect|implementer|reviewer)",
-  );
+  return decoded.value;
 }
 
 function buildInstructions(
@@ -323,5 +338,4 @@ function logDebug(message: string): void {
 
 // Silence unused-export lints for helpers kept for potential future use.
 void resolveKeyToConversationId;
-void sendOnKey;
 void asMoltzapConversationId;

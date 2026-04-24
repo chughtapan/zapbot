@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  MOLTZAP_WORKER_FORBIDDEN_ENV,
   buildMoltzapProcessEnv,
   buildMoltzapSpawnEnv,
   loadMoltzapRuntimeConfig,
+  scrubMoltzapForbiddenEnv,
   type MoltzapRuntimeConfig,
 } from "../src/moltzap/runtime.ts";
 import {
@@ -118,5 +120,45 @@ describe("moltzap/runtime — buildMoltzapSpawnEnv (Invariant 4)", () => {
     if (result._tag === "Err") {
       expect(result.error._tag).toBe("MoltzapProvisionFailed");
     }
+  });
+});
+
+describe("moltzap/runtime — scrubMoltzapForbiddenEnv (Invariant 4, Blocker #2)", () => {
+  it("includes every secret/allowlist env currently used by zapbot", () => {
+    // Drift guard: if a new secret-bearing env var is added later, it must
+    // be listed here AND in `scrubMoltzapForbiddenEnv` — reviewer-328 called
+    // this out as "the scrub list will silently drift the next time a
+    // secret env is added." Keep the constants and this list aligned.
+    expect(MOLTZAP_WORKER_FORBIDDEN_ENV).toEqual([
+      "MOLTZAP_REGISTRATION_SECRET",
+      "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
+      "MOLTZAP_ALLOWED_SENDERS",
+      "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    ]);
+  });
+
+  it("removes every MOLTZAP_WORKER_FORBIDDEN_ENV entry in place", () => {
+    const env: Record<string, string> = {
+      MOLTZAP_REGISTRATION_SECRET: "secret",
+      ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "secret2",
+      MOLTZAP_ALLOWED_SENDERS: "a,b",
+      ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "c,d",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      MOLTZAP_API_KEY: "keep-me",
+      UNRELATED: "keep-me-too",
+    };
+    scrubMoltzapForbiddenEnv(env);
+    for (const name of MOLTZAP_WORKER_FORBIDDEN_ENV) {
+      expect(env).not.toHaveProperty(name);
+    }
+    expect(env.MOLTZAP_API_KEY).toBe("keep-me");
+    expect(env.UNRELATED).toBe("keep-me-too");
+  });
+
+  it("is a no-op when no forbidden keys are present", () => {
+    const env: Record<string, string> = { FOO: "bar" };
+    scrubMoltzapForbiddenEnv(env);
+    expect(env).toEqual({ FOO: "bar" });
   });
 });

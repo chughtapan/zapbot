@@ -34,6 +34,38 @@ export interface MoltzapSpawnContext {
   readonly session: AoSessionName;
 }
 
+/**
+ * Env vars that MUST be scrubbed from any worker-side child process env
+ * (both initial spawn and resume paths in `bin/ao-spawn-with-moltzap.ts`).
+ *
+ * Anchors: SPEC rev 2 Invariant 4 (registration secret never reaches a
+ * worker) and §5 (allowlist env removed; server-side admission).
+ *
+ * Lifted into this module so the bin wrapper and
+ * `test/moltzap-runtime.test.ts` iterate the same constant — the
+ * reviewer-328 drift concern: "the scrub list will silently drift the
+ * next time a secret env is added."
+ */
+export const MOLTZAP_WORKER_FORBIDDEN_ENV: readonly string[] = [
+  "MOLTZAP_REGISTRATION_SECRET",
+  "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
+  "MOLTZAP_ALLOWED_SENDERS",
+  "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
+  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+];
+
+/**
+ * Mutate `env` in place to drop every key in `MOLTZAP_WORKER_FORBIDDEN_ENV`.
+ * Callers on the worker-spawn path (both initial spawn and resume restart)
+ * must run this after `...process.env` is spread in so no ambient parent
+ * value leaks to the worker.
+ */
+export function scrubMoltzapForbiddenEnv(env: Record<string, string>): void {
+  for (const name of MOLTZAP_WORKER_FORBIDDEN_ENV) {
+    delete env[name];
+  }
+}
+
 export type MoltzapRuntimeConfig =
   | { readonly _tag: "MoltzapDisabled" }
   | {

@@ -5,6 +5,7 @@ import {
   bootApp,
   currentApp,
   onMessageForKey,
+  resolveConversationIdToKey,
   resolveKeyToConversationId,
   sendOnKey,
   shutdownApp,
@@ -170,6 +171,60 @@ describe("app-client — resolveKeyToConversationId", () => {
       key: "coord-architect-peer",
     });
   });
+});
+
+describe("app-client — resolveConversationIdToKey (Blocker #3)", () => {
+  it("returns the typed key for a conversationId in the session map", () => {
+    const handle = fakeHandle("architect", {
+      "coord-architect-peer": "conv-peer-123",
+      "coord-orch-to-worker": "conv-orch-456",
+      "coord-worker-to-orch": "conv-wto-789",
+      "coord-review-to-author": "conv-rev-abc",
+    });
+    expect(resolveConversationIdToKey(handle, "conv-peer-123")).toBe(
+      "coord-architect-peer",
+    );
+    expect(resolveConversationIdToKey(handle, "conv-orch-456")).toBe(
+      "coord-orch-to-worker",
+    );
+  });
+
+  it("returns null for an unknown conversationId (reply fails fast)", () => {
+    const handle = fakeHandle("architect", {
+      "coord-architect-peer": "conv-peer-123",
+    });
+    expect(resolveConversationIdToKey(handle, "conv-unknown")).toBeNull();
+  });
+});
+
+describe("app-client — bootApp singleton race (Blocker #5)", () => {
+  // Race: caller A starts `bootApp`, reaches `app.start()` (which tries
+  // to open a WebSocket and blocks on the TCP handshake against an
+  // unreachable host), `__inflight` is reserved while that async work is
+  // pending; caller B runs before the connect fails. Caller B must see
+  // `AppBootAlreadyBooted` because `__inflight !== null`, not race A to
+  // also construct a `MoltZapApp`.
+  it("a second bootApp call while the first is awaiting start() fails with AppBootAlreadyBooted", async () => {
+    // 127.0.0.1:1 never accepts connections; `start()` awaits the
+    // WebSocket handshake, which is pending when caller B runs.
+    const cfg = {
+      serverUrl: "ws://127.0.0.1:1",
+      agentKey: "k",
+      role: "orchestrator" as const,
+    };
+    const first = Effect.runPromise(Effect.either(bootApp(cfg)));
+    // Yield one microtask so caller A's Effect.suspend body has run
+    // synchronously up to the start() await.
+    await Promise.resolve();
+    const second = await Effect.runPromise(Effect.either(bootApp(cfg)));
+    expect(second).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "AppBootAlreadyBooted" },
+    });
+    // Drain caller A; it will eventually fail (connect refused / timeout).
+    // We don't assert on its tag here — that's orthogonal to the race.
+    await first.catch(() => undefined);
+  }, 15_000);
 });
 
 describe("app-client — shutdown", () => {
