@@ -14,27 +14,38 @@
  * Send-time role gate: zapbot constrains `app.send(key, parts)` to the keys
  * `sendableKeysForRole(role)` permits. The check runs BEFORE the RPC is
  * dispatched, so a worker that attempts to post on a key outside its role's
- * sender set fails with `KeyDisallowedForRole` at the zapbot seam. This is
- * the only role-pair check zapbot layers on top of the server; OQ #3 rejects
- * client-side RECEIVE gates.
- *
- * Architect stage — bodies throw.
+ * sender set fails with `KeyDisallowedForRole` at the zapbot seam. OQ #3
+ * rejects client-side RECEIVE gates.
  */
 
-import type { Effect } from "effect";
-import type {
-  AppSessionHandle,
+import { Effect } from "effect";
+import {
   MoltZapApp,
-  Part,
-  Message,
-  WsClientLogger,
+  type AppSessionHandle,
+  type Message,
+  type Part,
+  type WsClientLogger,
 } from "@moltzap/app-sdk";
 import type { SessionRole } from "./session-role.ts";
+import { isWorkerRole } from "./session-role.ts";
 import type { ConversationKey } from "./conversation-keys.ts";
+import {
+  receivableKeysForRole,
+  sendableKeysForRole,
+} from "./conversation-keys.ts";
+import {
+  buildOrchestratorManifest,
+  buildWorkerManifest,
+  expectedKeysForRole,
+  loadAppIdentity,
+  verifyManifestKeys,
+  ZAPBOT_APP_ID,
+} from "./manifest.ts";
 import type {
-  MoltzapSenderId,
   MoltzapConversationId,
+  MoltzapSenderId,
 } from "./types.ts";
+import { asMoltzapConversationId } from "./types.ts";
 
 // ── Boot config ─────────────────────────────────────────────────────
 
@@ -51,6 +62,10 @@ export interface AppBootConfig {
    * roles (workers join an existing session driven by the bridge).
    */
   readonly invitedAgentIds?: readonly MoltzapSenderId[];
+  /**
+   * Override env for identity decode (tests). Defaults to `process.env`.
+   */
+  readonly env?: Record<string, string | undefined>;
 }
 
 export type AppBootError =
@@ -98,12 +113,17 @@ export type SessionReadyHandler = (
   session: AppSessionHandle,
 ) => void | Promise<void>;
 
+// ── Invariant 1 singleton ───────────────────────────────────────────
+
+let __singleton: ZapbotMoltZapAppHandle | null = null;
+const __handlersRegistered = new Set<ConversationKey>();
+
 /**
  * Boot the single `MoltZapApp` for this process. Calls
- *   1. `loadAppIdentity` (manifest.ts),
+ *   1. `loadAppIdentity`,
  *   2. `buildOrchestratorManifest` or `buildWorkerManifest` per `role`,
  *   3. `verifyManifestKeys` against the role's expected keys,
- *   4. `new MoltZapApp({...}).startAsync()`.
+ *   4. `new MoltZapApp({...}).start()`.
  *
  * Invariant 1: a second call to `bootApp` in the same process returns
  * `AppBootAlreadyBooted` without connecting.
@@ -111,12 +131,76 @@ export type SessionReadyHandler = (
 export function bootApp(
   config: AppBootConfig,
 ): Effect.Effect<ZapbotMoltZapAppHandle, AppBootError> {
-  throw new Error("not implemented");
+  if (__singleton !== null) {
+    return Effect.fail<AppBootError>({ _tag: "AppBootAlreadyBooted" });
+  }
+  const env = config.env ?? process.env;
+  const identityResult = loadAppIdentity(env);
+  if ("_tag" in identityResult) {
+    return Effect.fail<AppBootError>({
+      _tag: "AppBootManifestInvalid",
+      reason: identityResult.reason,
+    });
+  }
+  const identity = identityResult;
+  const manifest =
+    config.role === "orchestrator"
+      ? buildOrchestratorManifest(identity)
+      : buildWorkerManifest(identity, config.role);
+  const mismatch = verifyManifestKeys(
+    manifest,
+    expectedKeysForRole(config.role),
+  );
+  if (mismatch !== null) {
+    return Effect.fail<AppBootError>({
+      _tag: "AppBootManifestInvalid",
+      reason: `manifest keys mismatch: expected=${JSON.stringify(
+        mismatch.expected,
+      )} declared=${JSON.stringify(mismatch.declared)}`,
+    });
+  }
+  // Worker roles never carry invitedAgentIds: only the session
+  // initiator (bridge) invites others at apps/create time.
+  const invitedAgentIds = isWorkerRole(config.role)
+    ? []
+    : (config.invitedAgentIds ?? []).map((s) => s as unknown as string);
+
+  const app = new MoltZapApp({
+    serverUrl: config.serverUrl,
+    agentKey: config.agentKey,
+    manifest,
+    logger: config.logger,
+    invitedAgentIds,
+  });
+
+  return app.start().pipe(
+    Effect.mapError<unknown, AppBootError>((e) => {
+      const cause = e instanceof Error ? e.message : String(e);
+      const tag = e instanceof Error ? e.name : "unknown";
+      if (tag === "AuthError") {
+        return { _tag: "AppBootConnectFailed", cause };
+      }
+      if (tag === "ManifestRegistrationError") {
+        return { _tag: "AppBootManifestInvalid", reason: cause };
+      }
+      return { _tag: "AppBootSessionFailed", cause };
+    }),
+    Effect.map((session: AppSessionHandle) => {
+      const handle: ZapbotMoltZapAppHandle = {
+        role: config.role,
+        __unsafeInner: app,
+        session,
+      };
+      __singleton = handle;
+      __handlersRegistered.clear();
+      return handle;
+    }),
+  );
 }
 
 /** Return the booted app handle, or `null` if `bootApp` has not run. */
 export function currentApp(): ZapbotMoltZapAppHandle | null {
-  throw new Error("not implemented");
+  return __singleton;
 }
 
 /**
@@ -125,7 +209,11 @@ export function currentApp(): ZapbotMoltZapAppHandle | null {
  * `bootApp` is allowed.
  */
 export function shutdownApp(): Effect.Effect<void, never> {
-  throw new Error("not implemented");
+  const h = __singleton;
+  if (h === null) return Effect.succeed(undefined);
+  __singleton = null;
+  __handlersRegistered.clear();
+  return h.__unsafeInner.stop();
 }
 
 // ── Messaging ───────────────────────────────────────────────────────
@@ -140,7 +228,26 @@ export function sendOnKey(
   key: ConversationKey,
   parts: readonly Part[],
 ): Effect.Effect<void, SendErrorChannel> {
-  throw new Error("not implemented");
+  const permitted = sendableKeysForRole(handle.role);
+  if (!permitted.has(key)) {
+    return Effect.fail<SendErrorChannel>({
+      _tag: "KeyDisallowedForRole",
+      role: handle.role,
+      key,
+    });
+  }
+  const resolved = resolveKeyToConversationId(handle, key);
+  if (typeof resolved !== "string") {
+    return Effect.fail<SendErrorChannel>(resolved);
+  }
+  return handle.__unsafeInner
+    .sendTo(resolved as unknown as string, parts as Part[])
+    .pipe(
+      Effect.mapError<unknown, SendErrorChannel>((e) => ({
+        _tag: "SendRpcFailed",
+        cause: e instanceof Error ? e.message : String(e),
+      })),
+    );
 }
 
 /**
@@ -149,16 +256,30 @@ export function sendOnKey(
  * role does not receive.
  *
  * NOTE (Invariant 6): the receiver trusts the key. This function does NOT
- * inspect `message.senderId` or a role field in the body. The SEND-side
- * role gate + role-scoped manifest declare what messages can appear on a
- * given key; the receiver acts on the key alone.
+ * inspect `message.senderId` or a role field in the body.
  */
 export function onMessageForKey(
   handle: ZapbotMoltZapAppHandle,
   key: ConversationKey,
   handler: MessageHandler,
 ): HandlerRegistrationError | null {
-  throw new Error("not implemented");
+  const permitted = receivableKeysForRole(handle.role);
+  if (!permitted.has(key)) {
+    return {
+      _tag: "KeyNotReceivableForRole",
+      role: handle.role,
+      key,
+    };
+  }
+  if (__handlersRegistered.has(key)) {
+    return {
+      _tag: "HandlerAlreadyRegistered",
+      key,
+    };
+  }
+  handle.__unsafeInner.onMessage(key, handler);
+  __handlersRegistered.add(key);
+  return null;
 }
 
 /** Register a session-ready handler. Thin pass-through to `MoltZapApp`. */
@@ -166,7 +287,7 @@ export function onSessionReady(
   handle: ZapbotMoltZapAppHandle,
   handler: SessionReadyHandler,
 ): void {
-  throw new Error("not implemented");
+  handle.__unsafeInner.onSessionReady(handler);
 }
 
 // ── Conversation-id resolution ──────────────────────────────────────
@@ -180,5 +301,20 @@ export function resolveKeyToConversationId(
   handle: ZapbotMoltZapAppHandle,
   key: ConversationKey,
 ): MoltzapConversationId | { readonly _tag: "KeyNotInSession"; readonly key: ConversationKey } {
-  throw new Error("not implemented");
+  const raw = handle.session.conversations[key];
+  if (typeof raw !== "string" || raw.length === 0) {
+    return { _tag: "KeyNotInSession", key };
+  }
+  return asMoltzapConversationId(raw);
 }
+
+// Test-only hook: reset the singleton between test runs. NOT part of the
+// public boot surface — Invariant 1 still holds in production.
+export function __resetAppSingletonForTests(): void {
+  __singleton = null;
+  __handlersRegistered.clear();
+}
+
+// Re-export ZAPBOT_APP_ID for callers that need to reference the constant
+// without pulling manifest.ts directly.
+export { ZAPBOT_APP_ID };

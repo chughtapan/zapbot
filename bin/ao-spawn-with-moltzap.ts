@@ -16,8 +16,6 @@ const moltzapEnvFile = readZapbotEnvFile();
 const MOLTZAP_ENV_FALLBACKS = {
   MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
   MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
-  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
-  MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
 } as const;
 
 const sessionDataDir = requireEnv("AO_DATA_DIR");
@@ -29,7 +27,14 @@ const orchestratorSenderId = resolveMetadataValue(
   "moltzap_sender_id",
 ) ?? fatal("moltzap_sender_id not found in orchestrator metadata");
 const serverUrl = requireEnv("MOLTZAP_SERVER_URL");
-const registrationSecret = requireEnv("MOLTZAP_REGISTRATION_SECRET");
+// Spec rev 2 Invariant 4: `MOLTZAP_REGISTRATION_SECRET` must NEVER reach
+// a worker. The wrapper requires a pre-minted `MOLTZAP_API_KEY` in its own
+// env (minted by the bridge via `buildMoltzapSpawnEnv` in
+// `src/moltzap/runtime.ts`). If a caller still sets the secret in parent
+// env (legacy bridge configs), it is explicitly scrubbed from `childEnv`
+// below so the spawn is safe regardless of caller hygiene.
+const apiKey = requireEnv("MOLTZAP_API_KEY");
+const localSenderIdFromEnv = trimEnv(process.env.MOLTZAP_LOCAL_SENDER_ID);
 const beforeSessions = new Set(listSessionNames(sessionDataDir));
 
 const childEnv: Record<string, string> = {
@@ -37,15 +42,22 @@ const childEnv: Record<string, string> = {
   AO_CONFIG_PATH: configPath,
   AO_PROJECT_ID: projectId,
   MOLTZAP_SERVER_URL: serverUrl,
-  MOLTZAP_REGISTRATION_SECRET: registrationSecret,
+  MOLTZAP_API_KEY: apiKey,
   MOLTZAP_ORCHESTRATOR_SENDER_ID: orchestratorSenderId,
 };
-delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
-
-const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS");
-if (allowedSenders !== null) {
-  childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
+if (localSenderIdFromEnv !== null) {
+  childEnv.MOLTZAP_LOCAL_SENDER_ID = localSenderIdFromEnv;
 }
+// Hard scrub — spec rev 2 Invariant 4. Any upstream caller that left the
+// secret in its env must not propagate it here, regardless of intent.
+delete childEnv.MOLTZAP_REGISTRATION_SECRET;
+delete childEnv.ZAPBOT_MOLTZAP_REGISTRATION_SECRET;
+// Spec rev 2 §5: sender admission is server-side now; the legacy
+// allowlist env is no longer part of the worker's surface. Scrub any
+// residual setting so dev-mode callers cannot re-introduce it.
+delete childEnv.MOLTZAP_ALLOWED_SENDERS;
+delete childEnv.ZAPBOT_MOLTZAP_ALLOWED_SENDERS;
+delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
 const spawnedSession = await runAoSpawn(spawnArgs, childEnv);
 await ensureWorkerChannelsReady({

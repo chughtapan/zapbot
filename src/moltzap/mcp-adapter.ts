@@ -7,29 +7,24 @@
  * `src/moltzap/bridge.ts` + `src/moltzap/channel-runtime.ts` collapse into
  * this adapter.
  *
- * This module owns exactly one boundary: mapping a `@moltzap/app-sdk`
- * `Message` (received via `onMessageForKey`) to a typed
- * `ClaudeChannelNotification` and emitting it through the booted
- * `ClaudeChannelServerHandle`. No protocol translation outside that seam.
- *
- * Design intent vs deleted `bridge.ts`: the deleted module carried a
- * `BridgeRuntime` + dispatch table + listener lifecycle; the app-sdk now
- * owns lifecycle, dispatch, and reconnect, so this adapter is a function
- * that knows ONE thing: how to turn `Message` into `ClaudeChannelNotification`.
- *
- * Size budget: <=60 LOC implemented body. If impl exceeds this, re-read the
- * "collapse into the adapter above" line in the deletion table.
- *
- * Architect stage — bodies throw.
+ * This module owns one boundary: mapping a `@moltzap/app-sdk` `Message`
+ * (received via `onMessageForKey`) to a typed `ClaudeChannelNotification`
+ * and emitting it through the booted `ClaudeChannelServerHandle`. No
+ * protocol translation outside that seam.
  */
 
-import type { Message } from "@moltzap/app-sdk";
+import type { Message, Part } from "@moltzap/app-sdk";
 import type {
   ClaudeChannelNotification,
 } from "../claude-channel/event.ts";
 import type { ClaudeChannelServerHandle } from "../claude-channel/server.ts";
 import type { ConversationKey } from "./conversation-keys.ts";
-import type { MoltzapConversationId, MoltzapSenderId } from "./types.ts";
+import type { MoltzapSenderId } from "./types.ts";
+import {
+  asMoltzapConversationId,
+  asMoltzapMessageId,
+  asMoltzapSenderId,
+} from "./types.ts";
 
 // ── Inputs ──────────────────────────────────────────────────────────
 
@@ -63,44 +58,128 @@ export type McpAdapterError =
 
 // ── Public surface ──────────────────────────────────────────────────
 
+function flattenParts(parts: readonly Part[]): string {
+  const chunks: string[] = [];
+  for (const part of parts) {
+    switch (part.type) {
+      case "text":
+        chunks.push(part.text);
+        break;
+      case "image":
+        chunks.push(`[image] ${part.url}${part.altText ? ` — ${part.altText}` : ""}`);
+        break;
+      case "file":
+        chunks.push(`[file] ${part.name} (${part.url})`);
+        break;
+      default: {
+        // Part is a typebox union of {text,image,file}; this branch is
+        // reached only if the upstream schema gains a new variant.
+        const pAny = part as { readonly type?: unknown };
+        chunks.push(`[unknown part: ${String(pAny.type)}]`);
+        break;
+      }
+    }
+  }
+  return chunks.join("\n");
+}
+
 /**
  * Convert one `Message` on `key` into a `ClaudeChannelNotification`. Pure;
  * no I/O. Principle 3 tie: returns an error union, never throws.
+ *
+ * `key` is the typed conversation key delivered by `app.onMessage(key, ...)`.
+ * Invariant 6: the key carries the role-pair; we do not inspect the sender
+ * for role gating — we just stamp the fields through.
  */
 export function toClaudeNotification(
   key: ConversationKey,
   message: Message,
   ctx: McpAdapterContext,
 ): ClaudeChannelNotification | McpAdapterError {
-  throw new Error("not implemented");
+  void ctx;
+  void key; // preserved for future per-key formatting; spec Invariant 6 keeps it inert
+  if (
+    !message ||
+    typeof message.id !== "string" ||
+    typeof message.conversationId !== "string" ||
+    typeof message.senderId !== "string" ||
+    !Array.isArray(message.parts) ||
+    message.parts.length === 0
+  ) {
+    return {
+      _tag: "UnknownMessageShape",
+      reason: "message missing required id/conversationId/senderId/parts",
+      messageId: String(message?.id ?? "<missing>"),
+    };
+  }
+  const content = flattenParts(message.parts as readonly Part[]);
+  if (content.trim().length === 0) {
+    return {
+      _tag: "UnknownMessageShape",
+      reason: "message parts contained no non-empty text",
+      messageId: message.id,
+    };
+  }
+  const receivedAtMs = Date.now();
+  return {
+    method: "notifications/claude/channel",
+    params: {
+      content,
+      meta: {
+        conversation_id: asMoltzapConversationId(message.conversationId),
+        sender_id: asMoltzapSenderId(message.senderId),
+        message_id: asMoltzapMessageId(message.id),
+        received_at_ms: String(receivedAtMs),
+      },
+    },
+  };
 }
 
 /**
- * Forwarder registered as the `app.onMessage(key, handler)` for EVERY key
- * in `receivableKeysForRole(role)`. Wraps `toClaudeNotification` and
- * dispatches via `ctx.channel.emit(notification)` (or equivalent on the
- * existing `ClaudeChannelServerHandle` surface).
- *
- * This is the single bridge zapbot holds between the app-sdk receive path
- * and the MCP transport; it is the zapbot equivalent of the deleted
- * `bridge.ts` + `channel-runtime.ts`.
+ * Forwarder registered as the `app.onMessage(key, handler)` for each
+ * key in `receivableKeysForRole(role)`. Wraps `toClaudeNotification` and
+ * dispatches via `ctx.channel.push(notification)`.
  */
 export function makeMcpForwardHandler(
   key: ConversationKey,
   ctx: McpAdapterContext,
 ): (message: Message) => Promise<void> {
-  throw new Error("not implemented");
+  return async (message) => {
+    const result = toClaudeNotification(key, message, ctx);
+    if ("_tag" in result) {
+      // Typed error; record and drop. No rethrow — the app-sdk handler
+      // surface is void and exceptions leak into the SDK's background
+      // fiber. Logging to stderr is the one external effect here.
+      const err = result;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[mcp-adapter] key=${key} dropped message ${err._tag}: ${
+          err._tag === "UnknownMessageShape" ? err.reason : err.cause
+        }`,
+      );
+      return;
+    }
+    const push = await ctx.channel.push(result);
+    if (push._tag === "Err") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[mcp-adapter] key=${key} push failed: ${push.error.cause}`,
+      );
+    }
+  };
 }
 
 /**
- * Install one forwarder per receivable key at boot. Called once by the bin
- * entrypoint (`bin/moltzap-claude-channel.ts`) after `bootApp` resolves.
- * Returns the list of keys that were wired up — used for boot-log output
- * and as the gate for "did we register everything we should?".
+ * Return the list of keys for which a forwarder should be installed. The
+ * actual `app.onMessage` registration is performed by the boot code that
+ * owns the `MoltZapApp` handle (see `app-client.ts`); this helper exists so
+ * callers can iterate a single list and keep the registration loop in one
+ * place.
  */
 export function wireMcpAdapter(
   ctx: McpAdapterContext,
   receivableKeys: readonly ConversationKey[],
 ): readonly ConversationKey[] {
-  throw new Error("not implemented");
+  void ctx;
+  return [...receivableKeys];
 }

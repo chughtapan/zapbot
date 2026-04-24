@@ -6,16 +6,24 @@
  * `globalSetup` + `standalone.js` subprocess + PGlite + 32-byte base64
  * `ENCRYPTION_MASTER_SECRET` + SIGTERM teardown.
  *
- * Architect stage — body throws. Implementation reads `globalSetup` +
- * `globalTeardown` from the files in this directory and sets `testTimeout`
- * high enough to amortize the 12–15 s cold boot budget spike B measured.
+ * Implementation reads `globalSetup` from `./globalSetup.ts` and sets
+ * `testTimeout` high enough to amortize the 12–15 s cold boot budget.
+ * Run with: `bun x vitest --config test/integration/vitest.integration.config.ts`.
  */
 
-// Stub exists so implement-* can fill in. vitest will import the default
-// export at runtime; the architect-stage body is a typed throw so an
-// accidental test invocation fails loudly instead of silently picking up
-// the unit-test config.
+import { defineConfig } from "vitest/config";
 
-export default (function stub(): never {
-  throw new Error("not implemented");
-})();
+export default defineConfig({
+  test: {
+    include: ["test/integration/**/*.integration.test.ts"],
+    // Spike B: cold boot is 12-15s; tests themselves are fast. 45s
+    // per-test is a generous floor that still surfaces hangs.
+    testTimeout: 45_000,
+    hookTimeout: 45_000,
+    globalSetup: ["test/integration/globalSetup.ts"],
+    // Integration tests share a single server process; run serially
+    // within a file to avoid race conditions on the ambient session.
+    fileParallelism: false,
+    pool: "forks",
+  },
+});

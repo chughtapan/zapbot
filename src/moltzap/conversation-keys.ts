@@ -15,10 +15,9 @@
  * receiver trusts the key, not a role field in the payload body." This module
  * declares the key set; `manifest.ts` binds each key to the roles that may
  * send/receive on it.
- *
- * Implementation stubs. Architect stage — bodies throw.
  */
 
+import { absurd } from "../types.ts";
 import type { SessionRole } from "./session-role.ts";
 
 // ── Keys ────────────────────────────────────────────────────────────
@@ -47,6 +46,10 @@ export const ALL_CONVERSATION_KEYS: readonly ConversationKey[] = [
   "coord-review-to-author",
 ];
 
+const CONVERSATION_KEY_SET: ReadonlySet<string> = new Set<string>(
+  ALL_CONVERSATION_KEYS as readonly string[],
+);
+
 // ── Role-pair directionality ────────────────────────────────────────
 
 /**
@@ -55,8 +58,6 @@ export const ALL_CONVERSATION_KEYS: readonly ConversationKey[] = [
  * send-time calls in `app-client.ts`.
  *
  * Invariant 6: directionality is declared here, not at the receive site.
- * Receivers trust the key; the send-set + the role-scoped manifest registered
- * with the server enforce the sender side.
  */
 export interface RolePairBinding {
   readonly key: ConversationKey;
@@ -67,32 +68,91 @@ export interface RolePairBinding {
 /**
  * The full binding table. Every entry is referenced by at least one role's
  * manifest; every key appears exactly once.
+ *
+ * Exhaustiveness guard: constructed via a switch over `ConversationKey` so
+ * adding a new key is a compile-time error if its row is missing.
  */
+function buildBinding(key: ConversationKey): RolePairBinding {
+  switch (key) {
+    case "coord-orch-to-worker":
+      return {
+        key,
+        senders: new Set<SessionRole>(["orchestrator"]),
+        receivers: new Set<SessionRole>([
+          "architect",
+          "implementer",
+          "reviewer",
+        ]),
+      };
+    case "coord-worker-to-orch":
+      return {
+        key,
+        senders: new Set<SessionRole>([
+          "architect",
+          "implementer",
+          "reviewer",
+        ]),
+        receivers: new Set<SessionRole>(["orchestrator"]),
+      };
+    case "coord-architect-peer":
+      return {
+        key,
+        senders: new Set<SessionRole>(["architect"]),
+        receivers: new Set<SessionRole>(["architect"]),
+      };
+    case "coord-implementer-to-architect":
+      return {
+        key,
+        senders: new Set<SessionRole>(["implementer"]),
+        receivers: new Set<SessionRole>(["architect"]),
+      };
+    case "coord-review-to-author":
+      return {
+        key,
+        senders: new Set<SessionRole>(["reviewer"]),
+        receivers: new Set<SessionRole>(["architect", "implementer"]),
+      };
+    default:
+      return absurd(key);
+  }
+}
+
+const BINDINGS: readonly RolePairBinding[] = ALL_CONVERSATION_KEYS.map(
+  buildBinding,
+);
+
 export function getRolePairBindings(): readonly RolePairBinding[] {
-  throw new Error("not implemented");
+  return BINDINGS;
 }
 
 /**
  * Which keys a role of `role` may send on. Used to constrain
- * `ZapbotMoltZapApp.send(key, parts)` at the zapbot seam (pre-RPC). A role
- * that calls `send` with a key not in this set is rejected with
- * `KeyDisallowedForRole` before any `messages/send` RPC is attempted.
+ * `sendOnKey(key, parts)` at the zapbot seam (pre-RPC). A role that calls
+ * `send` with a key not in this set is rejected with `KeyDisallowedForRole`
+ * before any `messages/send` RPC is attempted.
  */
 export function sendableKeysForRole(
   role: SessionRole,
 ): ReadonlySet<ConversationKey> {
-  throw new Error("not implemented");
+  const out = new Set<ConversationKey>();
+  for (const b of BINDINGS) {
+    if (b.senders.has(role)) out.add(b.key);
+  }
+  return out;
 }
 
 /**
  * Which keys a role of `role` may receive on. Used to decide which
- * `app.onMessage(key, handler)` registrations are allowed at boot in
- * `app-client.ts`.
+ * `app.onMessage(key, handler)` registrations are allowed at boot.
  */
 export function receivableKeysForRole(
   role: SessionRole,
 ): ReadonlySet<ConversationKey> {
-  throw new Error("not implemented");
+  const out = new Set<ConversationKey>();
+  for (const b of BINDINGS) {
+    if (b.receivers.has(role)) out.add(b.key);
+  }
+  return out;
 }
 
 // ── Decode ──────────────────────────────────────────────────────────
@@ -106,5 +166,8 @@ export type ConversationKeyDecodeError = {
 export function decodeConversationKey(
   raw: string,
 ): ConversationKey | ConversationKeyDecodeError {
-  throw new Error("not implemented");
+  if (typeof raw !== "string" || !CONVERSATION_KEY_SET.has(raw)) {
+    return { _tag: "UnknownConversationKey", raw: String(raw) };
+  }
+  return raw as ConversationKey;
 }

@@ -1,15 +1,24 @@
 /**
  * moltzap/runtime — zapbot-side MoltZap config + session provisioning.
  *
+ * Anchors: sbd#170 SPEC rev 2, §8 "preserved modules"; Invariants 3, 4.
+ *
  * This module owns two boundaries only:
  *   1. Decode zapbot env/config into a typed MoltZap runtime config.
  *   2. Materialize the `MOLTZAP_*` env a spawned `ao` session should receive.
  *
- * Implementation lands in the implement-* phase. Architect stage exports the
- * public shape only.
+ * Per spec rev 2 §3 Non-goal 4, the `MoltzapStatic` variant is removed; only
+ * `MoltzapDisabled` and `MoltzapRegistration` remain. Per Invariant 4, the
+ * registration secret is NEVER materialized into a worker's spawn env — the
+ * bridge mints per-session agent credentials via `POST /api/v1/auth/register`
+ * and hands the worker ONLY its minted `apiKey`.
+ *
+ * Per spec §5, sender-admission via `MOLTZAP_ALLOWED_SENDERS` is also
+ * removed: admission is server-enforced via `AppManifest.participantFilter`
+ * + `permissions`. The spawn env no longer carries an allowlist CSV.
  */
 
-import { err, ok } from "../types.ts";
+import { absurd, err, ok } from "../types.ts";
 import type {
   AoSessionName,
   IssueNumber,
@@ -17,8 +26,6 @@ import type {
   RepoFullName,
   Result,
 } from "../types.ts";
-import { fromSenderIds, type SenderAllowlist } from "./identity-allowlist.ts";
-import { asMoltzapSenderId } from "./types.ts";
 
 export interface MoltzapSpawnContext {
   readonly repo: RepoFullName;
@@ -30,18 +37,9 @@ export interface MoltzapSpawnContext {
 export type MoltzapRuntimeConfig =
   | { readonly _tag: "MoltzapDisabled" }
   | {
-      readonly _tag: "MoltzapStatic";
-      readonly serverUrl: string;
-      readonly apiKey: string;
-      readonly allowlistCsv: string | null;
-      readonly allowlist: SenderAllowlist;
-    }
-  | {
       readonly _tag: "MoltzapRegistration";
       readonly serverUrl: string;
       readonly registrationSecret: string;
-      readonly allowlistCsv: string | null;
-      readonly allowlist: SenderAllowlist;
     };
 
 export type MoltzapConfigError = {
@@ -58,45 +56,42 @@ export function loadMoltzapRuntimeConfig(
   env: Record<string, string | undefined>,
 ): Result<MoltzapRuntimeConfig, MoltzapConfigError> {
   const serverUrl = normalizeEnvVar(env.ZAPBOT_MOLTZAP_SERVER_URL);
-  const apiKey = normalizeEnvVar(env.ZAPBOT_MOLTZAP_API_KEY);
-  const registrationSecret = normalizeEnvVar(env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET);
-  const allowlistCsv = normalizeCsv(env.ZAPBOT_MOLTZAP_ALLOWED_SENDERS);
-  const allowlist = fromSenderIds(parseAllowlist(allowlistCsv));
+  const registrationSecret = normalizeEnvVar(
+    env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET,
+  );
+  const legacyApiKey = normalizeEnvVar(env.ZAPBOT_MOLTZAP_API_KEY);
 
   if (serverUrl === null) {
-    if (apiKey !== null || registrationSecret !== null) {
+    if (registrationSecret !== null || legacyApiKey !== null) {
       return err({
         _tag: "MoltzapConfigInvalid",
-        reason: "ZAPBOT_MOLTZAP_SERVER_URL is required when MoltZap auth is configured.",
+        reason:
+          "ZAPBOT_MOLTZAP_SERVER_URL is required when MoltZap auth is configured.",
       });
     }
     return ok({ _tag: "MoltzapDisabled" });
   }
 
-  if (registrationSecret !== null) {
-    return ok({
-      _tag: "MoltzapRegistration",
-      serverUrl,
-      registrationSecret,
-      allowlistCsv,
-      allowlist,
+  if (legacyApiKey !== null && registrationSecret === null) {
+    return err({
+      _tag: "MoltzapConfigInvalid",
+      reason:
+        "ZAPBOT_MOLTZAP_API_KEY (MoltzapStatic) is deprecated by spec rev 2; set ZAPBOT_MOLTZAP_REGISTRATION_SECRET instead.",
     });
   }
 
-  if (apiKey !== null) {
-    return ok({
-      _tag: "MoltzapStatic",
-      serverUrl,
-      apiKey,
-      allowlistCsv,
-      allowlist,
+  if (registrationSecret === null) {
+    return err({
+      _tag: "MoltzapConfigInvalid",
+      reason:
+        "Set ZAPBOT_MOLTZAP_REGISTRATION_SECRET when ZAPBOT_MOLTZAP_SERVER_URL is configured.",
     });
   }
 
-  return err({
-    _tag: "MoltzapConfigInvalid",
-    reason:
-      "Set either ZAPBOT_MOLTZAP_API_KEY or ZAPBOT_MOLTZAP_REGISTRATION_SECRET when ZAPBOT_MOLTZAP_SERVER_URL is configured.",
+  return ok({
+    _tag: "MoltzapRegistration",
+    serverUrl,
+    registrationSecret,
   });
 }
 
@@ -107,8 +102,6 @@ export async function buildMoltzapSpawnEnv(
   switch (config._tag) {
     case "MoltzapDisabled":
       return ok({});
-    case "MoltzapStatic":
-      return ok(toSpawnEnv(config.serverUrl, config.apiKey, config.allowlistCsv));
     case "MoltzapRegistration":
       return registerSessionAgent(config, ctx);
     default:
@@ -117,9 +110,12 @@ export async function buildMoltzapSpawnEnv(
 }
 
 /**
- * Materialize the MoltZap-related parent-process env that `ao start` / `ao spawn`
- * should inherit before the session-local Claude channel server provisions its
- * own runtime identity.
+ * Materialize the MoltZap-related parent-process env that the bridge's own
+ * boot inherits. This is the BRIDGE process env — it legitimately carries
+ * `MOLTZAP_REGISTRATION_SECRET` because the bridge is the only process that
+ * calls `POST /auth/register` to mint worker credentials.
+ *
+ * Workers receive their env from `buildMoltzapSpawnEnv` (no secret).
  */
 export function buildMoltzapProcessEnv(
   config: MoltzapRuntimeConfig,
@@ -127,21 +123,10 @@ export function buildMoltzapProcessEnv(
   switch (config._tag) {
     case "MoltzapDisabled":
       return {};
-    case "MoltzapStatic":
-      return {
-        MOLTZAP_SERVER_URL: config.serverUrl,
-        MOLTZAP_API_KEY: config.apiKey,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
-      };
     case "MoltzapRegistration":
       return {
         MOLTZAP_SERVER_URL: config.serverUrl,
         MOLTZAP_REGISTRATION_SECRET: config.registrationSecret,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
       };
     default:
       return absurd(config);
@@ -197,15 +182,15 @@ async function registerSessionAgent(
     });
   }
 
-  const apiKey = decodeRegistrationResponse(payload);
-  if (apiKey === null) {
+  const decoded = decodeRegistrationResponse(payload);
+  if (decoded === null) {
     return err({
       _tag: "MoltzapProvisionFailed",
       cause: "registration response missing string apiKey or agentId.",
     });
   }
 
-  return ok(toSpawnEnv(config.serverUrl, apiKey.apiKey, config.allowlistCsv, apiKey.agentId));
+  return ok(toSpawnEnv(config.serverUrl, decoded.apiKey, decoded.agentId));
 }
 
 function decodeRegistrationResponse(
@@ -228,45 +213,19 @@ function decodeRegistrationResponse(
 function toSpawnEnv(
   serverUrl: string,
   apiKey: string,
-  allowlistCsv: string | null,
-  localSenderId?: string,
+  localSenderId: string,
 ): Record<string, string> {
-  const env: Record<string, string> = {
+  return {
     MOLTZAP_SERVER_URL: serverUrl,
     MOLTZAP_API_KEY: apiKey,
+    MOLTZAP_LOCAL_SENDER_ID: localSenderId,
   };
-  if (typeof localSenderId === "string" && localSenderId.length > 0) {
-    env.MOLTZAP_LOCAL_SENDER_ID = localSenderId;
-  }
-  if (allowlistCsv !== null) {
-    env.MOLTZAP_ALLOWED_SENDERS = allowlistCsv;
-  }
-  return env;
-}
-
-function parseAllowlist(allowlistCsv: string | null) {
-  if (allowlistCsv === null) return [];
-  return allowlistCsv
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0)
-    .map((value) => asMoltzapSenderId(value));
 }
 
 function normalizeEnvVar(raw: string | undefined): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function normalizeCsv(raw: string | undefined): string | null {
-  const trimmed = normalizeEnvVar(raw);
-  if (trimmed === null) return null;
-  const parts = trimmed
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-  return parts.length > 0 ? parts.join(",") : null;
 }
 
 function toHttpBaseUrl(serverUrl: string): string {
@@ -277,7 +236,8 @@ function toHttpBaseUrl(serverUrl: string): string {
 }
 
 function buildAgentName(ctx: MoltzapSpawnContext): string {
-  const raw = `zb-${ctx.projectName as unknown as string}-${ctx.issue}-${shortSuffix()}`.toLowerCase();
+  const raw =
+    `zb-${ctx.projectName as unknown as string}-${ctx.issue}-${shortSuffix()}`.toLowerCase();
   const sanitized = raw
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/[-_]{2,}/g, "-")
@@ -299,8 +259,4 @@ function shortSuffix(): string {
 
 function stringifyCause(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function absurd(x: never): never {
-  throw new Error(`unreachable: ${JSON.stringify(x)}`);
 }

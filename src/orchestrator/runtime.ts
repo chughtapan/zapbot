@@ -13,12 +13,15 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fromSenderIds } from "../moltzap/identity-allowlist.ts";
-import { extendAllowlistForRole } from "../moltzap/role-topology.ts";
+import {
+  buildMoltzapSpawnEnv,
+  loadMoltzapRuntimeConfig,
+  type MoltzapRuntimeConfig,
+} from "../moltzap/runtime.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
-import { err, ok } from "../types.ts";
+import { asIssueNumber, err, ok } from "../types.ts";
 import type { OrchestratorControlPrompt } from "./control-event.ts";
 import type {
   RosterId,
@@ -464,19 +467,32 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
 //
 // Bind the typed RosterManager interface to the AO CLI. `spawnSession`
 // invokes `bun run bin/ao-spawn-with-moltzap.ts` under the hood so the
-// spawned worker carries its MoltZap identity; `retireSession` issues
-// `ao kill`. `bindAllowlistFor` uses `extendAllowlistForRole` from the
-// topology module. `clock` defaults to `Date.now`.
+// spawned worker carries its MoltZap identity via
+// `buildMoltzapSpawnEnv` (spec rev 2 Invariants 3 + 4). `retireSession`
+// issues `ao kill`. `clock` defaults to `Date.now`.
 //
 // Callers: `createRosterManager(createAoCliRosterManagerDeps(opts, {...}))`.
 
 export interface AoCliRosterManagerOptions {
   /**
-   * Orchestrator sender identity. Seeded into every worker's base
-   * allowlist so workers accept inbound messages from the orchestrator;
-   * `extendAllowlistForRole` unions per-role peers on top of this seed.
+   * Orchestrator sender identity. Carried for observability; the bridge
+   * uses it when seeding the MCP adapter's `orchestratorSenderId` so
+   * worker-side MCP notifications stamp a reply target.
    */
   readonly orchestratorSenderId: MoltzapSenderId;
+  /**
+   * MoltZap runtime config (bridge-side). Workers receive their MoltZap
+   * env via `buildMoltzapSpawnEnv`, which is the same primitive
+   * `src/ao/dispatcher.ts:91` uses — Invariant 3 (no duplicate
+   * provisioning paths). `MOLTZAP_REGISTRATION_SECRET` never reaches a
+   * worker (Invariant 4).
+   */
+  readonly moltzap: MoltzapRuntimeConfig;
+  /**
+   * The repo the bridge is running for; carried into `MoltzapSpawnContext`
+   * so the bridge-minted worker agent name embeds a project-scoped prefix.
+   */
+  readonly repo: import("../types.ts").RepoFullName;
 }
 
 /**
@@ -601,20 +617,32 @@ export function createAoCliRosterManagerDeps(
           + `your acceptance criteria and publish durable artifacts to GitHub.`,
       ].join("\n");
 
-      // Architect plan §2.3: spawn through `bin/ao-spawn-with-moltzap.ts`
-      // so the worker carries its MoltZap identity. `ao spawn` directly
-      // bypasses the MoltZap bootstrap and leaves the worker without a
-      // peer-channel back to the orchestrator.
+      // Spec rev 2 §5 + Invariant 3: roster-spawn MUST go through the same
+      // provisioning primitive the webhook-dispatch path uses
+      // (`buildMoltzapSpawnEnv`). That primitive mints a per-session
+      // worker apiKey via `POST /api/v1/auth/register` using the bridge's
+      // own `MOLTZAP_REGISTRATION_SECRET`; the worker receives ONLY its
+      // minted apiKey — never the secret (Invariant 4).
       //
-      // Allowlist propagation (Invariant 3 / SPEC §5(c)): we serialize
-      // every peer senderId the spawned worker will need to accept
-      // inbound messages from, into MOLTZAP_ALLOWED_SENDERS. The wrapper
-      // (ao-spawn-with-moltzap.ts) reads that env at worker boot.
-      const allowedSenderIds = new Set<string>([
-        rosterOptions.orchestratorSenderId as string,
-      ]);
-      for (const ids of peers.values()) {
-        for (const id of ids) allowedSenderIds.add(id as string);
+      // Per-role admission is server-enforced via `AppManifest.participantFilter`
+      // + `permissions` (spec §5); the legacy `MOLTZAP_ALLOWED_SENDERS`
+      // env is removed — the `peers` map is still threaded so the caller
+      // can surface the session's invitedAgentIds at `apps/create` time.
+      void peers;
+      const sessionNameGuess = `${projectName as string}-${member.displayLabel}` as AoSessionName;
+      const moltzapEnv = await buildMoltzapSpawnEnv(rosterOptions.moltzap, {
+        repo: rosterOptions.repo,
+        issue: asIssueNumber(Number(rosterId as string) || 0),
+        projectName,
+        session: sessionNameGuess,
+      });
+      if (moltzapEnv._tag === "Err") {
+        return err({
+          _tag: "MemberSpawnFailed",
+          role: member.role,
+          displayLabel: member.displayLabel,
+          cause: `moltzap provisioning failed: ${moltzapEnv.error.cause}`,
+        });
       }
       const spawnResult = await runBunScript(
         options,
@@ -629,9 +657,7 @@ export function createAoCliRosterManagerDeps(
           "--project",
           projectName as string,
         ],
-        {
-          MOLTZAP_ALLOWED_SENDERS: [...allowedSenderIds].join(","),
-        },
+        moltzapEnv.value,
       );
       if (spawnResult._tag === "Err") {
         return err({
@@ -707,14 +733,6 @@ export function createAoCliRosterManagerDeps(
         });
       }
       return ok(undefined);
-    },
-    bindAllowlistFor: (member, peers) => {
-      // Seed the base with the orchestrator's senderId so every worker
-      // accepts inbound messages from the orchestrator; extendAllowlistForRole
-      // unions per-role peers on top (Invariant 3).
-      const base = fromSenderIds([rosterOptions.orchestratorSenderId]);
-      const extended = extendAllowlistForRole(base, member.role, peers);
-      return ok(extended);
     },
     clock: () => Date.now(),
   };
