@@ -1,32 +1,22 @@
 /**
- * moltzap/session-client — load `MOLTZAP_*` env inside an AO session and
- * connect an authenticated MoltZap client.
+ * moltzap/session-client — decode `MOLTZAP_*` env into a typed struct
+ * the bin entry can hand to `@moltzap/claude-code-channel`.
  *
- * Architect phase only: public surface, no implementation.
+ * After the sbd#172 transplant, the "connector" abstraction (opaque SDK
+ * handle + connect/disconnect) is obsolete — `@moltzap/client`'s
+ * `MoltZapService` replaces it wholesale. Only the role-aware env decode
+ * stays on zapbot (research verdict §(b) STAYS row 2).
  */
 
 import type { Result } from "../types.ts";
 import { err, ok } from "../types.ts";
-import type { MoltzapSdkHandle, MoltzapSenderId } from "./types.ts";
+import type { MoltzapSenderId } from "./types.ts";
 import { asMoltzapSenderId } from "./types.ts";
 
 /**
- * Binary boot-endpoint role (orchestrator vs. worker). This is the
- * COEXISTING, older role discriminant used at plugin-boot time by
- * `loadSessionClientEnv` / `connectSessionClient`. It is distinct from
- * the four-value `SessionRole` in `./session-role.ts` that governs
- * per-peer-channel addressing (SPEC r4.1 §5(a), architect plan #148 §2.1).
- *
- * Intentional coexistence: the new 4-value enum is additive; existing
- * `moltzap-*.test.ts` assert `role: "worker"` and stamina review
- * required those tests pass unchanged. Future collapse path: when
- * every boot caller has migrated to declaring a WorkerRole
- * ("architect" | "implementer" | "reviewer") at the boot seam, this
- * binary form can delete its "worker" arm and re-export from
- * `./session-role.ts` directly.
- *
- * DO NOT USE this type for peer-channel addressing; import
- * `SessionRole` from `./session-role.ts` for that.
+ * Binary boot-endpoint role (orchestrator vs. worker). Distinct from
+ * `SessionRole` in `./session-role.ts`, which governs peer-channel
+ * addressing. See original zap#133 doctrine for the intentional coexistence.
  */
 export type SessionRole = "orchestrator" | "worker";
 
@@ -39,39 +29,12 @@ export interface SessionClientEnv {
   readonly allowlistCsv: string | null;
 }
 
-export interface SessionClientHandle {
-  readonly role: SessionRole;
-  readonly normalizedServerUrl: string;
-  readonly sdk: MoltzapSdkHandle;
-  readonly localSenderId: MoltzapSenderId;
-  readonly orchestratorSenderId: MoltzapSenderId | null;
-  readonly close: () => Promise<Result<void, SessionClientDisconnectError>>;
-}
-
-export interface SessionClientConnector {
-  readonly connect: (
-    env: SessionClientEnv,
-  ) => Promise<Result<MoltzapSdkHandle, Extract<SessionClientConnectError, { readonly _tag: "ConnectFailed" }>>>;
-  readonly disconnect: (
-    sdk: MoltzapSdkHandle,
-  ) => Promise<Result<void, SessionClientDisconnectError>>;
-}
-
 export type SessionClientConfigError =
   | { readonly _tag: "MissingServerUrl" }
   | { readonly _tag: "MissingApiKey" }
   | { readonly _tag: "MissingLocalSenderId" }
   | { readonly _tag: "MissingOrchestratorSenderId"; readonly role: "worker" }
   | { readonly _tag: "InvalidServerUrl"; readonly value: string };
-
-export type SessionClientConnectError =
-  | { readonly _tag: "ConnectFailed"; readonly cause: string }
-  | { readonly _tag: "IdentityUnavailable"; readonly reason: string };
-
-export type SessionClientDisconnectError = {
-  readonly _tag: "DisconnectFailed";
-  readonly cause: string;
-};
 
 /**
  * Decode the role-specific `MOLTZAP_*` environment for the current AO session.
@@ -112,39 +75,6 @@ export function loadSessionClientEnv(
   });
 }
 
-/**
- * Connect an authenticated MoltZap client for the current AO session.
- */
-export async function connectSessionClient(
-  env: SessionClientEnv,
-  connector: SessionClientConnector,
-): Promise<Result<SessionClientHandle, SessionClientConnectError>> {
-  const connected = await connector.connect(env);
-  if (connected._tag === "Err") {
-    return err(connected.error);
-  }
-  if (env.localSenderId.trim().length === 0) {
-    return err({
-      _tag: "IdentityUnavailable",
-      reason: "local sender identity is empty after config decode",
-    });
-  }
-  if (env.role === "worker" && env.orchestratorSenderId === null) {
-    return err({
-      _tag: "IdentityUnavailable",
-      reason: "worker session is missing orchestrator sender identity",
-    });
-  }
-  return ok({
-    role: env.role,
-    normalizedServerUrl: env.serverUrl,
-    sdk: connected.value,
-    localSenderId: env.localSenderId,
-    orchestratorSenderId: env.orchestratorSenderId,
-    close: () => connector.disconnect(connected.value),
-  });
-}
-
 function normalizeEnvVar(raw: string | undefined): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
@@ -165,7 +95,7 @@ function normalizeCsv(raw: string | undefined): string | null {
 function normalizeServerUrl(raw: string): string | null {
   try {
     const url = new URL(raw);
-    if (!["ws:", "wss:", "http:", "https:"].includes(url.protocol)) {
+    if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
       return null;
     }
     if (url.pathname === "/ws" || url.pathname === "/ws/") {
@@ -173,8 +103,8 @@ function normalizeServerUrl(raw: string): string | null {
     } else if (url.pathname.endsWith("/ws")) {
       url.pathname = url.pathname.slice(0, -3) || "/";
     }
-    const normalizedPath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
-    return `${url.protocol}//${url.host}${normalizedPath}${url.search}${url.hash}`;
+    const pathname = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/, "");
+    return `${url.protocol}//${url.host}${pathname}${url.search}${url.hash}`;
   } catch {
     return null;
   }

@@ -8,14 +8,10 @@ import {
   type PeerChannelKind,
 } from "../src/moltzap/role-topology.ts";
 import {
+  checkSender,
   fromSenderIds,
-  gateInbound,
 } from "../src/moltzap/identity-allowlist.ts";
-import {
-  asMoltzapConversationId,
-  asMoltzapMessageId,
-  asMoltzapSenderId,
-} from "../src/moltzap/types.ts";
+import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import type { SessionRole } from "../src/moltzap/session-role.ts";
 
 const ROLES: readonly SessionRole[] = [
@@ -153,18 +149,11 @@ describe("role-topology.extendAllowlistForRole", () => {
     // Architect receives: orchestrator-to-worker (from orchestrator),
     // architect-peer (from architect). Implementer & reviewer follow-up
     // reach architect too.
-    const makeEvent = (senderId: string) => ({
-      messageId: asMoltzapMessageId("m"),
-      conversationId: asMoltzapConversationId("c"),
-      senderId: asMoltzapSenderId(senderId),
-      bodyText: "hi",
-      receivedAtMs: 0,
-    });
-    expect(gateInbound(extended, makeEvent("peer-o"))._tag).toBe("Ok");
-    expect(gateInbound(extended, makeEvent("peer-a1"))._tag).toBe("Ok");
-    expect(gateInbound(extended, makeEvent("peer-a2"))._tag).toBe("Ok");
-    // Base allowlist entries are preserved.
-    expect(gateInbound(extended, makeEvent("base-o"))._tag).toBe("Ok");
+    const ctx = { conversationId: "c", messageId: "m" };
+    expect(checkSender(extended, asMoltzapSenderId("peer-o"), ctx)._tag).toBe("Ok");
+    expect(checkSender(extended, asMoltzapSenderId("peer-a1"), ctx)._tag).toBe("Ok");
+    expect(checkSender(extended, asMoltzapSenderId("peer-a2"), ctx)._tag).toBe("Ok");
+    expect(checkSender(extended, asMoltzapSenderId("base-o"), ctx)._tag).toBe("Ok");
   });
 
   it("does not leak peers to a role that cannot receive from them", () => {
@@ -175,14 +164,12 @@ describe("role-topology.extendAllowlistForRole", () => {
       ["architect", [asMoltzapSenderId("peer-a")]],
     ] as const);
     const extended = extendAllowlistForRole(base, "reviewer", peers);
-    const evt = {
-      messageId: asMoltzapMessageId("m"),
-      conversationId: asMoltzapConversationId("c"),
-      senderId: asMoltzapSenderId("peer-a"),
-      bodyText: "",
-      receivedAtMs: 0,
-    };
-    expect(gateInbound(extended, evt)._tag).toBe("Err");
+    expect(
+      checkSender(extended, asMoltzapSenderId("peer-a"), {
+        conversationId: "c",
+        messageId: "m",
+      })._tag,
+    ).toBe("Err");
   });
 
   it("does not mutate the base allowlist", () => {
@@ -191,14 +178,11 @@ describe("role-topology.extendAllowlistForRole", () => {
       ["orchestrator", [asMoltzapSenderId("peer-o")]],
     ] as const);
     extendAllowlistForRole(base, "architect", peers);
-    // peer-o was not in the base — gate should still reject on `base`.
-    const evt = {
-      messageId: asMoltzapMessageId("m"),
-      conversationId: asMoltzapConversationId("c"),
-      senderId: asMoltzapSenderId("peer-o"),
-      bodyText: "",
-      receivedAtMs: 0,
-    };
-    expect(gateInbound(base, evt)._tag).toBe("Err");
+    expect(
+      checkSender(base, asMoltzapSenderId("peer-o"), {
+        conversationId: "c",
+        messageId: "m",
+      })._tag,
+    ).toBe("Err");
   });
 });

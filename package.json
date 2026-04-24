@@ -24,10 +24,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@moltzap/claude-code-channel": "^0.1.0",
     "@moltzap/client": "2026.414.0",
     "@octokit/auth-app": "^8.2.0",
     "@octokit/rest": "^22.0.1",
-    "effect": "3.21.1",
+    "effect": "3.21.0",
     "yaml": "^2.8.3"
   }
 }

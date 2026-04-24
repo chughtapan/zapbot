@@ -4,33 +4,28 @@
  * Anchors: spec moltzap-channel-v1 §4 I1, §5.1 AC1.2, §5.2 AC2.2; sub-issue
  * zap#133 architect decision (option b).
  *
- * The bridge's LISTENING gate (`moltzap/bridge.onInbound`) closes I3
- * (presence). It does NOT close I1 (sender-authenticated inbound). Spec I1
- * names an ungated path as a prompt-injection vector; AC1.2 requires a
- * sender-identity allowlist check. This module is that gate, separate from
- * the lifecycle gate by design — two invariants, two gates.
+ * Historical context: before sbd#172, the allowlist lived behind a
+ * zapbot-local bridge that consumed a zapbot-local `MoltzapInbound`. After
+ * the extraction into `@moltzap/claude-code-channel`, the channel exposes
+ * a `gateInbound` hook that takes upstream's `EnrichedInboundMessage`.
+ * `buildSenderAllowlistGate` is the adapter zapbot uses to wire this
+ * module into the upstream hook shape while keeping the allowlist's
+ * storage, role-extension, and test surface local.
  *
- * Composition: plugin boot calls `gateInbound` before `bridge.onInbound`.
  * Non-allowlisted events return `SenderNotAllowed` and are dropped with a
  * diagnostic at the caller. No turn in the Claude session, no transcript
  * side effect (AC1.2).
  */
 
+import type {
+  AllowlistError as UpstreamAllowlistError,
+  GateInbound as UpstreamGateInbound,
+} from "@moltzap/claude-code-channel";
 import type { Result } from "../types.ts";
 import { err, ok } from "../types.ts";
-import type {
-  MoltzapInbound,
-  MoltzapInboundMeta,
-  MoltzapSenderId,
-} from "./types.ts";
+import type { MoltzapSenderId } from "./types.ts";
 
 // ── Allowlist handle ────────────────────────────────────────────────
-//
-// Opaque branded type. Constructed once at plugin boot from a configured set
-// of sender IDs (config source is impl-junior's choice — env, JSON, etc. —
-// per OQ1). Frozen for the lifetime of the plugin process; reload requires
-// restart (OQ3). The caller never mutates or inspects the underlying set;
-// only `fromSenderIds` constructs and `gateInbound` checks.
 
 export interface SenderAllowlist {
   readonly __brand: "SenderAllowlist";
@@ -52,50 +47,73 @@ export function fromSenderIds(ids: readonly MoltzapSenderId[]): SenderAllowlist 
 /**
  * Extract the sender-id set from an opaque allowlist. Used by
  * `role-topology.extendAllowlistForRole` to union the base entries with
- * per-role peer additions. Consumers outside this module should treat the
- * allowlist as opaque; this accessor is the one authorised seam.
+ * per-role peer additions.
  */
 export function toSenderIds(list: SenderAllowlist): readonly MoltzapSenderId[] {
   const internal = list as SenderAllowlistInternal;
   return [...internal[ALLOWLIST]] as unknown as readonly MoltzapSenderId[];
 }
 
-// ── Error channel ───────────────────────────────────────────────────
+// ── Error channel (zapbot-local) ────────────────────────────────────
 
 export type AllowlistError = {
   readonly _tag: "SenderNotAllowed";
   readonly senderId: MoltzapSenderId;
-  readonly event: MoltzapInboundMeta;
+  readonly conversationId: string;
+  readonly messageId: string;
 };
 
-// ── Gate ────────────────────────────────────────────────────────────
+// ── Gate (zapbot-local shape) ───────────────────────────────────────
 
 /**
- * Check an inbound event against the configured allowlist.
- *
- * Ok(event)            — sender is on the allowlist; caller forwards to
- *                         `bridge.onInbound`.
- * Err(SenderNotAllowed) — sender is NOT on the allowlist; caller drops
- *                         (logs a diagnostic, does not forward to bridge).
- *
- * Pure; synchronous; O(1) set membership. No side effects.
+ * Check a sender against the configured allowlist.
+ * Pure; synchronous; O(1) set membership.
  */
-export function gateInbound(
+export function checkSender(
   allowlist: SenderAllowlist,
-  event: MoltzapInbound,
-): Result<MoltzapInbound, AllowlistError> {
+  senderId: MoltzapSenderId,
+  context: { readonly conversationId: string; readonly messageId: string },
+): Result<void, AllowlistError> {
   const values = (allowlist as SenderAllowlistInternal)[ALLOWLIST];
-  if (values.has(event.senderId)) {
-    return ok(event);
+  if (values.has(senderId)) {
+    return ok(undefined);
   }
   return err({
     _tag: "SenderNotAllowed",
-    senderId: event.senderId,
-    event: {
-      messageId: event.messageId,
-      conversationId: event.conversationId,
-      senderId: event.senderId,
-      receivedAtMs: event.receivedAtMs,
-    },
+    senderId,
+    conversationId: context.conversationId,
+    messageId: context.messageId,
   });
+}
+
+// ── Adapter: wire zapbot allowlist → upstream GateInbound ───────────
+
+/**
+ * Build a `GateInbound` hook conforming to `@moltzap/claude-code-channel`'s
+ * public surface, backed by a zapbot-local `SenderAllowlist`. Pure,
+ * synchronous. On rejection, returns `UpstreamAllowlistError.SenderNotAllowed`
+ * with a human-readable `reason` so upstream's logger can diagnose.
+ */
+export function buildSenderAllowlistGate(
+  allowlist: SenderAllowlist,
+): UpstreamGateInbound {
+  // The `UpstreamGateInbound` signature types `event` as upstream's
+  // `EnrichedInboundMessage`, which is nominally distinct from zapbot's
+  // own `@moltzap/client` copy's type because of the split
+  // published-vs-linked resolution. We deliberately let TypeScript infer
+  // the parameter here; the runtime shape (sender.id, conversationId, id)
+  // is identical and exercised by the upstream integration test.
+  const gate: UpstreamGateInbound = (event) => {
+    const values = (allowlist as SenderAllowlistInternal)[ALLOWLIST];
+    if (values.has(event.sender.id)) {
+      return { _tag: "Success", value: event };
+    }
+    const error: UpstreamAllowlistError = {
+      _tag: "SenderNotAllowed",
+      senderId: event.sender.id,
+      reason: `sender ${event.sender.id} not on allowlist (conversation=${event.conversationId}, message=${event.id})`,
+    };
+    return { _tag: "Failure", error };
+  };
+  return gate;
 }

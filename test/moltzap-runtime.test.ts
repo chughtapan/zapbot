@@ -11,12 +11,8 @@ import {
   asProjectName,
   asRepoFullName,
 } from "../src/types.ts";
-import { gateInbound } from "../src/moltzap/identity-allowlist.ts";
-import {
-  asMoltzapConversationId,
-  asMoltzapMessageId,
-  asMoltzapSenderId,
-} from "../src/moltzap/types.ts";
+import { checkSender } from "../src/moltzap/identity-allowlist.ts";
+import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -70,13 +66,11 @@ describe("moltzap runtime / loadMoltzapRuntimeConfig", () => {
     expect(result.value._tag).toBe("MoltzapRegistration");
     if (result.value._tag !== "MoltzapRegistration") return;
     expect(result.value.allowlistCsv).toBe("agent-a,agent-b");
-    const gate = gateInbound(result.value.allowlist, {
-      messageId: asMoltzapMessageId("m-1"),
-      conversationId: asMoltzapConversationId("conv-1"),
-      senderId: asMoltzapSenderId("agent-b"),
-      bodyText: "hello",
-      receivedAtMs: 1,
-    });
+    const gate = checkSender(
+      result.value.allowlist,
+      asMoltzapSenderId("agent-b"),
+      { conversationId: "conv-1", messageId: "m-1" },
+    );
     expect(gate._tag).toBe("Ok");
   });
 });

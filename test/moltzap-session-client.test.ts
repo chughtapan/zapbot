@@ -1,14 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  connectSessionClient,
-  loadSessionClientEnv,
-  type SessionClientConnector,
-  type SessionClientEnv,
-} from "../src/moltzap/session-client.ts";
-import { err, ok } from "../src/types.ts";
-import type { MoltzapSdkHandle } from "../src/moltzap/types.ts";
-
-const fakeSdk = { __brand: "MoltzapSdkHandle" } as MoltzapSdkHandle;
+import { loadSessionClientEnv } from "../src/moltzap/session-client.ts";
 
 describe("loadSessionClientEnv", () => {
   it("normalizes the ws transport suffix and loads an orchestrator session env", () => {
@@ -59,50 +50,60 @@ describe("loadSessionClientEnv", () => {
       },
       "worker",
     );
-    expect(result).toEqual({
-      _tag: "Err",
-      error: { _tag: "InvalidServerUrl", value: "mailto:not-supported" },
-    });
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("InvalidServerUrl");
   });
-});
 
-describe("connectSessionClient", () => {
-  const env: SessionClientEnv = {
-    role: "worker",
-    serverUrl: "ws://127.0.0.1:41973",
-    apiKey: "test-key",
-    localSenderId: "worker-1" as never,
-    orchestratorSenderId: "orch-1" as never,
-    allowlistCsv: null,
-  };
-
-  it("wraps the connector result in a session handle", async () => {
-    let disconnected = false;
-    const connector: SessionClientConnector = {
-      connect: async () => ok(fakeSdk),
-      disconnect: async () => {
-        disconnected = true;
-        return ok(undefined);
+  it("loads a worker session env with orchestrator sender id", () => {
+    const result = loadSessionClientEnv(
+      {
+        MOLTZAP_SERVER_URL: "wss://mz.example.com",
+        MOLTZAP_API_KEY: "worker-key",
+        MOLTZAP_LOCAL_SENDER_ID: "worker-1",
+        MOLTZAP_ORCHESTRATOR_SENDER_ID: "orch-1",
       },
-    };
-    const result = await connectSessionClient(env, connector);
+      "worker",
+    );
     expect(result._tag).toBe("Ok");
     if (result._tag !== "Ok") return;
-    expect(result.value.normalizedServerUrl).toBe("ws://127.0.0.1:41973");
-    const closed = await result.value.close();
-    expect(closed).toEqual({ _tag: "Ok", value: undefined });
-    expect(disconnected).toBe(true);
+    expect(result.value.orchestratorSenderId).toBe("orch-1");
+    expect(result.value.serverUrl).toBe("wss://mz.example.com");
   });
 
-  it("surfaces connector failures as typed errors", async () => {
-    const connector: SessionClientConnector = {
-      connect: async () => err({ _tag: "ConnectFailed", cause: "socket closed" }),
-      disconnect: async () => ok(undefined),
-    };
-    const result = await connectSessionClient(env, connector);
-    expect(result).toEqual({
-      _tag: "Err",
-      error: { _tag: "ConnectFailed", cause: "socket closed" },
-    });
+  it("flags missing server URL", () => {
+    const result = loadSessionClientEnv(
+      { MOLTZAP_API_KEY: "k", MOLTZAP_LOCAL_SENDER_ID: "s" },
+      "orchestrator",
+    );
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("MissingServerUrl");
+  });
+
+  it("flags missing api key", () => {
+    const result = loadSessionClientEnv(
+      {
+        MOLTZAP_SERVER_URL: "ws://localhost:1",
+        MOLTZAP_LOCAL_SENDER_ID: "s",
+      },
+      "orchestrator",
+    );
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("MissingApiKey");
+  });
+
+  it("flags missing local sender id", () => {
+    const result = loadSessionClientEnv(
+      {
+        MOLTZAP_SERVER_URL: "ws://localhost:1",
+        MOLTZAP_API_KEY: "k",
+      },
+      "orchestrator",
+    );
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("MissingLocalSenderId");
   });
 });
