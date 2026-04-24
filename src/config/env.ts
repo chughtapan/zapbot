@@ -72,9 +72,8 @@ export function resolveRuntimeEnv(
     });
   }
 
-  const publicUrl =
-    normalizeEnvValue(mergedEnv.ZAPBOT_BRIDGE_URL) ?? `http://localhost:${port}`;
-  const gatewayUrl = normalizeEnvValue(mergedEnv.ZAPBOT_GATEWAY_URL) ?? "";
+  const publicUrl = normalizeEnvValue(mergedEnv.ZAPBOT_BRIDGE_URL);
+  const gatewayUrl = normalizeEnvValue(mergedEnv.ZAPBOT_GATEWAY_URL);
   const gatewaySecret = normalizeEnvValue(mergedEnv.ZAPBOT_GATEWAY_SECRET);
   const botUsername = asBotUsername(
     normalizeEnvValue(mergedEnv.ZAPBOT_BOT_USERNAME) ?? "zapbot[bot]",

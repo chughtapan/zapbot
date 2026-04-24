@@ -3,6 +3,7 @@ import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.js";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.js";
 import { loadBridgeRuntimeConfig } from "../src/config/load.js";
 import { readConfigFiles, type ConfigDiskReader } from "../src/config/disk.js";
+import type { IngressPolicy } from "../src/config/ingress.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -33,11 +34,19 @@ const nodeDiskReader: ConfigDiskReader = {
   },
 };
 
+const localOnlyIngress: IngressPolicy = {
+  _tag: "LocalOnly",
+  mode: "local-only",
+  gatewayUrl: null,
+  publicUrl: null,
+  requiresReachablePublicUrl: false,
+};
+
 function buildRuntime(
   env: Record<string, string | undefined>,
 ) {
   const resolvedEnv = expectOk(resolveRuntimeEnv(env, null));
-  return expectOk(loadBridgeRuntimeConfig(resolvedEnv, null, null));
+  return expectOk(loadBridgeRuntimeConfig(resolvedEnv, null, null, localOnlyIngress));
 }
 
 describe("parseEnvFile", () => {

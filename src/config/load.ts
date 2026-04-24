@@ -15,6 +15,7 @@ import type {
   ProjectConfigDocument,
   ProjectRouteConfig,
 } from "./types.ts";
+import type { IngressPolicy } from "./ingress.ts";
 import type { RepoFullName } from "../types.ts";
 
 export function deriveConfigSourcePaths(
@@ -61,6 +62,7 @@ export function loadBridgeRuntimeConfig(
   env: NormalizedRuntimeEnv,
   _parsedEnvFile: ParsedEnvFile | null,
   document: ProjectConfigDocument | null,
+  ingress: IngressPolicy,
 ): Result<BridgeRuntimeConfig, ConfigLoadError> {
   const routeResult = buildRepoRoutes(document);
   if (routeResult._tag === "Err") return routeResult;
@@ -71,8 +73,9 @@ export function loadBridgeRuntimeConfig(
 
   return ok({
     port: env.port,
-    publicUrl: env.publicUrl,
-    gatewayUrl: env.gatewayUrl,
+    ingress,
+    publicUrl: ingress.publicUrl,
+    gatewayUrl: ingress.gatewayUrl,
     gatewaySecret: env.gatewaySecret,
     botUsername: env.botUsername,
     aoConfigPath: env.aoConfigPath,
