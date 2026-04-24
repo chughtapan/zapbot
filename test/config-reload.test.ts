@@ -315,7 +315,7 @@ describe("systemd integration: setup --server service generation", () => {
       .replace(/__ZAPBOT_DIR__/g, zapbotDir);
 
     expect(resolved).toContain(`WorkingDirectory=${projectDir}`);
-    expect(resolved).toContain(`EnvironmentFile=${projectDir}/.env`);
+    expect(resolved).toContain(`EnvironmentFile=-${projectDir}/.env`);
     expect(resolved).toContain(`ExecStart=/usr/bin/env bun ${zapbotDir}/bin/webhook-bridge.ts`);
     expect(resolved).not.toContain("__PROJECT_DIR__");
     expect(resolved).not.toContain("__ZAPBOT_DIR__");

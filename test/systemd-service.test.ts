@@ -32,9 +32,14 @@ describe("systemd service template", () => {
     expect(content).toContain("Restart=always");
   });
 
-  it("loads env file from project directory", () => {
+  it("loads secrets from config.json via ExecStartPre and keeps legacy .env as optional fallback", () => {
     const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("EnvironmentFile=__PROJECT_DIR__/.env");
+    expect(content).toContain("ExecStartPre=");
+    expect(content).toContain("config.json");
+    expect(content).toContain("ZAPBOT_WEBHOOK_SECRET");
+    expect(content).toContain("ZAPBOT_API_KEY");
+    // Legacy .env is optional (- prefix) so missing file does not abort the service
+    expect(content).toContain("EnvironmentFile=-__PROJECT_DIR__/.env");
   });
 
   it("runs webhook-bridge.ts via bun", () => {
@@ -48,7 +53,7 @@ describe("systemd service template", () => {
       .replace(/__PROJECT_DIR__/g, "/home/user/project")
       .replace(/__ZAPBOT_DIR__/g, "/home/user/.claude/skills/zapbot");
     expect(resolved).toContain("WorkingDirectory=/home/user/project");
-    expect(resolved).toContain("EnvironmentFile=/home/user/project/.env");
+    expect(resolved).toContain("EnvironmentFile=-/home/user/project/.env");
     expect(resolved).toContain("bun /home/user/.claude/skills/zapbot/bin/webhook-bridge.ts");
     expect(resolved).not.toContain("__");
   });
