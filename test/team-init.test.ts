@@ -10,10 +10,12 @@ const SCRIPT_PATH = join(REPO_ROOT, "bin", "zapbot-team-init");
 describe("zapbot-team-init", () => {
   let projectDir: string;
   let fakeBinDir: string;
+  let fakeHome: string;
 
   beforeEach(() => {
     projectDir = mkdtempSync(join(tmpdir(), "zapbot-team-init-project-"));
     fakeBinDir = mkdtempSync(join(tmpdir(), "zapbot-team-init-bin-"));
+    fakeHome = mkdtempSync(join(tmpdir(), "zapbot-team-init-home-"));
 
     writeExecutable(
       join(fakeBinDir, "gh"),
@@ -42,29 +44,32 @@ exit 1
   afterEach(() => {
     rmSync(projectDir, { recursive: true, force: true });
     rmSync(fakeBinDir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
   });
 
   it("writes config and env into the current project directory", () => {
-    execTeamInit(["owner/example-repo"], projectDir, fakeBinDir);
+    execTeamInit(["owner/example-repo"], projectDir, fakeBinDir, fakeHome);
 
     const configPath = join(projectDir, "agent-orchestrator.yaml");
-    const envPath = join(projectDir, ".env");
+    const configJsonPath = join(fakeHome, ".zapbot", "config.json");
 
     expect(existsSync(configPath)).toBe(true);
-    expect(existsSync(envPath)).toBe(true);
+    expect(existsSync(configJsonPath)).toBe(true);
 
     const config = readFileSync(configPath, "utf8");
     expect(config).toContain("repo: owner/example-repo");
     expect(config).toContain(`path: ${projectDir}`);
 
-    const env = readFileSync(envPath, "utf8");
-    expect(env).toContain("ZAPBOT_WEBHOOK_SECRET=");
-    expect(env).toContain("ZAPBOT_API_KEY=");
+    const configJson = JSON.parse(readFileSync(configJsonPath, "utf8")) as Record<string, unknown>;
+    expect(typeof configJson.webhookSecret).toBe("string");
+    expect((configJson.webhookSecret as string).length).toBeGreaterThan(0);
+    expect(typeof configJson.apiKey).toBe("string");
+    expect((configJson.apiKey as string).length).toBeGreaterThan(0);
   });
 
   it("appends add-repo entries to the project-local config file", () => {
-    execTeamInit(["owner/example-repo"], projectDir, fakeBinDir);
-    execTeamInit(["--add-repo", "owner/second-repo"], projectDir, fakeBinDir);
+    execTeamInit(["owner/example-repo"], projectDir, fakeBinDir, fakeHome);
+    execTeamInit(["--add-repo", "owner/second-repo"], projectDir, fakeBinDir, fakeHome);
 
     const config = readFileSync(join(projectDir, "agent-orchestrator.yaml"), "utf8");
     expect(config).toContain("repo: owner/example-repo");
@@ -72,11 +77,12 @@ exit 1
   });
 });
 
-function execTeamInit(args: string[], cwd: string, fakeBinDir: string): void {
+function execTeamInit(args: string[], cwd: string, fakeBinDir: string, fakeHome: string): void {
   execFileSync("bash", [SCRIPT_PATH, ...args], {
     cwd,
     env: {
       ...process.env,
+      HOME: fakeHome,
       PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
     },
     stdio: "pipe",
