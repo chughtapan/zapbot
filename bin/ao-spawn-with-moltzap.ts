@@ -31,6 +31,24 @@ if (rawArgs.length === 0) {
 // args.
 const { spawnArgs, sessionRole, displayLabel, projectArg } = partitionArgs(rawArgs);
 
+// `--role` is now required. The spawn wrapper is the single
+// construction point for `ZAPBOT_SESSION_ROLE`, and
+// `bin/moltzap-claude-channel.ts :: resolveRole()` fatals without it
+// (the legacy `AO_CALLER_TYPE=worker` fallback was removed — B4).
+// Failing here means the wrapper refuses to launch the `ao spawn`
+// subprocess at all, rather than letting AO succeed and having the
+// worker die at MoltZap channel boot.
+if (sessionRole === null) {
+  fatal(
+    "--role <orchestrator|architect|implementer|reviewer> is required; orchestrator spawns must thread member.role through the wrapper",
+  );
+}
+// Bind the narrowed value to a fresh const — TypeScript doesn't
+// propagate the `SessionRole | null` → `SessionRole` narrowing through
+// closure captures (`restartWorkerWithResume`), and `ZAPBOT_SESSION_ROLE`
+// must be a real role on both the initial-spawn and resume paths.
+const declaredRole: SessionRole = sessionRole;
+
 const moltzapEnvFile = readZapbotEnvFile();
 const MOLTZAP_ENV_FALLBACKS = {
   MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
@@ -39,7 +57,10 @@ const MOLTZAP_ENV_FALLBACKS = {
 
 const sessionDataDir = requireEnv("AO_DATA_DIR");
 const currentSession = requireEnv("AO_SESSION");
-const projectId = trimEnv(process.env.AO_PROJECT_ID) ?? projectArg ?? "zapbot";
+// Prefer the explicit `--project` flag over ambient `AO_PROJECT_ID`
+// so multi-project bridges cannot leak the orchestrator's own project
+// into a spawned worker's env and corrupt later AO status/kill routing.
+const projectId = projectArg ?? trimEnv(process.env.AO_PROJECT_ID) ?? "zapbot";
 const configPath = trimEnv(process.env.AO_CONFIG_PATH) ?? "";
 const orchestratorSenderId = resolveMetadataValue(
   currentSession,
@@ -65,7 +86,7 @@ const childEnv = buildWorkerEnv({
   apiKey,
   orchestratorSenderId,
   localSenderId: localSenderIdFromEnv ?? undefined,
-  sessionRole: sessionRole ?? undefined,
+  sessionRole: declaredRole,
 });
 
 const spawnedSession = await runAoSpawn(spawnArgs, childEnv);
@@ -383,7 +404,7 @@ async function restartWorkerWithResume(options: {
     apiKey: options.apiKey,
     orchestratorSenderId: options.orchestratorSenderId,
     localSenderId: options.localSenderId,
-    sessionRole: sessionRole ?? undefined,
+    sessionRole: declaredRole,
   });
 
   const command = [

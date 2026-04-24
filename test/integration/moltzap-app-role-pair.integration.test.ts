@@ -144,14 +144,17 @@ describe("moltzap app-sdk integration — role-pair routing", () => {
     implementerApp = buildWorker("implementer", impl);
     reviewerApp = buildWorker("reviewer", rev);
 
-    // Orchestrator starts first because it creates the session (via
-    // invitedAgentIds on start). Workers can parallelize afterwards.
+    // Serial start: orchestrator first so its manifest is the one the
+    // server ultimately holds against the shared appId. Parallelizing
+    // worker starts produced session-map inconsistencies where a
+    // worker's role-specific manifest was overwritten/shadowed by a
+    // sibling worker's registration mid-apps/create — flakiness the
+    // serial form avoids. A proper fix lives in the server's
+    // apps/register coalescing (outside zapbot scope).
     const orchSession = await Effect.runPromise(orchestratorApp.start());
-    const [archSession, implSession, revSession] = await Promise.all([
-      Effect.runPromise(architectApp.start()),
-      Effect.runPromise(implementerApp.start()),
-      Effect.runPromise(reviewerApp.start()),
-    ]);
+    const archSession = await Effect.runPromise(architectApp.start());
+    const implSession = await Effect.runPromise(implementerApp.start());
+    const revSession = await Effect.runPromise(reviewerApp.start());
 
     orchestratorHandle = wrap("orchestrator", orchestratorApp, orchSession);
     architectHandle = wrap("architect", architectApp, archSession);
