@@ -24,10 +24,15 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@moltzap/client": "2026.414.0",
+    "@moltzap/client": "file:./vendor/moltzap/client",
     "@octokit/auth-app": "^8.2.0",
     "@octokit/rest": "^22.0.1",
     "effect": "3.21.1",
-    "yaml": "^2.8.3"
+    "yaml": "^2.8.3",
+    "@moltzap/app-sdk": "file:./vendor/moltzap/app-sdk",
+    "@moltzap/protocol": "file:./vendor/moltzap/protocol",
+    "ajv": "^8.17.0",
+    "ajv-formats": "^3.0.0",
+    "@sinclair/typebox": "^0.34.0"
   }
 }
