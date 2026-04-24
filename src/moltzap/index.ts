@@ -20,3 +20,14 @@ export {
 } from "./session-client.ts";
 export * from "./session-role.ts";
 export * from "./role-topology.ts";
+
+// sbd#199 architect cycle (bridge identity per A+C(2) + zapbot#336 path b
+// + literal-string fallback removal). Stubs only; bodies are implemented
+// by the corresponding implement-staff PR. Carried alongside the sbd#186
+// stubs above so consumers can transition from `bootApp(role)` to
+// `bootBridgeApp` / `joinWorkerSession` in a single PR.
+export * from "./bridge-identity.ts";
+export * from "./bridge-app.ts";
+export * from "./worker-app.ts";
+export * from "./bridge-silence.ts";
+export * from "./union-manifest.ts";
