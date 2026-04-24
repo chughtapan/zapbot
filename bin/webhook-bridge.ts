@@ -52,7 +52,21 @@ interface LoadedBridgeInputs {
   readonly mergedEnv: Record<string, string | undefined>;
 }
 
-async function loadBridgeInputs(configPath: string | undefined): Promise<Result<LoadedBridgeInputs, { readonly reason: string }>> {
+async function probeHealthz(publicUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${publicUrl.replace(/\/+$/u, "")}/healthz`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function loadBridgeInputs(
+  configPath: string | undefined,
+  isPublicUrlReachable: (publicUrl: string) => Promise<boolean> = probeHealthz,
+): Promise<Result<LoadedBridgeInputs, { readonly reason: string }>> {
   const sourcePaths = deriveConfigSourcePaths(configPath);
   const rawFiles = readConfigFiles(sourcePaths, nodeDiskReader);
   if (rawFiles._tag === "Err") {
@@ -80,16 +94,7 @@ async function loadBridgeInputs(configPath: string | undefined): Promise<Result<
     mode: ingressMode,
     gatewayUrl: runtimeEnv.value.gatewayUrl ?? "",
     publicUrl: runtimeEnv.value.publicUrl,
-    isPublicUrlReachable: async (publicUrl) => {
-      try {
-        const response = await fetch(`${publicUrl.replace(/\/+$/u, "")}/healthz`, {
-          signal: AbortSignal.timeout(2_000),
-        });
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
+    isPublicUrlReachable,
   });
   if (ingress._tag === "Err") {
     return err({ reason: formatIngressError(ingress.error) });
@@ -192,7 +197,9 @@ function formatIngressError(error: { readonly _tag?: string; readonly mode?: str
 }
 
 async function main() {
-  const initialInputs = await loadBridgeInputs(process.env.ZAPBOT_CONFIG);
+  // Skip the reachability probe on initial load — the bridge isn't running yet
+  // so /healthz isn't open. We boot first, then probe the live endpoint below.
+  const initialInputs = await loadBridgeInputs(process.env.ZAPBOT_CONFIG, async () => true);
   if (initialInputs._tag === "Err") {
     console.error(`[bridge] ${initialInputs.error.reason}`);
     process.exit(1);
@@ -212,6 +219,18 @@ async function main() {
   log.info(`Ingress mode: ${cfg.ingress.mode}`);
 
   const running = await startBridge(cfg);
+
+  // Post-boot reachability probe — fires against the now-live /healthz endpoint.
+  // If the probe fails, tear down the bridge cleanly before exiting.
+  if (cfg.ingress.mode === "github-demo" && cfg.publicUrl !== null) {
+    const reachable = await probeHealthz(cfg.publicUrl);
+    if (!reachable) {
+      await running.stop();
+      console.error(`[bridge] ZAPBOT_BRIDGE_URL is unreachable: ${cfg.publicUrl}`);
+      process.exit(1);
+    }
+  }
+
   log.info(`Webhook bridge listening on ${cfg.ingress.mode === "github-demo" ? cfg.publicUrl : "local-only ingress"}`);
 
   let reloadInFlight = false;
@@ -223,7 +242,7 @@ async function main() {
     reloadInFlight = true;
     (async () => {
       try {
-        const nextInputs = await loadBridgeInputs(process.env.ZAPBOT_CONFIG);
+        const nextInputs = await loadBridgeInputs(process.env.ZAPBOT_CONFIG, probeHealthz);
         if (nextInputs._tag === "Err") {
           log.error(`Reload failed: ${nextInputs.error.reason}`);
           return;

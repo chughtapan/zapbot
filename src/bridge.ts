@@ -473,6 +473,13 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       server.stop();
     },
     async reload(nextConfig: BridgeConfig): Promise<void> {
+      // Stop stale heartbeat when ingress mode flips github-demo → local-only.
+      // registerAll returns early for local-only and never reaches the stopHeartbeat
+      // call inside it, so the old heartbeat would keep running indefinitely.
+      if (current.ingress.mode === "github-demo" && nextConfig.ingress.mode === "local-only") {
+        stopHeartbeat?.();
+        stopHeartbeat = null;
+      }
       current = nextConfig;
       aoControlHost = createAoCliControlHost({
         configPath: current.aoConfigPath,
