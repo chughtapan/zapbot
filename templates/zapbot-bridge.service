@@ -5,10 +5,9 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=__PROJECT_DIR__
-# Load secrets from ~/.zapbot/config.json (canonical path since sbd#160 / zap#320).
-# If a legacy .env still exists alongside config.json it is loaded as optional override.
-ExecStartPre=/bin/bash -c 'install -dm 700 /run/zapbot-bridge && jq -r "\"ZAPBOT_WEBHOOK_SECRET=\" + .webhookSecret, \"ZAPBOT_API_KEY=\" + .apiKey" "$HOME/.zapbot/config.json" > /run/zapbot-bridge/env'
-EnvironmentFile=/run/zapbot-bridge/env
+# Shared secrets (apiKey, webhookSecret) load from ~/.zapbot/config.json
+# inside the bridge itself. `.env` remains an optional override for legacy
+# operator env vars (e.g., MOLTZAP_*) during the broader migration.
 EnvironmentFile=-__PROJECT_DIR__/.env
 ExecStart=/usr/bin/env bun __ZAPBOT_DIR__/bin/webhook-bridge.ts
 ExecReload=/bin/kill -HUP $MAINPID

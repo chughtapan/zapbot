@@ -1,40 +1,45 @@
-import { dirname, join } from "path";
+import { join } from "path";
 import {
   asProjectName,
-  asRepoFullName,
-  err,
   ok,
   type Result,
 } from "../types.ts";
 import type {
   BridgeRuntimeConfig,
+  CanonicalConfigPath,
   ConfigLoadError,
   ConfigSourcePaths,
   NormalizedRuntimeEnv,
-  ParsedEnvFile,
   ProjectConfigDocument,
+  ProjectConfigPath,
   ProjectRouteConfig,
 } from "./types.ts";
 import type { IngressPolicy } from "./ingress.ts";
 import type { RepoFullName } from "../types.ts";
 
+function resolveCanonicalConfigPath(
+  env: Record<string, string | undefined>,
+): CanonicalConfigPath {
+  const override = env.ZAPBOT_CONFIG_JSON?.trim();
+  if (override !== undefined && override.length > 0) {
+    return override as CanonicalConfigPath;
+  }
+  const home = env.HOME ?? "";
+  return join(home, ".zapbot", "config.json") as CanonicalConfigPath;
+}
+
 export function deriveConfigSourcePaths(
   configPath: string | undefined,
+  env: Record<string, string | undefined> = process.env,
 ): ConfigSourcePaths {
-  if (!configPath) {
-    return {
-      envFilePath: null,
-      projectConfigPath: null,
-    };
-  }
-
-  const envFilePath = configPath.endsWith("agent-orchestrator.yaml")
-    ? configPath.replace(/agent-orchestrator\.yaml$/u, ".env")
-    : join(dirname(configPath), ".env");
+  const projectConfigPath =
+    configPath === undefined || configPath.length === 0
+      ? null
+      : (configPath as ProjectConfigPath);
 
   return {
-    envFilePath: envFilePath as ConfigSourcePaths["envFilePath"],
-    projectConfigPath: configPath as ConfigSourcePaths["projectConfigPath"],
+    projectConfigPath,
+    canonicalConfigPath: resolveCanonicalConfigPath(env),
   };
 }
 
@@ -60,7 +65,6 @@ export function buildRepoRoutes(
 
 export function loadBridgeRuntimeConfig(
   env: NormalizedRuntimeEnv,
-  _parsedEnvFile: ParsedEnvFile | null,
   document: ProjectConfigDocument | null,
   ingress: IngressPolicy,
 ): Result<BridgeRuntimeConfig, ConfigLoadError> {
@@ -105,3 +109,4 @@ function buildSingleRepoFallback(
     }],
   ]);
 }
+

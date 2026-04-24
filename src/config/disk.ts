@@ -1,4 +1,3 @@
-import { existsSync } from "fs";
 import { Schema } from "effect";
 import { parse as parseYaml } from "yaml";
 import {
@@ -73,7 +72,7 @@ function decodeProjectConfig(
   }
 }
 
-function formatSchemaCause(cause: unknown): string {
+export function formatSchemaCause(cause: unknown): string {
   if (cause && typeof cause === "object" && "message" in cause) {
     return String((cause as { message: unknown }).message);
   }
@@ -84,13 +83,6 @@ export function readConfigFiles(
   paths: ConfigSourcePaths,
   reader: ConfigDiskReader,
 ): Result<RawConfigFiles, ConfigDiskError> {
-  let envFileText: string | null = null;
-  if (paths.envFilePath !== null && existsSync(paths.envFilePath)) {
-    const envResult = reader.readText(paths.envFilePath);
-    if (envResult._tag === "Err") return envResult;
-    envFileText = envResult.value;
-  }
-
   let projectConfigText: string | null = null;
   if (paths.projectConfigPath !== null) {
     const configResult = reader.readText(paths.projectConfigPath);
@@ -98,7 +90,7 @@ export function readConfigFiles(
     projectConfigText = configResult.value;
   }
 
-  return ok({ envFileText, projectConfigText });
+  return ok({ projectConfigText });
 }
 
 export function parseProjectConfig(

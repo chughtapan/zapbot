@@ -5,6 +5,10 @@
  * state-machine engine, SQLite store, plannotator callbacks, and recovery.
  * The live runtime now sits under `src/`; this file is only the CLI shim
  * that reads config, boots the server, and wires signals.
+ *
+ * Shared secrets (apiKey, webhookSecret) load from `~/.zapbot/config.json`
+ * via `readCanonicalConfig`. No `.env` parsing. Port and ingress knobs
+ * continue to read from `process.env` directly.
  */
 
 import { readFileSync } from "fs";
@@ -12,11 +16,17 @@ import {
   deriveConfigSourcePaths,
   loadBridgeRuntimeConfig,
 } from "../src/config/load.ts";
-import { parseEnvFile, resolveRuntimeEnv } from "../src/config/env.ts";
+import { resolveRuntimeEnv } from "../src/config/env.ts";
+import { readCanonicalConfig } from "../src/config/canonical.ts";
 import { resolveIngressPolicy } from "../src/config/ingress.ts";
 import { parseProjectConfig, readConfigFiles } from "../src/config/disk.ts";
 import { reloadBridgeRuntimeConfig } from "../src/config/reload.ts";
-import type { BridgeRuntimeConfig } from "../src/config/types.ts";
+import type {
+  BridgeRuntimeConfig,
+  ConfigDiskError,
+  ConfigReloadError,
+} from "../src/config/types.ts";
+import type { IngressResolutionError } from "../src/config/ingress.ts";
 import { createLogger } from "../src/logger.ts";
 import { loadMoltzapRuntimeConfig } from "../src/moltzap/runtime.ts";
 import { startBridge, type BridgeConfig, type RepoRoute } from "../src/bridge.ts";
@@ -34,7 +44,7 @@ process.on("unhandledRejection", (err) => {
 const log = createLogger("bridge");
 
 const nodeDiskReader = {
-  readText(path: string): Result<string, { readonly _tag: "ConfigFileUnreadable"; readonly path: string; readonly cause: string }> {
+  readText(path: string): Result<string, ConfigDiskError> {
     try {
       return ok(readFileSync(path, "utf-8"));
     } catch (cause) {
@@ -47,9 +57,8 @@ const nodeDiskReader = {
   },
 };
 
-interface LoadedBridgeInputs {
-  readonly runtime: BridgeRuntimeConfig;
-  readonly mergedEnv: Record<string, string | undefined>;
+function absurd(x: never): never {
+  throw new Error(`unreachable: ${JSON.stringify(x)}`);
 }
 
 async function probeHealthz(publicUrl: string): Promise<boolean> {
@@ -66,25 +75,20 @@ async function probeHealthz(publicUrl: string): Promise<boolean> {
 async function loadBridgeInputs(
   configPath: string | undefined,
   isPublicUrlReachable: (publicUrl: string) => Promise<boolean> = probeHealthz,
-): Promise<Result<LoadedBridgeInputs, { readonly reason: string }>> {
+): Promise<Result<BridgeRuntimeConfig, { readonly reason: string }>> {
   const sourcePaths = deriveConfigSourcePaths(configPath);
+
+  const canonical = readCanonicalConfig(sourcePaths.canonicalConfigPath, nodeDiskReader);
+  if (canonical._tag === "Err") {
+    return err({ reason: formatConfigError(canonical.error) });
+  }
+
   const rawFiles = readConfigFiles(sourcePaths, nodeDiskReader);
   if (rawFiles._tag === "Err") {
     return err({ reason: formatConfigError(rawFiles.error) });
   }
 
-  const parsedEnv = rawFiles.value.envFileText === null
-    ? ok(null)
-    : parseEnvFile(rawFiles.value.envFileText);
-  if (parsedEnv._tag === "Err") {
-    return err({ reason: formatConfigError(parsedEnv.error) });
-  }
-
-  const mergedEnv = parsedEnv.value === null
-    ? { ...process.env }
-    : { ...process.env, ...parsedEnv.value.values };
-
-  const runtimeEnv = resolveRuntimeEnv(process.env, parsedEnv.value);
+  const runtimeEnv = resolveRuntimeEnv(process.env, canonical.value);
   if (runtimeEnv._tag === "Err") {
     return err({ reason: formatConfigError(runtimeEnv.error) });
   }
@@ -107,26 +111,16 @@ async function loadBridgeInputs(
     return err({ reason: formatConfigError(projectDocument.error) });
   }
 
-  const runtime = loadBridgeRuntimeConfig(runtimeEnv.value, parsedEnv.value, projectDocument.value, ingress.value);
+  const runtime = loadBridgeRuntimeConfig(runtimeEnv.value, projectDocument.value, ingress.value);
   if (runtime._tag === "Err") {
     return err({ reason: formatConfigError(runtime.error) });
   }
 
-  return ok({
-    runtime: runtime.value,
-    mergedEnv,
-  });
+  return ok(runtime.value);
 }
 
-function applyMergedEnv(mergedEnv: Record<string, string | undefined>): void {
-  for (const [key, value] of Object.entries(mergedEnv)) {
-    if (value === undefined) continue;
-    process.env[key] = value;
-  }
-}
-
-function buildBridgeConfig(runtime: BridgeRuntimeConfig, mergedEnv: Record<string, string | undefined>): Result<BridgeConfig, { readonly reason: string }> {
-  const moltzap = loadMoltzapRuntimeConfig(mergedEnv);
+function buildBridgeConfig(runtime: BridgeRuntimeConfig): Result<BridgeConfig, { readonly reason: string }> {
+  const moltzap = loadMoltzapRuntimeConfig(process.env);
   if (moltzap._tag === "Err") {
     return err({ reason: moltzap.error.reason });
   }
@@ -158,12 +152,8 @@ function buildRepos(runtime: BridgeRuntimeConfig): ReadonlyMap<import("../src/ty
   return result;
 }
 
-function formatConfigError(error: { readonly _tag?: string; readonly reason?: string; readonly path?: string; readonly cause?: string; readonly key?: string; readonly raw?: string; readonly line?: string; readonly projectName?: string; readonly secretEnvVar?: string; readonly left?: string; readonly right?: string }): string {
+function formatConfigError(error: ConfigReloadError): string {
   switch (error._tag) {
-    case "MalformedEnvLine":
-      return `Malformed .env line: ${error.line}`;
-    case "MissingRequiredEnv":
-      return `${error.key} is required.`;
     case "InvalidPort":
       return `Invalid ZAPBOT_PORT value: ${error.raw}`;
     case "SecretCollision":
@@ -172,16 +162,20 @@ function formatConfigError(error: { readonly _tag?: string; readonly reason?: st
       return `Cannot read config file ${error.path}: ${error.cause}`;
     case "ConfigFileInvalid":
       return `Invalid config file ${error.path}: ${error.cause}`;
+    case "CanonicalConfigMissing":
+      return `Canonical config not found at ${error.path}. Run zapbot-team-init to create it.`;
+    case "CanonicalConfigInvalid":
+      return `Invalid canonical config at ${error.path}: ${error.cause}`;
     case "DeprecatedSecretBinding":
       return `Project ${error.projectName} uses deprecated webhook secret env var ${error.secretEnvVar}.`;
     case "ReloadRejected":
-      return error.reason ?? "Config reload rejected.";
+      return error.reason;
     default:
-      return error.reason ?? "Unknown config error.";
+      return absurd(error);
   }
 }
 
-function formatIngressError(error: { readonly _tag?: string; readonly mode?: string; readonly gatewayUrl?: string; readonly publicUrl?: string }): string {
+function formatIngressError(error: IngressResolutionError): string {
   switch (error._tag) {
     case "InvalidIngressMode":
       return `Unsupported ingress mode: ${error.mode}`;
@@ -192,7 +186,7 @@ function formatIngressError(error: { readonly _tag?: string; readonly mode?: str
     case "DemoModeRequiresGateway":
       return "ZAPBOT_GATEWAY_URL is required in GitHub demo mode.";
     default:
-      return "Unknown ingress error.";
+      return absurd(error);
   }
 }
 
@@ -205,15 +199,13 @@ async function main() {
     process.exit(1);
   }
 
-  applyMergedEnv(initialInputs.value.mergedEnv);
-
-  const initialConfig = buildBridgeConfig(initialInputs.value.runtime, initialInputs.value.mergedEnv);
+  const initialConfig = buildBridgeConfig(initialInputs.value);
   if (initialConfig._tag === "Err") {
     console.error(`[bridge] ${initialConfig.error.reason}`);
     process.exit(1);
   }
 
-  let liveRuntime = initialInputs.value.runtime;
+  let liveRuntime = initialInputs.value;
   const cfg = initialConfig.value;
   log.info(`Webhook bridge starting on port ${cfg.port}`);
   log.info(`Ingress mode: ${cfg.ingress.mode}`);
@@ -248,14 +240,13 @@ async function main() {
           return;
         }
 
-        const reloaded = reloadBridgeRuntimeConfig(liveRuntime, nextInputs.value.runtime);
+        const reloaded = reloadBridgeRuntimeConfig(liveRuntime, nextInputs.value);
         if (reloaded._tag === "Err") {
           log.error(`Reload failed: ${formatConfigError(reloaded.error)}`);
           return;
         }
 
-        applyMergedEnv(nextInputs.value.mergedEnv);
-        const nextConfig = buildBridgeConfig(reloaded.value.next, nextInputs.value.mergedEnv);
+        const nextConfig = buildBridgeConfig(reloaded.value.next);
         if (nextConfig._tag === "Err") {
           log.error(`Reload failed: ${nextConfig.error.reason}`);
           return;

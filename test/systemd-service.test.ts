@@ -32,13 +32,13 @@ describe("systemd service template", () => {
     expect(content).toContain("Restart=always");
   });
 
-  it("loads secrets from config.json via ExecStartPre and keeps legacy .env as optional fallback", () => {
+  it("runs the bridge directly without an ExecStartPre preamble", () => {
     const content = fs.readFileSync(TEMPLATE_PATH, "utf-8");
-    expect(content).toContain("ExecStartPre=");
-    expect(content).toContain("config.json");
-    expect(content).toContain("ZAPBOT_WEBHOOK_SECRET");
-    expect(content).toContain("ZAPBOT_API_KEY");
-    // Legacy .env is optional (- prefix) so missing file does not abort the service
+    // Canonical config.json is read inside the bridge; no jq preamble.
+    expect(content).not.toContain("ExecStartPre=");
+    expect(content).not.toMatch(/\bjq\b/);
+    // Legacy .env is kept as an optional fallback for MOLTZAP_* and other
+    // operator env vars during the broader migration.
     expect(content).toContain("EnvironmentFile=-__PROJECT_DIR__/.env");
   });
 
