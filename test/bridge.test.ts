@@ -131,6 +131,18 @@ function makeCtx(
     gh,
     aoControlHost: opts.aoControlHost ?? makeAoHost().host,
     config: makeConfig(opts.withRoute ?? true),
+    roster: {
+      createWorkerSession: async () => ({ _tag: "Ok" as const, value: "fake-session" as any }),
+      lookupWorkerSession: async () => ({ _tag: "Ok" as const, value: undefined }),
+      recordWorkerTokenConsumption: async () => ({ _tag: "Ok" as const, value: undefined }),
+      getActiveRostersSnapshot: () => [],
+    } as any,
+    rosterBudgetCoordinator: {
+      observeInboundPeerMessage: () => {},
+      observeTokensConsumed: () => {},
+      tickAllBudgets: async () => [],
+      startPeriodicTick: () => () => {},
+    },
   };
 }
 
