@@ -19,11 +19,22 @@ import {
   type MoltzapRuntimeConfig,
 } from "./moltzap/runtime.ts";
 import type { IngressPolicy } from "./config/ingress.ts";
-import { createAoCliControlHost, forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
+import {
+  createAoCliControlHost,
+  createAoCliRosterManagerDeps,
+  createRosterBudgetCoordinator,
+  forwardControlPrompt,
+  type AoControlHost,
+  type ForwardControlError,
+  type RosterBudgetCoordinator,
+} from "./orchestrator/runtime.ts";
+import { createRosterManager, type RosterManager } from "./orchestrator/roster.ts";
 import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
+import { asMoltzapSenderId } from "./moltzap/types.ts";
 import {
   absurd,
   asDeliveryId,
+  asIssueNumber,
   asRepoFullName,
   err,
   ok,
@@ -32,6 +43,7 @@ import type {
   BotUsername,
   DispatchError,
   GhCallError,
+  GithubStateError,
   HandleOutcome,
   InstallationToken,
   IssueNumber,
@@ -105,6 +117,15 @@ export interface BridgeHandlerContext {
   readonly mintToken: () => Promise<Result<InstallationToken, DispatchError>>;
   readonly gh: GhAdapter;
   readonly aoControlHost: AoControlHost;
+  /**
+   * WS2 MVP (sbd#149) budget enforcement seam: the RosterManager tracks
+   * spawned worker sessions per-roster; the coordinator folds ingress +
+   * tick events into its two-gate budget state machine (SPEC §5(g)).
+   * Production handlers invoke the coordinator's observe* methods; the
+   * boot-time periodic tick drives stepBudget across all active rosters.
+   */
+  readonly roster: RosterManager;
+  readonly rosterBudgetCoordinator: RosterBudgetCoordinator;
   readonly config: BridgeConfig;
 }
 
@@ -119,6 +140,21 @@ type BridgeHotPathError =
   | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName }
   | ControlEventShapeError
   | ForwardControlError;
+type IssueEventSource = {
+  readonly type?: string | null;
+  readonly pull_request?: { readonly number?: number | null } | null;
+  readonly issue?: { readonly number?: number | null } | null;
+};
+type IssueEventSnapshot = {
+  readonly event?: string | null;
+  readonly created_at?: string | null;
+  readonly source?: IssueEventSource | null;
+};
+type IssueThreadAnchor = {
+  readonly repo: RepoFullName;
+  readonly issue: IssueNumber;
+};
+const GITHUB_API_BASE_URL = "https://api.github.com";
 
 // ── Handler ─────────────────────────────────────────────────────────
 
@@ -191,16 +227,26 @@ async function handleMention(
         return err(forwarded.error);
       }
       const session = forwarded.value.session;
-      void ctx.gh.postComment(
-        c.repo,
-        c.issue,
-        `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`
+      // SPEC §5(g) wiring: a forwarded control prompt is a peer event
+      // on the orchestrator's session; fold it into the coordinator's
+      // idle-clock state via observeInboundPeerMessage. Budget-trip
+      // evaluation runs on the periodic tick set up in `runBridge`
+      // (30s interval); firing tick synchronously per-event would
+      // stack async work under load without changing correctness.
+      ctx.rosterBudgetCoordinator.observeInboundPeerMessage({
+        session,
+        atMs: Date.now(),
+      });
+      await postDurableStatusComment(
+        { repo: c.repo, issue: c.issue },
+        `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`,
+        ctx,
       );
       return ok({ kind: "dispatched", repo: c.repo, session });
     }
     case "status": {
       const summary = await summarizeIssue(c.repo, c.issue);
-      void ctx.gh.postComment(c.repo, c.issue, summary);
+      await postDurableStatusComment({ repo: c.repo, issue: c.issue }, summary, ctx);
       return ok({ kind: "replied", command: "status" });
     }
     case "unknown_command": {
@@ -228,6 +274,296 @@ async function summarizeIssue(repo: RepoFullName, issue: IssueNumber): Promise<s
     `Assignees: ${assignees.length ? assignees.map((a) => `@${a}`).join(", ") : "_(none)_"}`,
   ];
   return lines.join("\n");
+}
+
+async function postDurableStatusComment(
+  anchor: IssueThreadAnchor,
+  body: string,
+  ctx: BridgeHandlerContext,
+): Promise<void> {
+  const issueComment = await ctx.gh.postComment(anchor.repo, anchor.issue, body);
+  if (issueComment._tag === "Err") {
+    log.warn(
+      `durable_comment_issue_post_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${issueComment.error.cause}`,
+    );
+    return;
+  }
+
+  const linkedPullRequest = await getLinkedPullRequest(anchor.repo, anchor.issue);
+  if (linkedPullRequest._tag === "Err") {
+    log.warn(
+      `durable_comment_target_lookup_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} cause=${linkedPullRequest.error._tag}`,
+    );
+    return;
+  }
+  if (linkedPullRequest.value === null) {
+    return;
+  }
+
+  const mirroredComment = await ctx.gh.postComment(anchor.repo, linkedPullRequest.value, body);
+  if (mirroredComment._tag === "Err") {
+    log.warn(
+      `durable_comment_pr_mirror_failed repo=${anchor.repo as unknown as string} issue=${anchor.issue as unknown as number} linked_pr=${linkedPullRequest.value as unknown as number} cause=${mirroredComment.error.cause}`,
+    );
+  }
+}
+
+async function getLinkedPullRequest(
+  repo: RepoFullName,
+  issue: IssueNumber,
+): Promise<Result<IssueNumber | null, GithubStateError>> {
+  const token = await getGitHubApiToken();
+  if (token === null) {
+    return err({ _tag: "GitHubAuthMissing" });
+  }
+
+  const { owner, repoName } = splitRepo(repo);
+  const events: IssueEventSnapshot[] = [];
+  for (let page = 1; ; page += 1) {
+    const pageResult = await fetchIssueEventsPage(owner, repoName, issue, page, token);
+    if (pageResult._tag === "Err") {
+      return err(pageResult.error);
+    }
+    events.push(...pageResult.value);
+    if (pageResult.value.length < 100) {
+      break;
+    }
+  }
+  return ok(findLinkedPullRequest(events));
+}
+
+async function getGitHubApiToken(): Promise<string | null> {
+  const pat = process.env.ZAPBOT_GITHUB_TOKEN?.trim();
+  if (pat) {
+    return pat;
+  }
+  try {
+    const installationToken = await getInstallationToken();
+    return installationToken?.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function splitRepo(repo: RepoFullName): { owner: string; repoName: string } {
+  const [owner, repoName] = (repo as unknown as string).split("/");
+  return { owner, repoName };
+}
+
+async function fetchIssueEventsPage(
+  owner: string,
+  repoName: string,
+  issue: IssueNumber,
+  page: number,
+  token: string,
+): Promise<Result<ReadonlyArray<IssueEventSnapshot>, GithubStateError>> {
+  const issueNumber = issue as unknown as number;
+  const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repoName}/issues/${issueNumber}/events?per_page=100&page=${page}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "zapbot-bridge",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return err({ _tag: "GitHubApiFailed", status: -1, message });
+  }
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return err({ _tag: "IssueNotFound", repo: asRepoFullName(`${owner}/${repoName}`), issue });
+    }
+    const body = await readResponseText(response);
+    return err({
+      _tag: "GitHubApiFailed",
+      status: response.status,
+      message: body || `issue events request failed with status ${response.status}`,
+    });
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return err({ _tag: "GitHubApiFailed", status: response.status, message });
+  }
+  return decodeIssueEventPage(payload);
+}
+
+async function readResponseText(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+function decodeIssueEventPage(
+  payload: unknown,
+): Result<ReadonlyArray<IssueEventSnapshot>, GithubStateError> {
+  if (!Array.isArray(payload)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: "issue events payload was not an array" });
+  }
+
+  const events: IssueEventSnapshot[] = [];
+  for (const entry of payload) {
+    const decoded = decodeIssueEvent(entry);
+    if (decoded._tag === "Err") {
+      return decoded;
+    }
+    events.push(decoded.value);
+  }
+  return ok(events);
+}
+
+function decodeIssueEvent(entry: unknown): Result<IssueEventSnapshot, GithubStateError> {
+  if (!isJsonObject(entry)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: "issue event entry was not an object" });
+  }
+
+  const event = decodeOptionalString(entry.event, "issue event entry had invalid event");
+  if (event._tag === "Err") {
+    return event;
+  }
+  const createdAt = decodeOptionalString(entry.created_at, "issue event entry had invalid created_at");
+  if (createdAt._tag === "Err") {
+    return createdAt;
+  }
+  const source = decodeIssueEventSource(entry.source);
+  if (source._tag === "Err") {
+    return source;
+  }
+  return ok({
+    event: event.value,
+    created_at: createdAt.value,
+    source: source.value,
+  });
+}
+
+function decodeIssueEventSource(
+  value: unknown,
+): Result<IssueEventSource | null, GithubStateError> {
+  if (value === undefined || value === null) {
+    return ok(null);
+  }
+  if (!isJsonObject(value)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: "issue event entry had invalid source" });
+  }
+
+  const type = decodeOptionalString(value.type, "issue event source had invalid type");
+  if (type._tag === "Err") {
+    return type;
+  }
+
+  const issue = decodeIssueNumberSource(value.issue, "issue");
+  if (issue._tag === "Err") {
+    return issue;
+  }
+  const pullRequest = decodeIssueNumberSource(value.pull_request, "pull_request");
+  if (pullRequest._tag === "Err") {
+    return pullRequest;
+  }
+
+  return ok({
+    type: type.value,
+    issue: issue.value,
+    pull_request: pullRequest.value,
+  });
+}
+
+function decodeIssueNumberSource(
+  value: unknown,
+  fieldName: "issue" | "pull_request",
+): Result<{ readonly number?: number | null } | null, GithubStateError> {
+  if (value === undefined || value === null) {
+    return ok(null);
+  }
+  if (!isJsonObject(value)) {
+    return err({ _tag: "GitHubApiFailed", status: -1, message: `issue event source had invalid ${fieldName}` });
+  }
+
+  const number = decodeOptionalNumber(
+    value.number,
+    `issue event source ${fieldName} had invalid number`,
+  );
+  if (number._tag === "Err") {
+    return number;
+  }
+  return ok({ number: number.value });
+}
+
+function decodeOptionalString(
+  value: unknown,
+  message: string,
+): Result<string | null | undefined, GithubStateError> {
+  if (value === undefined || value === null) {
+    return ok(value);
+  }
+  if (typeof value === "string") {
+    return ok(value);
+  }
+  return err({ _tag: "GitHubApiFailed", status: -1, message });
+}
+
+function decodeOptionalNumber(
+  value: unknown,
+  message: string,
+): Result<number | null | undefined, GithubStateError> {
+  if (value === undefined || value === null) {
+    return ok(value);
+  }
+  if (typeof value === "number") {
+    return ok(value);
+  }
+  return err({ _tag: "GitHubApiFailed", status: -1, message });
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function findLinkedPullRequest(events: ReadonlyArray<IssueEventSnapshot>): IssueNumber | null {
+  let latestAt = Number.NEGATIVE_INFINITY;
+  let linkedPullRequest: IssueNumber | null = null;
+  for (const event of events) {
+    if (event.event !== "cross-referenced") {
+      continue;
+    }
+    const pullRequestNumber = extractPullRequestNumber(event.source);
+    if (pullRequestNumber === null) {
+      continue;
+    }
+    const createdAt = event.created_at ? Date.parse(event.created_at) : Number.NaN;
+    if (Number.isNaN(createdAt)) {
+      continue;
+    }
+    if (createdAt >= latestAt) {
+      latestAt = createdAt;
+      linkedPullRequest = pullRequestNumber;
+    }
+  }
+  return linkedPullRequest;
+}
+
+function extractPullRequestNumber(source: IssueEventSource | null | undefined): IssueNumber | null {
+  if (source === null || source === undefined) {
+    return null;
+  }
+  if (source.type !== undefined && source.type !== null && source.type !== "pull_request") {
+    return null;
+  }
+  const number = source.pull_request?.number ?? source.issue?.number ?? null;
+  if (typeof number !== "number") {
+    return null;
+  }
+  return asIssueNumber(number);
 }
 
 // ── Server boot ─────────────────────────────────────────────────────
@@ -407,6 +743,10 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   let stopHeartbeat: (() => void) | null = null;
 
   async function registerAll(cfg: BridgeConfig): Promise<void> {
+    if (stopHeartbeat) {
+      stopHeartbeat();
+      stopHeartbeat = null;
+    }
     const repos = Array.from(cfg.repos.keys());
     if (repos.length === 0) return;
     if (cfg.ingress.mode === "local-only") return;
@@ -421,7 +761,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     await Promise.allSettled(
       repos.map((repo) => registerBridge(client, repo, publicUrl))
     );
-    if (stopHeartbeat) stopHeartbeat();
     const intervalMs = parseInt(process.env.ZAPBOT_GATEWAY_HEARTBEAT_MS ?? "300000", 10);
     stopHeartbeat = startHeartbeat(client, repos, publicUrl, intervalMs);
   }
@@ -447,15 +786,60 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     configPath: current.aoConfigPath,
     env: {
       ...process.env,
+      AO_CALLER_TYPE: "orchestrator",
       ...buildMoltzapProcessEnv(current.moltzap),
     },
   });
+  // WS2 MVP (sbd#149): instantiate the RosterManager + budget
+  // coordinator at boot. The manager tracks spawned worker sessions;
+  // the coordinator folds MoltZap inbound events (via the onInbound
+  // observer below) and a periodic tick (startPeriodicTick) into the
+  // two-gate budget state machine. This is the production wiring
+  // required by SPEC §5(g): stepBudget and record* are actually
+  // invoked by ingress + the tick, not just in tests.
+  const orchestratorSenderIdEnv =
+    process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID ??
+    process.env.MOLTZAP_LOCAL_SENDER_ID ??
+    "zapbot-orchestrator";
+  if (
+    !process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID &&
+    !process.env.MOLTZAP_LOCAL_SENDER_ID
+  ) {
+    // Stamina round 3 finding: registration-backed MoltZap deployments
+    // assign senderIds at runtime; neither env var will be set and
+    // the derived "zapbot-orchestrator" fallback won't match the real
+    // registered id. Log loudly so operators see the mismatch before
+    // rosters are exercised and silently drop traffic.
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[bridge] MOLTZAP_ORCHESTRATOR_SENDER_ID / MOLTZAP_LOCAL_SENDER_ID are unset; RosterManager is seeding the orchestrator-side allowlist with the literal fallback 'zapbot-orchestrator'. Registration-backed deployments will see orchestrator→worker traffic dropped until these env vars are set to the real registered sender id. Follow-up: register-and-emit path needed for the bridge to read the real id at boot (cross-process gap documented in sbd#149 PR body).",
+    );
+  }
+  const rosterManagerDeps = createAoCliRosterManagerDeps(
+    {
+      configPath: current.aoConfigPath,
+      env: {
+        ...process.env,
+        AO_CALLER_TYPE: "orchestrator",
+        ...buildMoltzapProcessEnv(current.moltzap),
+      },
+    },
+    {
+      orchestratorSenderId: asMoltzapSenderId(orchestratorSenderIdEnv),
+    },
+  );
+  const rosterManager = createRosterManager(rosterManagerDeps);
+  const rosterBudgetCoordinator = createRosterBudgetCoordinator(rosterManager);
+  const BUDGET_TICK_MS = 30_000; // 30s tick — idle gate resolution.
+  const stopBudgetTick = rosterBudgetCoordinator.startPeriodicTick(BUDGET_TICK_MS);
   const ctx: BridgeHandlerContext = {
     mintToken: defaultMintToken,
     gh: ghAdapter,
     get aoControlHost() {
       return aoControlHost;
     },
+    roster: rosterManager,
+    rosterBudgetCoordinator,
     get config() {
       return current;
     },
@@ -468,7 +852,13 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
 
   const running: RunningBridge = {
     async stop(): Promise<void> {
-      if (stopHeartbeat) stopHeartbeat();
+      if (stopHeartbeat) {
+        stopHeartbeat();
+        stopHeartbeat = null;
+      }
+      // Stop the budget tick so the process exits cleanly (SPEC §5(g)
+      // periodic stepBudget runner).
+      stopBudgetTick();
       await deregisterAll(current);
       server.stop();
     },
@@ -480,11 +870,13 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
         stopHeartbeat?.();
         stopHeartbeat = null;
       }
+      await deregisterAll(current);
       current = nextConfig;
       aoControlHost = createAoCliControlHost({
         configPath: current.aoConfigPath,
         env: {
           ...process.env,
+          AO_CALLER_TYPE: "orchestrator",
           ...buildMoltzapProcessEnv(current.moltzap),
         },
       });

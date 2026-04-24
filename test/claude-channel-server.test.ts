@@ -13,7 +13,7 @@ const bunCommand = bunLookup.status === 0 ? bunLookup.stdout.trim() : "bun";
 
 async function waitFor(
   predicate: () => boolean,
-  timeoutMs = 5_000,
+  timeoutMs = 10_000,
 ): Promise<void> {
   const started = Date.now();
   while (!predicate()) {

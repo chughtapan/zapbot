@@ -1,25 +1,23 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   handleClassifiedWebhook,
+  startBridge,
   type BridgeConfig,
   type BridgeHandlerContext,
   type GhAdapter,
   type RepoRoute,
-} from "../src/bridge.ts";
-import type { ClassifiedWebhook } from "../src/gateway.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
-import type { AoControlHost } from "../src/orchestrator/runtime.ts";
+} from "../v2/bridge.ts";
+import type { ClassifiedWebhook } from "../v2/gateway.ts";
 import {
   asAoSessionName,
   asBotUsername,
   asCommentId,
-  asDeliveryId,
   asIssueNumber,
   asProjectName,
   asRepoFullName,
   err,
   ok,
-} from "../src/types.ts";
+} from "../v2/types.ts";
 import type {
   DispatchError,
   GhCallError,
@@ -27,7 +25,27 @@ import type {
   IssueNumber,
   RepoFullName,
   Result,
-} from "../src/types.ts";
+} from "../v2/types.ts";
+
+const dispatchMock = vi.hoisted(() => vi.fn());
+const registerBridgeMock = vi.hoisted(() => vi.fn());
+const deregisterBridgeMock = vi.hoisted(() => vi.fn());
+const startHeartbeatMock = vi.hoisted(() => vi.fn());
+const serverStopMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../v2/ao/dispatcher.ts", () => ({
+  dispatch: dispatchMock,
+}));
+
+vi.mock("../v2/gateway.ts", async () => {
+  const actual = await vi.importActual<typeof import("../v2/gateway.ts")>("../v2/gateway.ts");
+  return {
+    ...actual,
+    registerBridge: registerBridgeMock,
+    deregisterBridge: deregisterBridgeMock,
+    startHeartbeat: startHeartbeatMock,
+  };
+});
 
 const repo = asRepoFullName("acme/app");
 const issue = asIssueNumber(42);
@@ -38,12 +56,6 @@ interface FakeGhCalls {
   addReaction: Array<{ repo: RepoFullName; commentId: number; reaction: string }>;
   getUserPermission: Array<{ repo: RepoFullName; user: string }>;
   postComment: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }>;
-}
-
-interface FakeAoCalls {
-  ensureStarted: Array<string>;
-  resolveReady: Array<string>;
-  sendPrompt: Array<{ session: string; title: string; body: string }>;
 }
 
 function makeGh(opts: {
@@ -66,33 +78,6 @@ function makeGh(opts: {
     },
   };
   return { gh, calls };
-}
-
-function makeAoHost(): { host: AoControlHost; calls: FakeAoCalls } {
-  const calls: FakeAoCalls = { ensureStarted: [], resolveReady: [], sendPrompt: [] };
-  const host: AoControlHost = {
-    ensureStarted: async (projectName) => {
-      calls.ensureStarted.push(projectName as unknown as string);
-      return ok(undefined);
-    },
-    resolveReady: async (projectName) => {
-      calls.resolveReady.push(projectName as unknown as string);
-      return ok({
-        session: asAoSessionName(`${projectName as unknown as string}-orchestrator`),
-        senderId: asMoltzapSenderId("orch-1"),
-        mode: "reused",
-      });
-    },
-    sendPrompt: async (session, prompt) => {
-      calls.sendPrompt.push({
-        session: session as unknown as string,
-        title: prompt.title,
-        body: prompt.body,
-      });
-      return ok(undefined);
-    },
-  };
-  return { host, calls };
 }
 
 function makeConfig(withRoute = true): BridgeConfig {
@@ -123,26 +108,12 @@ function makeCtx(
   opts: {
     mintToken?: () => Promise<Result<InstallationToken, DispatchError>>;
     withRoute?: boolean;
-    aoControlHost?: AoControlHost;
   } = {}
 ): BridgeHandlerContext {
   return {
     mintToken: opts.mintToken ?? (async () => ok("fake-token" as unknown as InstallationToken)),
     gh,
-    aoControlHost: opts.aoControlHost ?? makeAoHost().host,
     config: makeConfig(opts.withRoute ?? true),
-    roster: {
-      createWorkerSession: async () => ({ _tag: "Ok" as const, value: "fake-session" as any }),
-      lookupWorkerSession: async () => ({ _tag: "Ok" as const, value: undefined }),
-      recordWorkerTokenConsumption: async () => ({ _tag: "Ok" as const, value: undefined }),
-      getActiveRostersSnapshot: () => [],
-    } as any,
-    rosterBudgetCoordinator: {
-      observeInboundPeerMessage: () => {},
-      observeTokensConsumed: () => {},
-      tickAllBudgets: async () => [],
-      startPeriodicTick: () => () => {},
-    },
   };
 }
 
@@ -161,8 +132,6 @@ function asMention(kind: "plan_this" | "investigate_this" | "status" | "unknown_
     repo,
     issue,
     commentId,
-    commentBody: raw ?? "@zapbot plan this",
-    deliveryId: asDeliveryId("delivery-1"),
     command,
     triggeredBy: "carol",
   };
@@ -220,32 +189,58 @@ describe("handleClassifiedWebhook — permission gate", () => {
 });
 
 describe("handleClassifiedWebhook — plan_this / investigate_this", () => {
+  beforeEach(() => {
+    dispatchMock.mockReset();
+    dispatchMock.mockResolvedValue(ok(asAoSessionName("app-42")));
+    registerBridgeMock.mockReset();
+    registerBridgeMock.mockResolvedValue(ok(undefined));
+    deregisterBridgeMock.mockReset();
+    deregisterBridgeMock.mockResolvedValue(ok(undefined));
+    startHeartbeatMock.mockReset();
+    startHeartbeatMock.mockReturnValue(serverStopMock);
+    serverStopMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
   it("project not configured → ProjectNotConfigured error", async () => {
     const { gh } = makeGh({});
-    const out = await handleClassifiedWebhook(asMention("plan_this"), makeCtx(gh, { withRoute: false }));
+    const out = await handleClassifiedWebhook(
+      asMention("plan_this"),
+      makeCtx(gh, { withRoute: false })
+    );
     expect(out._tag).toBe("Err");
     if (out._tag === "Err") expect(out.error._tag).toBe("ProjectNotConfigured");
   });
 
-  it("forwards control to the persistent orchestrator and preserves raw metadata", async () => {
-    const { gh, calls: ghCalls } = makeGh({});
-    const { host, calls } = makeAoHost();
-    const out = await handleClassifiedWebhook(asMention("investigate_this", "please investigate this"), makeCtx(gh, { aoControlHost: host }));
+  it("token mint failure → TokenMintFailed bubbles up", async () => {
+    const { gh } = makeGh({});
+    const out = await handleClassifiedWebhook(
+      asMention("plan_this"),
+      makeCtx(gh, {
+        mintToken: async () => err({ _tag: "TokenMintFailed", cause: "no app" }),
+      })
+    );
+    expect(out._tag).toBe("Err");
+    if (out._tag === "Err") expect(out.error._tag).toBe("TokenMintFailed");
+  });
+
+  it("happy path → dispatched outcome + confirmation comment", async () => {
+    const { gh, calls } = makeGh({});
+    const out = await handleClassifiedWebhook(
+      asMention("investigate_this"),
+      makeCtx(gh)
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
       expect(out.value.kind).toBe("dispatched");
       if (out.value.kind === "dispatched") {
-        expect(out.value.session).toBe("app-orchestrator");
+        expect(out.value.session).toBe(asAoSessionName("app-42"));
       }
     }
-    expect(calls.ensureStarted).toEqual(["app"]);
-    expect(calls.resolveReady).toEqual(["app"]);
-    expect(calls.sendPrompt).toHaveLength(1);
-    expect(calls.sendPrompt[0].title).toContain("GitHub control for acme/app#42");
-    expect(calls.sendPrompt[0].body).toContain("delivery_id: delivery-1");
-    expect(calls.sendPrompt[0].body).toContain("github_comment_body:");
-    expect(calls.sendPrompt[0].body).toContain("please investigate this");
-    expect(ghCalls.postComment[0].body).toContain("Forwarded control event");
+    expect(calls.postComment.length).toBe(1);
+    expect(calls.postComment[0].body).toContain("Dispatching agent");
   });
 });
 
@@ -289,5 +284,51 @@ describe("handleClassifiedWebhook — eyes reaction", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(calls.addReaction.length).toBe(1);
     expect(calls.addReaction[0].reaction).toBe("eyes");
+  });
+});
+
+// Satisfy the unused-import lint for asAoSessionName in case of future
+// type-narrowing use.
+void asAoSessionName;
+
+describe("startBridge.reload — repo deregistration", () => {
+  it("deregisters repos removed by config reload and replaces the heartbeat set", async () => {
+    const heartbeatStop = vi.fn();
+    const serverStop = vi.fn();
+    startHeartbeatMock.mockReturnValue(heartbeatStop);
+    vi.stubGlobal("Bun", {
+      serve: vi.fn(() => ({ stop: serverStop })),
+    });
+
+    const initial = makeConfig(true);
+    const removedRepo = asRepoFullName("acme/old");
+    const initialRepos = new Map(initial.repos);
+    initialRepos.set(removedRepo, {
+      projectName: asProjectName("old"),
+      webhookSecretEnvVar: "ZAPBOT_WEBHOOK_SECRET",
+      defaultBranch: "main",
+    });
+    const running = await startBridge({ ...initial, repos: initialRepos });
+
+    const nextRepos = new Map(initial.repos);
+    const nextConfig = { ...initial, repos: nextRepos };
+
+    await running.reload(nextConfig);
+
+    expect(heartbeatStop).toHaveBeenCalledTimes(1);
+    expect(deregisterBridgeMock).toHaveBeenCalledWith(
+      expect.any(Object),
+      removedRepo,
+      initial.publicUrl
+    );
+    expect(deregisterBridgeMock).toHaveBeenCalledTimes(1);
+    expect(registerBridgeMock.mock.calls.map(([, repo]) => repo)).toEqual([
+      repo,
+      removedRepo,
+      repo,
+    ]);
+
+    await running.stop();
+    expect(serverStop).toHaveBeenCalledTimes(1);
   });
 });

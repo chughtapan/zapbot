@@ -80,12 +80,22 @@ export type DiagnosticSink = (error: BridgeError) => void;
 
 // ── Inbound ─────────────────────────────────────────────────────────
 
+/**
+ * Optional ingress observer. When set, the bridge invokes it after a
+ * successful notify() dispatch, so the bridge boot can fold peer-
+ * message observations into the RosterManager's budget state machine
+ * (SPEC §5(g) code-level enforcement). Default is a no-op so existing
+ * tests pass unchanged.
+ */
+export type InboundObserver = (event: MoltzapInbound) => void;
+
 export async function onInbound(
   state: LifecycleState,
   event: MoltzapInbound,
   mcp: McpContext,
   notify: McpNotifier,
   diag: DiagnosticSink,
+  observe: InboundObserver = () => {},
 ): Promise<Result<void, BridgeError>> {
   if (state._tag !== "LISTENING") {
     // Per architect plan §4: the SDK should not deliver events before
@@ -124,6 +134,19 @@ export async function onInbound(
   }
   if (result._tag === "Err") {
     return err({ _tag: "OutboundFailed", cause: result.error.cause });
+  }
+  // Post-notify observer: the bridge boot injects a closure that folds
+  // the event into the RosterManager's budget state machine
+  // (recordPeerMessageObserved + stepBudget). Observer errors are
+  // intentionally swallowed — ingress must not be blocked by a
+  // bookkeeping failure. Diagnostics sink would surface anything.
+  try {
+    observe(event);
+  } catch (cause) {
+    diag({
+      _tag: "OutboundFailed",
+      cause,
+    } as BridgeError);
   }
   return ok(undefined);
 }

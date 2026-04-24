@@ -1,10 +1,10 @@
 /**
- * moltzap/identity-allowlist — sender-identity gate (I1).
+ * v2/moltzap/identity-allowlist — sender-identity gate (I1).
  *
  * Anchors: spec moltzap-channel-v1 §4 I1, §5.1 AC1.2, §5.2 AC2.2; sub-issue
  * zap#133 architect decision (option b).
  *
- * The bridge's LISTENING gate (`moltzap/bridge.onInbound`) closes I3
+ * The bridge's LISTENING gate (v2/moltzap/bridge.onInbound) closes I3
  * (presence). It does NOT close I1 (sender-authenticated inbound). Spec I1
  * names an ungated path as a prompt-injection vector; AC1.2 requires a
  * sender-identity allowlist check. This module is that gate, separate from
@@ -47,17 +47,6 @@ export function fromSenderIds(ids: readonly MoltzapSenderId[]): SenderAllowlist 
     __brand: "SenderAllowlist",
     [ALLOWLIST]: new Set(ids),
   }) as SenderAllowlist;
-}
-
-/**
- * Extract the sender-id set from an opaque allowlist. Used by
- * `role-topology.extendAllowlistForRole` to union the base entries with
- * per-role peer additions. Consumers outside this module should treat the
- * allowlist as opaque; this accessor is the one authorised seam.
- */
-export function toSenderIds(list: SenderAllowlist): readonly MoltzapSenderId[] {
-  const internal = list as SenderAllowlistInternal;
-  return [...internal[ALLOWLIST]] as unknown as readonly MoltzapSenderId[];
 }
 
 // ── Error channel ───────────────────────────────────────────────────
