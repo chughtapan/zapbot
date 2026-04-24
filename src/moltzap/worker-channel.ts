@@ -63,6 +63,7 @@
  */
 
 import { Effect } from "effect";
+import { bootClaudeCodeChannel } from "@moltzap/claude-code-channel";
 import type {
   BootError,
   GateInbound,
@@ -70,7 +71,9 @@ import type {
 } from "@moltzap/claude-code-channel";
 import type { WsClientLogger } from "@moltzap/client";
 import type { Result } from "../types.ts";
+import { err, ok } from "../types.ts";
 import type { SessionRole } from "./session-role.ts";
+import { decodeSessionRole } from "./session-role.ts";
 
 // ── Env decode ──────────────────────────────────────────────────────
 
@@ -97,15 +100,61 @@ export type WorkerChannelEnvDecodeError =
   | { readonly _tag: "WorkerChannelMissingAgentKey"; readonly reason: string }
   | { readonly _tag: "WorkerChannelInvalidRole"; readonly raw: string };
 
+function trim(raw: string | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const t = raw.trim();
+  return t.length > 0 ? t : null;
+}
+
 /**
  * Decode the worker's spawn env into a typed `WorkerChannelEnv`.
  * Principle 2 boundary: every value crossing the env boundary is
  * validated here; downstream code consumes the typed shape.
+ *
+ * Env var mapping (stable from `ao-spawn-with-moltzap.ts`):
+ *   `MOLTZAP_SERVER_URL` — required.
+ *   `MOLTZAP_AGENT_KEY` — required (worker's minted per-spawn agentKey).
+ *     Falls back to `MOLTZAP_API_KEY` for transitional deployments that
+ *     still emit the v1 name.
+ *   `MOLTZAP_BRIDGE_AGENT_ID` — optional, telemetry only.
+ *   `AO_CALLER_TYPE` — required. One of `architect | implementer |
+ *     reviewer | orchestrator`.
  */
 export function loadWorkerChannelEnv(
   env: Record<string, string | undefined>,
 ): Result<WorkerChannelEnv, WorkerChannelEnvDecodeError> {
-  throw new Error("not implemented");
+  const serverUrl = trim(env.MOLTZAP_SERVER_URL);
+  if (serverUrl === null) {
+    return err({
+      _tag: "WorkerChannelMissingServerUrl",
+      reason: "MOLTZAP_SERVER_URL must be set for worker channel boot",
+    });
+  }
+
+  const agentKey = trim(env.MOLTZAP_AGENT_KEY) ?? trim(env.MOLTZAP_API_KEY);
+  if (agentKey === null) {
+    return err({
+      _tag: "WorkerChannelMissingAgentKey",
+      reason:
+        "MOLTZAP_AGENT_KEY (or legacy MOLTZAP_API_KEY) must be set — provisioned by the bridge per-spawn",
+    });
+  }
+
+  const rawRole = trim(env.AO_CALLER_TYPE) ?? "";
+  const decoded = decodeSessionRole(rawRole);
+  if (decoded._tag === "Err") {
+    return err({
+      _tag: "WorkerChannelInvalidRole",
+      raw: rawRole,
+    });
+  }
+
+  return ok({
+    serverUrl,
+    agentKey,
+    bridgeAgentId: trim(env.MOLTZAP_BRIDGE_AGENT_ID),
+    role: decoded.value,
+  });
 }
 
 // ── Boot config + errors ────────────────────────────────────────────
@@ -159,6 +208,9 @@ export interface WorkerChannelHandle {
   readonly stop: () => Effect.Effect<void>;
 }
 
+// Module-local singleton. Invariant: one worker channel per process.
+let __workerChannelSingleton: WorkerChannelHandle | null = null;
+
 /**
  * Boot a Claude-Code worker channel for this process. Singleton-
  * enforced (one channel per worker process).
@@ -170,7 +222,46 @@ export interface WorkerChannelHandle {
 export function bootWorkerChannel(
   config: WorkerChannelBootConfig,
 ): Effect.Effect<WorkerChannelHandle, WorkerChannelBootError> {
-  throw new Error("not implemented");
+  return Effect.gen(function* () {
+    if (__workerChannelSingleton !== null) {
+      return yield* Effect.fail<WorkerChannelBootError>({
+        _tag: "WorkerChannelAlreadyBooted",
+      });
+    }
+
+    const result = yield* Effect.promise(() =>
+      bootClaudeCodeChannel({
+        serverUrl: config.serverUrl,
+        agentKey: config.agentKey,
+        logger: config.logger,
+        ...(config.gateInbound !== undefined
+          ? { gateInbound: config.gateInbound }
+          : {}),
+      }),
+    );
+
+    if (result._tag === "Err") {
+      return yield* Effect.fail<WorkerChannelBootError>({
+        _tag: "WorkerChannelBootFailed",
+        cause: result.error,
+      });
+    }
+
+    const channel = result.value;
+    const handle: WorkerChannelHandle = {
+      role: config.role,
+      channel,
+      stop: () =>
+        Effect.gen(function* () {
+          yield* channel.stop();
+          if (__workerChannelSingleton === handle) {
+            __workerChannelSingleton = null;
+          }
+        }),
+    };
+    __workerChannelSingleton = handle;
+    return handle;
+  });
 }
 
 /**
@@ -178,7 +269,7 @@ export function bootWorkerChannel(
  * has not run.
  */
 export function currentWorkerChannel(): WorkerChannelHandle | null {
-  throw new Error("not implemented");
+  return __workerChannelSingleton;
 }
 
 /**
@@ -187,10 +278,15 @@ export function currentWorkerChannel(): WorkerChannelHandle | null {
  * the session (initiator-privileged operation).
  */
 export function shutdownWorkerChannel(): Effect.Effect<void, never> {
-  throw new Error("not implemented");
+  return Effect.gen(function* () {
+    const handle = __workerChannelSingleton;
+    if (handle === null) return;
+    yield* handle.stop();
+    __workerChannelSingleton = null;
+  });
 }
 
 // Test-only escape hatch.
 export function __resetWorkerChannelForTests(): void {
-  throw new Error("not implemented");
+  __workerChannelSingleton = null;
 }

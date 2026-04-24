@@ -57,5 +57,9 @@ export type TaggedBridgeHandle = BridgeAppHandle & { readonly __tag: "bridge" };
  * `bootBridgeApp` resolution.
  */
 export function tagBridge(handle: BridgeAppHandle): TaggedBridgeHandle {
-  throw new Error("not implemented");
+  // The brand is type-level only. `__tag` is a runtime marker so downstream
+  // switches can discriminate AND the value survives JSON-serialization for
+  // observability dumps. The returned object freezes the discriminator so a
+  // caller cannot reassign it and defeat the tag.
+  return Object.freeze({ ...handle, __tag: "bridge" as const });
 }

@@ -24,8 +24,6 @@
  * spec-churn minimization but has no organic publisher in v1 under
  * reply-on-inbound. See rev 4 §8.2 + the assertion in
  * `test/moltzap-union-manifest.test.ts`.
- *
- * Implementation stubs. Architect stage — bodies throw.
  */
 
 import type { SessionRole } from "./session-role.ts";
@@ -45,7 +43,7 @@ export type ConversationKey =
   | "coord-orch-to-worker"
   // Dead key in v1 — no organic publisher under the channel-plugin's
   // reply-on-inbound semantic. Retained for manifest stability (see rev
-  // 4 §8.2). Asserted zero organic publishers via the `it.todo` in
+  // 4 §8.2). Asserted zero organic publishers via the assertion in
   // `test/moltzap-union-manifest.test.ts`.
   | "coord-worker-to-orch"
   | "coord-architect-peer"
@@ -59,6 +57,10 @@ export const ALL_CONVERSATION_KEYS: readonly ConversationKey[] = [
   "coord-implementer-to-architect",
   "coord-review-to-author",
 ];
+
+const CONVERSATION_KEY_SET: ReadonlySet<string> = new Set<string>(
+  ALL_CONVERSATION_KEYS as readonly string[],
+);
 
 // ── Role-pair directionality ────────────────────────────────────────
 
@@ -82,35 +84,79 @@ export interface RolePairBinding {
   readonly receivers: ReadonlySet<SessionRole>;
 }
 
+const ORCH: SessionRole = "orchestrator";
+const ARCH: SessionRole = "architect";
+const IMPL: SessionRole = "implementer";
+const REVW: SessionRole = "reviewer";
+
+const BINDINGS: readonly RolePairBinding[] = Object.freeze([
+  Object.freeze({
+    key: "coord-orch-to-worker" as const,
+    senders: new Set<SessionRole>([ORCH]),
+    receivers: new Set<SessionRole>([ARCH, IMPL, REVW]),
+  }),
+  // Dead under reply-on-inbound (§8.2). Declaration retained for manifest
+  // stability; enforcement is the grep-time test assertion, not this table.
+  Object.freeze({
+    key: "coord-worker-to-orch" as const,
+    senders: new Set<SessionRole>([ARCH, IMPL, REVW]),
+    receivers: new Set<SessionRole>([ORCH]),
+  }),
+  Object.freeze({
+    key: "coord-architect-peer" as const,
+    senders: new Set<SessionRole>([ARCH]),
+    receivers: new Set<SessionRole>([ARCH]),
+  }),
+  Object.freeze({
+    key: "coord-implementer-to-architect" as const,
+    senders: new Set<SessionRole>([IMPL]),
+    receivers: new Set<SessionRole>([ARCH]),
+  }),
+  Object.freeze({
+    key: "coord-review-to-author" as const,
+    senders: new Set<SessionRole>([REVW]),
+    receivers: new Set<SessionRole>([ARCH, IMPL]),
+  }),
+]);
+
 /**
  * The full binding table. Every entry is referenced by at least one role's
  * manifest; every key appears exactly once.
  */
 export function getRolePairBindings(): readonly RolePairBinding[] {
-  throw new Error("not implemented");
+  return BINDINGS;
 }
 
 /**
- * Which keys a role of `role` may send on. Used to constrain
- * `ZapbotMoltZapApp.send(key, parts)` at the zapbot seam (pre-RPC). A role
- * that calls `send` with a key not in this set is rejected with
- * `KeyDisallowedForRole` before any `messages/send` RPC is attempted.
+ * Which keys a role of `role` may publish on by convention. v1 does not
+ * enforce this at the send site (workers reply-on-inbound via the
+ * channel-plugin); the set remains a documentation surface and a hook
+ * for future per-role scoping.
  */
 export function sendableKeysForRole(
   role: SessionRole,
 ): ReadonlySet<ConversationKey> {
-  throw new Error("not implemented");
+  const keys = new Set<ConversationKey>();
+  for (const binding of BINDINGS) {
+    if (binding.senders.has(role)) keys.add(binding.key);
+  }
+  return keys;
 }
 
 /**
- * Which keys a role of `role` may receive on. Used to decide which
- * `app.onMessage(key, handler)` registrations are allowed at boot in
- * `app-client.ts`.
+ * Which keys a role of `role` may receive on by convention. v1 leaves all
+ * admission to server-side `participantFilter:"all"` + bridge-side
+ * `apps/create({invitedAgentIds})`; this projection is not enforced at
+ * receive time.
  */
 export function receivableKeysForRole(
   role: SessionRole,
 ): ReadonlySet<ConversationKey> {
-  throw new Error("not implemented");
+  const keys = new Set<ConversationKey>();
+  for (const binding of BINDINGS) {
+    if (binding.receivers.has(role)) keys.add(binding.key);
+  }
+  return keys;
 }
 
 // ── Decode ──────────────────────────────────────────────────────────
@@ -124,5 +170,8 @@ export type ConversationKeyDecodeError = {
 export function decodeConversationKey(
   raw: string,
 ): ConversationKey | ConversationKeyDecodeError {
-  throw new Error("not implemented");
+  if (typeof raw !== "string" || !CONVERSATION_KEY_SET.has(raw)) {
+    return { _tag: "UnknownConversationKey", raw: String(raw) };
+  }
+  return raw as ConversationKey;
 }

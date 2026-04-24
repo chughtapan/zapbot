@@ -39,6 +39,7 @@
  */
 
 import type { Result } from "../types.ts";
+import { err, ok } from "../types.ts";
 import type { MoltzapSenderId } from "./types.ts";
 
 // ── Branded identity ────────────────────────────────────────────────
@@ -55,7 +56,7 @@ export type BridgeAgentId = string & { readonly __brand: "BridgeAgentId" };
  * this once after schema validation; downstream code uses the brand.
  */
 export function asBridgeAgentId(s: string): BridgeAgentId {
-  throw new Error("not implemented");
+  return s as BridgeAgentId;
 }
 
 /**
@@ -65,7 +66,7 @@ export function asBridgeAgentId(s: string): BridgeAgentId {
  * was previously the literal `"zapbot-orchestrator"` fallback.
  */
 export function bridgeAgentIdAsSenderId(id: BridgeAgentId): MoltzapSenderId {
-  throw new Error("not implemented");
+  return id as string as MoltzapSenderId;
 }
 
 // ── Identity decoded from runtime ───────────────────────────────────
@@ -104,6 +105,9 @@ export interface BridgeIdentityEnv {
   readonly registrationSecret: string;
 }
 
+const DEFAULT_BRIDGE_DISPLAY_NAME = "zapbot-bridge";
+const MAX_BRIDGE_DISPLAY_NAME_LEN = 128;
+
 /**
  * Decode boot env into the static portion of bridge identity (display
  * name + registration secret). The dynamic portion (`agentId`,
@@ -116,7 +120,30 @@ export interface BridgeIdentityEnv {
 export function loadBridgeIdentityEnv(
   env: Record<string, string | undefined>,
 ): Result<BridgeIdentityEnv, BridgeIdentityDecodeError> {
-  throw new Error("not implemented");
+  const rawSecret = env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET;
+  const registrationSecret =
+    typeof rawSecret === "string" ? rawSecret.trim() : "";
+  if (registrationSecret.length === 0) {
+    return err({
+      _tag: "BridgeIdentityMissingSecret",
+      reason:
+        "ZAPBOT_MOLTZAP_REGISTRATION_SECRET is required for bridge boot (A+C(2): auto-register via POST /api/v1/auth/register)",
+    });
+  }
+
+  const rawName = env.ZAPBOT_MOLTZAP_BRIDGE_AGENT_NAME;
+  const displayName =
+    typeof rawName === "string" && rawName.trim().length > 0
+      ? rawName.trim()
+      : DEFAULT_BRIDGE_DISPLAY_NAME;
+  if (displayName.length > MAX_BRIDGE_DISPLAY_NAME_LEN) {
+    return err({
+      _tag: "BridgeIdentityInvalidEnv",
+      reason: `ZAPBOT_MOLTZAP_BRIDGE_AGENT_NAME exceeds ${MAX_BRIDGE_DISPLAY_NAME_LEN} chars`,
+    });
+  }
+
+  return ok({ displayName, registrationSecret });
 }
 
 // ── Registration RPC ────────────────────────────────────────────────
@@ -138,17 +165,102 @@ export interface BridgeRegistrationInput {
   readonly displayName: string;
 }
 
+// Injectable fetch for unit tests.
+interface FetchLike {
+  (input: string, init?: RequestInit): Promise<Response>;
+}
+
+function resolveRegisterUrl(serverUrl: string): string {
+  const trimmed = serverUrl.replace(/\/+$/u, "");
+  return `${trimmed}/api/v1/auth/register`;
+}
+
+function decodeRegisterResponse(
+  raw: unknown,
+): Result<
+  { agentId: string; apiKey: string },
+  { readonly reason: string }
+> {
+  if (raw === null || typeof raw !== "object") {
+    return err({ reason: "response body was not a JSON object" });
+  }
+  const body = raw as Record<string, unknown>;
+  const { agentId, apiKey } = body;
+  if (typeof agentId !== "string" || agentId.length === 0) {
+    return err({ reason: "response missing string 'agentId'" });
+  }
+  if (typeof apiKey !== "string" || apiKey.length === 0) {
+    return err({ reason: "response missing string 'apiKey'" });
+  }
+  return ok({ agentId, apiKey });
+}
+
 /**
  * Mint the bridge's MoltZap agent credentials by calling
  * `POST /api/v1/auth/register` with the registration secret. Returns the
  * materialized identity. No persistence layer in v1 (rev 2.1) — every
  * bridge boot mints a fresh agent.
  *
- * Implementation note: the body of this function is owned by
- * `implement-staff`. Architect names the error channel.
+ * The `fetchImpl` argument is an injection seam for unit tests; production
+ * callers pass the platform `fetch` (Node 18+/Bun).
  */
-export function registerBridgeAgent(
+export async function registerBridgeAgent(
   input: BridgeRegistrationInput,
+  fetchImpl: FetchLike = fetch,
 ): Promise<Result<BridgeIdentity, BridgeRegistrationError>> {
-  throw new Error("not implemented");
+  const url = resolveRegisterUrl(input.serverUrl);
+  const payload = JSON.stringify({
+    name: input.displayName,
+    inviteCode: input.registrationSecret,
+    description: `zapbot bridge (${input.displayName})`,
+  });
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    return err({
+      _tag: "BridgeRegistrationHttpFailed",
+      status: 0,
+      body: `transport error: ${reason}`,
+    });
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "<unreadable body>");
+    return err({
+      _tag: "BridgeRegistrationHttpFailed",
+      status: response.status,
+      body,
+    });
+  }
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch (cause) {
+    return err({
+      _tag: "BridgeRegistrationDecodeFailed",
+      reason: `response body was not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    });
+  }
+
+  const decoded = decodeRegisterResponse(raw);
+  if (decoded._tag === "Err") {
+    return err({
+      _tag: "BridgeRegistrationDecodeFailed",
+      reason: decoded.error.reason,
+    });
+  }
+
+  return ok({
+    agentId: asBridgeAgentId(decoded.value.agentId),
+    agentKey: decoded.value.apiKey,
+    displayName: input.displayName,
+  });
 }

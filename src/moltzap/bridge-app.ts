@@ -60,13 +60,20 @@ import type { Message, WsClientLogger } from "@moltzap/app-sdk";
 import {
   AuthError,
   ManifestRegistrationError,
+  MoltZapApp,
   SessionError,
 } from "@moltzap/app-sdk";
 import type { ConversationKey } from "./conversation-keys.ts";
-import type {
-  BridgeAgentId,
-  BridgeRegistrationError,
+import {
+  asBridgeAgentId,
+  loadBridgeIdentityEnv,
+  registerBridgeAgent,
+  type BridgeAgentId,
+  type BridgeIdentity,
+  type BridgeRegistrationError,
 } from "./bridge-identity.ts";
+import { loadAppIdentity } from "./manifest.ts";
+import { buildUnionManifest } from "./union-manifest.ts";
 import type { MoltzapSenderId } from "./types.ts";
 
 // ── Boot config + errors ────────────────────────────────────────────
@@ -102,42 +109,23 @@ export type BridgeAppBootError =
   | {
       readonly _tag: "BridgeAppSessionFailed";
       readonly cause: SessionError;
+    }
+  | {
+      // Env decode failure surfaces here so the boot error channel is
+      // one union; keyed by the original tag for operator parity.
+      readonly _tag: "BridgeAppEnvInvalid";
+      readonly reason: string;
     };
 
 // ── Public handle ───────────────────────────────────────────────────
 
-/**
- * Opaque handle returned by `bootBridgeApp`. Notably absent: any send
- * surface AND the privileged `agentKey` (codex P2 credential-leak
- * guard). Carries only:
- *   - `agentId`: branded BridgeAgentId for `apps/closeSession`.
- *   - read-only `onBridgeMessage(key, handler)` for observability.
- *   - read-only `listActiveSessions()` for SIGTERM drain enumeration.
- *
- * Per-spawn session creation (`createBridgeSession`) is a module-level
- * function that consults the singleton; it is NOT a handle method
- * (codex P2 fold — accept the module-singleton shape rather than hiding
- * initiator privilege behind a handle method).
- */
 export interface BridgeAppHandle {
   readonly agentId: BridgeAgentId;
-  /** Display name from the registered identity. Non-credential. */
   readonly displayName: string;
-  /**
-   * Read-only inbound observation. Returns the handler-registration
-   * receipt or a typed error. Bridge code uses this for roster/budget
-   * tracking; it does NOT (and cannot) send replies.
-   */
   readonly onBridgeMessage: (
     key: ConversationKey,
     handler: (message: Message) => void | Promise<void>,
   ) => BridgeMessageHandlerError | null;
-  /**
-   * Enumerate the bridge's active per-spawn session ids. Used by
-   * `drainBridgeSessions` to know what to close at SIGTERM. Read-only.
-   * The session registry is module-local, populated by
-   * `createBridgeSession` and pruned by `closeBridgeSession`.
-   */
   readonly listActiveSessions: () => readonly string[];
 }
 
@@ -146,7 +134,39 @@ export type BridgeMessageHandlerError = {
   readonly key: ConversationKey;
 };
 
+// ── Module-local singleton + session registry ───────────────────────
+
+interface BridgeSingleton {
+  readonly app: MoltZapApp;
+  readonly identity: BridgeIdentity;
+  readonly handle: BridgeAppHandle;
+  readonly handlers: Map<ConversationKey, (message: Message) => void | Promise<void>>;
+  readonly sessions: Map<string, { readonly conversations: Readonly<Record<ConversationKey, string>> }>;
+}
+
+let __bridgeSingleton: BridgeSingleton | null = null;
+
 // ── Boot ────────────────────────────────────────────────────────────
+
+function defaultLogger(): WsClientLogger {
+  return {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+  };
+}
+
+function classifyStartError(
+  cause: AuthError | ManifestRegistrationError | SessionError,
+): BridgeAppBootError {
+  if (cause instanceof AuthError) {
+    return { _tag: "BridgeAppConnectFailed", cause };
+  }
+  if (cause instanceof ManifestRegistrationError) {
+    return { _tag: "BridgeAppManifestInvalid", cause };
+  }
+  return { _tag: "BridgeAppSessionFailed", cause };
+}
 
 /**
  * Boot the bridge's `MoltZapApp` per the A+C(2) boot sequence above.
@@ -158,12 +178,106 @@ export type BridgeMessageHandlerError = {
 export function bootBridgeApp(
   config: BridgeAppBootConfig,
 ): Effect.Effect<BridgeAppHandle, BridgeAppBootError> {
-  throw new Error("not implemented");
+  return Effect.gen(function* () {
+    if (__bridgeSingleton !== null) {
+      return yield* Effect.fail<BridgeAppBootError>({
+        _tag: "BridgeAppAlreadyBooted",
+      });
+    }
+
+    const env = config.env ?? process.env;
+    const logger = config.logger ?? defaultLogger();
+
+    const envResult = loadBridgeIdentityEnv(env);
+    if (envResult._tag === "Err") {
+      return yield* Effect.fail<BridgeAppBootError>({
+        _tag: "BridgeAppEnvInvalid",
+        reason: envResult.error.reason,
+      });
+    }
+
+    const appIdentityResult = loadAppIdentity(env);
+    if ("_tag" in appIdentityResult && appIdentityResult._tag === "AppIdentityDecodeError") {
+      return yield* Effect.fail<BridgeAppBootError>({
+        _tag: "BridgeAppEnvInvalid",
+        reason: appIdentityResult.reason,
+      });
+    }
+    // Narrow: the non-error branch is the `AppIdentity` object.
+    const appIdentity = appIdentityResult as Exclude<
+      ReturnType<typeof loadAppIdentity>,
+      { readonly _tag: "AppIdentityDecodeError" }
+    >;
+
+    // Align displayName: bridge identity uses the same env var as
+    // appIdentity so the registered MoltZap agent name matches the
+    // manifest name (operator-legible logs).
+    const registration = yield* Effect.promise(() =>
+      registerBridgeAgent({
+        serverUrl: config.serverUrl,
+        registrationSecret: envResult.value.registrationSecret,
+        displayName: envResult.value.displayName,
+      }),
+    );
+    if (registration._tag === "Err") {
+      return yield* Effect.fail<BridgeAppBootError>({
+        _tag: "BridgeAppRegistrationFailed",
+        cause: registration.error,
+      });
+    }
+    const identity = registration.value;
+
+    const manifest = buildUnionManifest(appIdentity);
+    const app = new MoltZapApp({
+      serverUrl: config.serverUrl,
+      agentKey: identity.agentKey,
+      manifest,
+      logger,
+    });
+
+    const handlers = new Map<
+      ConversationKey,
+      (message: Message) => void | Promise<void>
+    >();
+    const sessions = new Map<
+      string,
+      { readonly conversations: Readonly<Record<ConversationKey, string>> }
+    >();
+
+    const handle: BridgeAppHandle = {
+      agentId: identity.agentId,
+      displayName: identity.displayName,
+      onBridgeMessage: (key, handler) => {
+        if (handlers.has(key)) {
+          return { _tag: "BridgeHandlerAlreadyRegistered", key };
+        }
+        handlers.set(key, handler);
+        app.onMessage(key, (message) => handler(message));
+        return null;
+      },
+      listActiveSessions: () => [...sessions.keys()],
+    };
+
+    // Start the app. The SDK's `start()` error channel is a union of
+    // SDK error CLASS instances — preserve them verbatim (Principle 3).
+    yield* app.start().pipe(
+      Effect.mapError((cause) => classifyStartError(cause)),
+    );
+
+    __bridgeSingleton = {
+      app,
+      identity,
+      handle,
+      handlers,
+      sessions,
+    };
+    return handle;
+  });
 }
 
 /** Return the booted bridge handle, or `null` if `bootBridgeApp` has not run. */
 export function currentBridgeApp(): BridgeAppHandle | null {
-  throw new Error("not implemented");
+  return __bridgeSingleton?.handle ?? null;
 }
 
 /**
@@ -176,7 +290,7 @@ export function currentBridgeApp(): BridgeAppHandle | null {
  * RosterManager.
  */
 export function bridgeAgentId(): BridgeAgentId | null {
-  throw new Error("not implemented");
+  return __bridgeSingleton?.identity.agentId ?? null;
 }
 
 /**
@@ -191,20 +305,17 @@ export function bridgeAgentId(): BridgeAgentId | null {
  * leak class falls back to moltzap#230's accepted shape.
  */
 export function shutdownBridgeApp(): Effect.Effect<void, never> {
-  throw new Error("not implemented");
+  return Effect.gen(function* () {
+    const state = __bridgeSingleton;
+    if (state === null) return;
+    yield* state.app.stop();
+    __bridgeSingleton = null;
+  });
 }
 
 // ── Per-spawn session creation (initiator authority) ────────────────
 
-/**
- * Per-spawn session creation. Wraps SDK's
- * `MoltZapApp.createSession(invitedAgentIds?: string[])` (positional
- * `string[]`; see `~/moltzap/packages/app-sdk/src/app.ts:240-265`). The
- * architect-API named-field shape below maps to the positional call
- * inside the implementation.
- */
 export interface BridgeSessionRequest {
-  /** SenderIds of every roster member to invite at session-create time. */
   readonly invitedAgentIds: readonly MoltzapSenderId[];
 }
 
@@ -215,27 +326,6 @@ export type BridgeSessionError =
       readonly cause: SessionError;
     };
 
-/**
- * Create a per-spawn `AppSession` from the bridge's long-lived
- * `MoltZapApp`. Wraps `MoltZapApp.createSession(invitedAgentIds)`
- * (positional). Registers the resulting session id in the module-local
- * active-sessions registry (visible via `BridgeAppHandle.listActiveSessions`).
- *
- * Returned `BridgeSessionHandle` exposes only:
- *   - `sessionId` for opaque routing.
- *   - `conversations` map (typed `ConversationKey` → raw conversationId).
- *   - read-only `onMessage(key, handler)`.
- *
- * Send is not exposed. Worker processes hold their own outbound surface
- * via `worker-channel.ts` (the channel package's MCP `reply` tool); the
- * bridge does not author messages on per-spawn sessions.
- */
-export function createBridgeSession(
-  request: BridgeSessionRequest,
-): Effect.Effect<BridgeSessionHandle, BridgeSessionError> {
-  throw new Error("not implemented");
-}
-
 export interface BridgeSessionHandle {
   readonly sessionId: string;
   readonly conversations: Readonly<Record<ConversationKey, string>>;
@@ -243,6 +333,56 @@ export interface BridgeSessionHandle {
     key: ConversationKey,
     handler: (message: Message) => void | Promise<void>,
   ) => BridgeMessageHandlerError | null;
+}
+
+export function createBridgeSession(
+  request: BridgeSessionRequest,
+): Effect.Effect<BridgeSessionHandle, BridgeSessionError> {
+  return Effect.gen(function* () {
+    const state = __bridgeSingleton;
+    if (state === null) {
+      return yield* Effect.fail<BridgeSessionError>({
+        _tag: "BridgeAppNotBooted",
+      });
+    }
+
+    // Named-field → positional map per rev 4 §2.3.
+    const invitedIds = request.invitedAgentIds.map((id) => id as string);
+    const session = yield* state.app
+      .createSession([...invitedIds])
+      .pipe(
+        Effect.mapError(
+          (cause): BridgeSessionError => ({
+            _tag: "BridgeSessionCreateFailed",
+            cause,
+          }),
+        ),
+      );
+
+    // The SDK's `conversations` is `Record<string, string>`. Narrow to
+    // ConversationKey keys we recognize. Unknown keys would indicate a
+    // manifest/server divergence — recorded here but not a hard error
+    // (Principle 2: decode, don't assume).
+    const conversations: Record<ConversationKey, string> = {} as Record<
+      ConversationKey,
+      string
+    >;
+    for (const [k, v] of Object.entries(session.conversations)) {
+      (conversations as Record<string, string>)[k] = v;
+    }
+    const frozen = Object.freeze({ ...conversations });
+    state.sessions.set(session.id, { conversations: frozen });
+
+    const handle: BridgeSessionHandle = {
+      sessionId: session.id,
+      conversations: frozen,
+      // Reusing the global `onBridgeMessage` — one handler per key, global
+      // across sessions, matching the SDK's `onMessage(key, ...)` semantic.
+      onMessage: (key, handler) =>
+        state.handle.onBridgeMessage(key, handler),
+    };
+    return handle;
+  });
 }
 
 // ── Session close (initiator privilege) ─────────────────────────────
@@ -255,15 +395,39 @@ export type BridgeCloseSessionError =
     };
 
 /**
- * Close a session by id. Caller must be the bridge (initiator); upstream
- * `app-host.ts:803` enforces this. Removes the session from the
- * module-local active-sessions registry. Used at session end + at
- * bridge SIGTERM drain.
+ * Close a session by id via `apps/closeSession`. Caller must be the
+ * bridge (initiator); upstream `app-host.ts:803` enforces this. Removes
+ * the session from the module-local active-sessions registry. Used at
+ * session end + at bridge SIGTERM drain.
  */
 export function closeBridgeSession(
   sessionId: string,
 ): Effect.Effect<void, BridgeCloseSessionError> {
-  throw new Error("not implemented");
+  return Effect.gen(function* () {
+    const state = __bridgeSingleton;
+    if (state === null) {
+      return yield* Effect.fail<BridgeCloseSessionError>({
+        _tag: "BridgeAppNotBooted",
+      });
+    }
+    // Idempotency: if the session is not tracked we still issue the
+    // RPC so an outside-created session can be closed via the bridge;
+    // the server returns an error we map to BridgeCloseSessionFailed.
+    yield* state.app.client
+      .sendRpc("apps/closeSession", { sessionId })
+      .pipe(
+        Effect.mapError(
+          (cause): BridgeCloseSessionError => ({
+            _tag: "BridgeCloseSessionFailed",
+            cause: new SessionError(
+              `apps/closeSession failed for ${sessionId}`,
+              cause instanceof Error ? cause : undefined,
+            ),
+          }),
+        ),
+      );
+    state.sessions.delete(sessionId);
+  });
 }
 
 /**
@@ -271,19 +435,45 @@ export function closeBridgeSession(
  * process via `BridgeAppHandle.listActiveSessions()` and close each in
  * order. Bounded by `timeoutMs`; on timeout, remaining sessions leak
  * (moltzap#230). Returns the list of leaked sessionIds for telemetry.
- *
- * Operational posture (sbd#199 item 9): v1 accepts the bridge-restart
- * leak class. This drain reduces the leak rate; it does not eliminate
- * it. Mitigation tracked upstream at moltzap#230 (`apps/transferInitiator`
- * follow-up).
  */
-export function drainBridgeSessions(input: {
+export async function drainBridgeSessions(input: {
   readonly timeoutMs: number;
 }): Promise<readonly string[]> {
-  throw new Error("not implemented");
+  const state = __bridgeSingleton;
+  if (state === null) return [];
+
+  const deadline = Date.now() + Math.max(0, input.timeoutMs);
+  const leaked: string[] = [];
+
+  for (const sessionId of [...state.sessions.keys()]) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      leaked.push(sessionId);
+      continue;
+    }
+    try {
+      await Effect.runPromise(
+        closeBridgeSession(sessionId).pipe(
+          Effect.timeoutFail({
+            duration: `${remaining} millis`,
+            onTimeout: (): BridgeCloseSessionError => ({
+              _tag: "BridgeCloseSessionFailed",
+              cause: new SessionError(
+                `apps/closeSession timed out after ${remaining}ms for ${sessionId}`,
+              ),
+            }),
+          }),
+        ),
+      );
+    } catch {
+      // Close failed under the budget — treat as leaked for telemetry.
+      leaked.push(sessionId);
+    }
+  }
+  return leaked;
 }
 
 // Test-only escape hatch: reset the singleton between test runs.
 export function __resetBridgeAppForTests(): void {
-  throw new Error("not implemented");
+  __bridgeSingleton = null;
 }

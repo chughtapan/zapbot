@@ -46,6 +46,7 @@
 
 import type { AppManifest } from "@moltzap/app-sdk";
 import type { AppIdentity } from "./manifest.ts";
+import { ALL_CONVERSATION_KEYS, type ConversationKey } from "./conversation-keys.ts";
 
 /**
  * Build the single bridge-owned union manifest. Declares every key in
@@ -62,7 +63,20 @@ import type { AppIdentity } from "./manifest.ts";
  * compile-time-detectable inclusion in the manifest.
  */
 export function buildUnionManifest(identity: AppIdentity): AppManifest {
-  throw new Error("not implemented");
+  return {
+    appId: identity.appId,
+    name: identity.displayName,
+    description: identity.description,
+    permissions: {
+      required: [],
+      optional: [],
+    },
+    conversations: ALL_CONVERSATION_KEYS.map((key) => ({
+      key,
+      name: key,
+      participantFilter: "all" as const,
+    })),
+  };
 }
 
 /**
@@ -79,5 +93,30 @@ export type UnionManifestMismatch = {
 export function verifyUnionManifest(
   manifest: AppManifest,
 ): UnionManifestMismatch | null {
-  throw new Error("not implemented");
+  const expected = new Set<string>(ALL_CONVERSATION_KEYS as readonly string[]);
+  const declared = new Set<string>(
+    (manifest.conversations ?? []).map((c) => c.key),
+  );
+
+  const missing: string[] = [];
+  for (const key of expected) {
+    if (!declared.has(key)) missing.push(key);
+  }
+  const extra: string[] = [];
+  for (const key of declared) {
+    if (!expected.has(key)) extra.push(key);
+  }
+  if (missing.length === 0 && extra.length === 0) return null;
+  // Keep extras stable for snapshot-style assertions.
+  extra.sort();
+  missing.sort();
+  return {
+    _tag: "UnionManifestMismatch",
+    missing,
+    extra,
+  };
 }
+
+// Named re-export so consumers can switch on ConversationKey without
+// walking two imports.
+export type { ConversationKey };

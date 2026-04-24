@@ -1,39 +1,20 @@
 /**
- * moltzap/manifest — role-scoped AppManifest builders.
+ * moltzap/manifest — `AppIdentity` + env decode only.
  *
- * Anchors: sbd#170 SPEC rev 2, §5 bullets on bridge/worker `MoltZapApp`
- * construction; OQ #4 resolution (one manifest per role, bridge = orchestrator
- * manifest, each worker = role-specific manifest); Invariants 2, 5.
- *
- * OQ #4 decision (binding): one `AppManifest` per `SessionRole`. Bridge
- * constructs `buildOrchestratorManifest()`; each worker constructs
- * `buildWorkerManifest(role)`. Role-scoped manifests declare ONLY the
- * conversation keys the role legitimately participates in (per the role-pair
- * binding table in `conversation-keys.ts`), giving least-privilege
- * declaration at the manifest boundary.
- *
- * Invariant 5 (session-level admission) is server-enforced by the bridge
- * manifest's `participantFilter` fields + `permissions`. Worker manifests
- * share the same `appId`; the server's authoritative session topology comes
- * from the bridge's manifest at `apps/create` time.
- *
- * Architect stage — bodies throw.
+ * Anchors: sbd#199 rev 4 §2 "Carry-over from sbd#186 baseline" — keep
+ * `AppIdentity` + `loadAppIdentity`. The per-role manifest builders
+ * (`buildOrchestratorManifest`, `buildWorkerManifest`,
+ * `permissionsForRole`, `conversationBlock`, `verifyManifestKeys`) are
+ * superseded by `union-manifest.ts` under zapbot#336 path (b): only the
+ * bridge registers a manifest, and it registers the full union. Worker
+ * processes never call `apps/register`.
  */
-
-import type {
-  AppManifest,
-  AppManifestConversation,
-  AppPermission,
-} from "@moltzap/app-sdk";
-import type { SessionRole } from "./session-role.ts";
-import type { ConversationKey } from "./conversation-keys.ts";
 
 // ── App identity ────────────────────────────────────────────────────
 
 /**
- * Zapbot's `appId` for `apps/register`. One global constant so every process
- * (bridge and workers) registers against the same app. Implementations read
- * it from env via `loadAppIdentity`.
+ * Zapbot's `appId` for `apps/register`. One global constant: the bridge
+ * is the only process that registers, and it registers this id.
  */
 export const ZAPBOT_APP_ID = "zapbot-ws2" as const;
 
@@ -48,104 +29,47 @@ export type AppIdentityDecodeError = {
   readonly reason: string;
 };
 
-/** Principle 2 boundary. Decode env → typed identity. */
+const DEFAULT_DISPLAY_NAME = "zapbot-bridge";
+const DEFAULT_DESCRIPTION =
+  "zapbot bridge process MoltZap app (ws2 MVP per sbd#170)";
+
+const MAX_DISPLAY_NAME_LEN = 128;
+const MAX_DESCRIPTION_LEN = 512;
+
+/**
+ * Principle 2 boundary. Decode env → typed identity. Env vars:
+ *   `ZAPBOT_MOLTZAP_BRIDGE_AGENT_NAME` → `displayName` (optional;
+ *       default `"zapbot-bridge"`).
+ *   `ZAPBOT_MOLTZAP_BRIDGE_APP_DESCRIPTION` → `description` (optional;
+ *       default documentation string).
+ * Bounds are enforced here so later code paths consume known-safe strings.
+ */
 export function loadAppIdentity(
   env: Record<string, string | undefined>,
 ): AppIdentity | AppIdentityDecodeError {
-  throw new Error("not implemented");
-}
+  const rawName = env.ZAPBOT_MOLTZAP_BRIDGE_AGENT_NAME;
+  const displayName =
+    typeof rawName === "string" && rawName.trim().length > 0
+      ? rawName.trim()
+      : DEFAULT_DISPLAY_NAME;
+  if (displayName.length > MAX_DISPLAY_NAME_LEN) {
+    return {
+      _tag: "AppIdentityDecodeError",
+      reason: `ZAPBOT_MOLTZAP_BRIDGE_AGENT_NAME exceeds ${MAX_DISPLAY_NAME_LEN} chars`,
+    };
+  }
 
-// ── Permissions ─────────────────────────────────────────────────────
+  const rawDesc = env.ZAPBOT_MOLTZAP_BRIDGE_APP_DESCRIPTION;
+  const description =
+    typeof rawDesc === "string" && rawDesc.trim().length > 0
+      ? rawDesc.trim()
+      : DEFAULT_DESCRIPTION;
+  if (description.length > MAX_DESCRIPTION_LEN) {
+    return {
+      _tag: "AppIdentityDecodeError",
+      reason: `ZAPBOT_MOLTZAP_BRIDGE_APP_DESCRIPTION exceeds ${MAX_DESCRIPTION_LEN} chars`,
+    };
+  }
 
-/**
- * The zapbot permission set, declared once. Per-role manifests project a
- * subset of this via `permissionsForRole`. `permissions.required` vs
- * `permissions.optional` split is owned by the implement stage; the shape is
- * reused from `@moltzap/app-sdk`'s `AppPermission`.
- */
-export function getZapbotPermissions(): {
-  readonly required: readonly AppPermission[];
-  readonly optional: readonly AppPermission[];
-} {
-  throw new Error("not implemented");
-}
-
-export function permissionsForRole(role: SessionRole): {
-  readonly required: readonly AppPermission[];
-  readonly optional: readonly AppPermission[];
-} {
-  throw new Error("not implemented");
-}
-
-// ── Conversation block builders ─────────────────────────────────────
-
-/**
- * Build an `AppManifestConversation` block for `key`. `participantFilter`
- * is one of `"all" | "initiator"` (Invariant 5 + Spike C: `"none"` is not
- * relied on).
- *
- * Bridge (orchestrator) manifest uses `"all"` for every conversation so all
- * session-admitted agents are seeded into every conversation; role-pair
- * directionality is enforced structurally by which role-scoped manifest
- * declares which keys (sender side) plus the receive-key trust rule
- * (Invariant 6).
- */
-export function conversationBlock(
-  key: ConversationKey,
-  participantFilter: "all" | "initiator",
-): AppManifestConversation {
-  throw new Error("not implemented");
-}
-
-// ── Role-scoped manifests ───────────────────────────────────────────
-
-/**
- * Build the bridge's orchestrator manifest. Declares ALL 5 conversation
- * keys; this is the manifest the server uses at `apps/create` time to
- * materialize the session's conversation topology.
- *
- * OQ #4 tie: "bridge uses the orchestrator manifest."
- * Invariant 2 tie: "AppManifest is the source of truth for conversation keys."
- */
-export function buildOrchestratorManifest(
-  identity: AppIdentity,
-): AppManifest {
-  throw new Error("not implemented");
-}
-
-/**
- * Build a worker manifest. Declares ONLY the keys the role legitimately
- * sends or receives on, per `conversation-keys.ts` bindings.
- *
- * OQ #4 tie: "each worker uses a role-specific manifest declaring only the
- * conversation keys that role legitimately participates in."
- *
- * Note: the server's session topology is driven by the BRIDGE's manifest at
- * session-create time. A worker's role-scoped manifest is still registered
- * via `apps/register` against the worker's own agent credential; its keys
- * are the keys the worker's own `MoltZapApp` instance is authorized to use.
- * Role-scoping here bounds what the worker's SDK will send or subscribe to.
- */
-export function buildWorkerManifest(
-  identity: AppIdentity,
-  role: Exclude<SessionRole, "orchestrator">,
-): AppManifest {
-  throw new Error("not implemented");
-}
-
-/**
- * Verify that `manifest` declares exactly the keys `expected`. Invariant 2
- * gate called at `ZapbotMoltZapApp` boot; divergence is a boot-time error.
- */
-export type ManifestKeyMismatch = {
-  readonly _tag: "ManifestKeyMismatch";
-  readonly expected: readonly ConversationKey[];
-  readonly declared: readonly string[];
-};
-
-export function verifyManifestKeys(
-  manifest: AppManifest,
-  expected: readonly ConversationKey[],
-): ManifestKeyMismatch | null {
-  throw new Error("not implemented");
+  return { appId: ZAPBOT_APP_ID, displayName, description };
 }
