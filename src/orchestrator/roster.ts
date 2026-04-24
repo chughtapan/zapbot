@@ -449,11 +449,21 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       spawned.push(member);
     }
 
-    // Second-pass allowlist rebind (Invariant 3 — allowlist symmetry):
-    // the first-member spawn saw no peers; the second-member spawn saw
-    // only the first peer; etc. After every member is up, rebind each
-    // member's allowlist with the FULL peer set so later-arriving peers
-    // can reach earlier members (e.g. architect-b → architect-a).
+    // Second-pass allowlist rebind (Invariant 3 — orchestrator-side
+    // bookkeeping): the first-member spawn saw no peers; the second-
+    // member spawn saw only the first peer; etc. After every member is
+    // up, rebind each member's in-memory allowlist with the FULL peer
+    // set so the orchestrator's view is symmetric.
+    //
+    // NOTE (worker-side symmetry gap): the spawn-site MOLTZAP_ALLOWED_SENDERS
+    // env only carries peers spawned BEFORE each member. Later-spawned
+    // peers' senderIds are not pushed back to earlier workers (workers
+    // read this env only at boot). A follow-up MVP issue will add a
+    // worker-side allowlist-reload mechanism so the second-pass rebind
+    // propagates to already-running workers. For now, the gap is:
+    // architect-a cannot receive peer messages from architect-b spawned
+    // after it, even though the topology permits it. In-process tests
+    // pass; the asymmetry only surfaces under real ao-spawn transport.
     const finalPeersByRole = new Map<WorkerRole, MoltzapSenderId[]>();
     for (const role of ALL_WORKER_ROLES) finalPeersByRole.set(role, []);
     for (const m of spawned) {

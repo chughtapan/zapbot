@@ -45,6 +45,34 @@ describe("ensureChannelMcpConfig", () => {
     expect(parsed.mcpServers.moltzap.command).toBe("bun");
   });
 
+  it("recognises legacy zapbot-authored moltzap entries (no marker) as ours", async () => {
+    // Pre-sbd#149 shape: no _zapbotAuthored marker, but command/args
+    // match the zapbot launcher. Must NOT be classified as a foreign
+    // collision (upgraded workspaces have this shape).
+    const configPath = join(workspace, CONFIG_REL);
+    mkdirSync(join(workspace, ".claude"), { recursive: true });
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: {
+          moltzap: {
+            command: "bun",
+            args: [join(workspace, "bin", "moltzap-claude-channel.ts")],
+            env: { MOLTZAP_SERVER_URL: "https://example" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    // Should NOT throw. Should rewrite with the new _zapbotAuthored
+    // marker on its output.
+    await runHook();
+    const raw = readFileSync(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.mcpServers.moltzap._zapbotAuthored).toBe(true);
+    expect(parsed.mcpServers.moltzap.command).toBe("bun");
+  });
+
   it("preserves zapbot-authored entries on a second run (ours)", async () => {
     await runHook();
     await runHook(); // second run must not throw

@@ -233,8 +233,12 @@ async function runBunScript(
   options: AoCliOptions,
   scriptPath: string,
   args: readonly string[],
+  extraEnv: Record<string, string | undefined> = {},
 ): Promise<Result<SpawnResult, SpawnFailure>> {
-  const env = buildCliEnv(options.env ?? process.env, options.configPath);
+  const env = {
+    ...buildCliEnv(options.env ?? process.env, options.configPath),
+    ...extraEnv,
+  };
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const bun = normalizeEnvValue(env.BUN_BINARY) ?? "bun";
   return await new Promise((resolve) => {
@@ -506,6 +510,17 @@ export function createAoCliRosterManagerDeps(
       // so the worker carries its MoltZap identity. `ao spawn` directly
       // bypasses the MoltZap bootstrap and leaves the worker without a
       // peer-channel back to the orchestrator.
+      //
+      // Allowlist propagation (Invariant 3 / SPEC §5(c)): we serialize
+      // every peer senderId the spawned worker will need to accept
+      // inbound messages from, into MOLTZAP_ALLOWED_SENDERS. The wrapper
+      // (ao-spawn-with-moltzap.ts) reads that env at worker boot.
+      const allowedSenderIds = new Set<string>([
+        rosterOptions.orchestratorSenderId as string,
+      ]);
+      for (const ids of peers.values()) {
+        for (const id of ids) allowedSenderIds.add(id as string);
+      }
       const spawnResult = await runBunScript(
         options,
         "bin/ao-spawn-with-moltzap.ts",
@@ -519,6 +534,9 @@ export function createAoCliRosterManagerDeps(
           "--project",
           projectName as string,
         ],
+        {
+          MOLTZAP_ALLOWED_SENDERS: [...allowedSenderIds].join(","),
+        },
       );
       if (spawnResult._tag === "Err") {
         return err({
@@ -531,19 +549,21 @@ export function createAoCliRosterManagerDeps(
               : spawnResult.error.cause,
         });
       }
-      // Parse the newly-spawned session name out of stdout. The AO CLI
-      // emits a line like `session: <name>` on success. If the format
-      // drifts we must fail loudly: fabricating a session name would
-      // leave the RosterManager tracking a ghost and every later
-      // retireSession would fail on a name that was never spawned.
+      // Parse the newly-spawned session name out of stdout. The wrapper
+      // `ao-spawn-with-moltzap.ts` writes a line containing
+      // `SESSION=<name>` on success (bin/ao-spawn-with-moltzap.ts:110).
+      // If the format drifts we fail loudly rather than fabricate: a
+      // wrong session name leaves the RosterManager tracking a ghost
+      // and every later retireSession fails on a name that was never
+      // spawned.
       const stdout = spawnResult.value.stdout;
-      const match = stdout.match(/session:\s*(\S+)/);
+      const match = stdout.match(/SESSION=([^\s]+)/);
       if (!match || !match[1]) {
         return err({
           _tag: "MemberSpawnFailed",
           role: member.role,
           displayLabel: member.displayLabel,
-          cause: `could not parse session name from \`ao spawn\` stdout: ${stdout.trim()}`,
+          cause: `could not parse SESSION= from ao-spawn-with-moltzap stdout: ${stdout.trim()}`,
         });
       }
       const sessionName = match[1] as AoSessionName;

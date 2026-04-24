@@ -167,16 +167,36 @@ function decodeExistingMcpConfig(configPath) {
   // Enumerate keys in a stable manner so behavior is deterministic across runs.
   const keys = Object.keys(mcpServers);
   if (keys.includes("moltzap")) {
-    // Distinguish "ours" from "collision": we mark files we author with a
-    // synthetic `_zapbotAuthored: true` key on the moltzap entry. Absent that
-    // marker, we treat the collision as foreign (Invariant 4 fail-fast).
+    // Distinguish "ours" from "collision":
+    // - New marker: `_zapbotAuthored: true` on the moltzap entry.
+    // - Legacy marker (pre-sbd#149): entry has `command: "bun"` and an
+    //   `args` array ending with `moltzap-claude-channel.ts`. Upgraded
+    //   workspaces still carry this shape; treating them as foreign
+    //   collisions would break launch until the user deletes the file.
+    // Absent either marker, treat as foreign (Invariant 4 fail-fast).
     const moltzapEntry = mcpServers.moltzap;
     if (
       moltzapEntry !== null &&
       typeof moltzapEntry === "object" &&
-      moltzapEntry._zapbotAuthored === true
+      !Array.isArray(moltzapEntry)
     ) {
-      return { kind: "ours", existing: parsed };
+      if (moltzapEntry._zapbotAuthored === true) {
+        return { kind: "ours", existing: parsed };
+      }
+      // Legacy zapbot shape: command === "bun" and args ends with
+      // moltzap-claude-channel.ts.
+      if (
+        moltzapEntry.command === "bun" &&
+        Array.isArray(moltzapEntry.args) &&
+        moltzapEntry.args.length > 0 &&
+        typeof moltzapEntry.args[moltzapEntry.args.length - 1] === "string" &&
+        moltzapEntry.args[moltzapEntry.args.length - 1].endsWith(
+          "moltzap-claude-channel.ts",
+        )
+      ) {
+        // Re-write as ours to stamp the new marker on next writeFileSync.
+        return { kind: "ours", existing: parsed };
+      }
     }
     return { kind: "reservedKeyCollision" };
   }

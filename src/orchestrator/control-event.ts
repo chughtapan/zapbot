@@ -157,6 +157,16 @@ export function toOrchestratorControlPrompt(
       reason: "commentBody must be a non-empty string",
     });
   }
+  // Fence-escape untrusted inputs. If the body contains the close-fence
+  // token, a raw concatenation would let the attacker-supplied text
+  // escape the fence and land as authoritative prompt content. Replace
+  // any literal occurrence of BEGIN_* or END_* fence tokens inside the
+  // body with an escaped marker so the fence remains inviolable.
+  const escapedBody = escapeUntrustedFenceTokens(event.commentBody);
+  const escapedTriggeredBy = escapeUntrustedFenceTokens(
+    event.triggeredBy.trim(),
+  );
+
   return ok({
     title: `GitHub control for ${event.repo}#${event.issue as number}`,
     body: [
@@ -167,14 +177,34 @@ export function toOrchestratorControlPrompt(
       `issue: #${event.issue as number}`,
       `comment_id: ${event.commentId as number}`,
       `delivery_id: ${event.deliveryId as string}`,
-      `triggered_by: <<<BEGIN_UNTRUSTED_USERNAME>>>${event.triggeredBy.trim()}<<<END_UNTRUSTED_USERNAME>>>`,
+      `triggered_by: <<<BEGIN_UNTRUSTED_USERNAME>>>${escapedTriggeredBy}<<<END_UNTRUSTED_USERNAME>>>`,
       "",
       ...ORCHESTRATOR_DOCTRINE,
       "",
       "github_comment_body:",
       "<<<BEGIN_UNTRUSTED_COMMENT>>>",
-      event.commentBody,
+      escapedBody,
       "<<<END_UNTRUSTED_COMMENT>>>",
     ].join("\n"),
   });
+}
+
+/**
+ * Escape any literal occurrence of the trust-signal fence tokens
+ * (`<<<BEGIN_UNTRUSTED_*>>>` / `<<<END_UNTRUSTED_*>>>`) within an
+ * untrusted string so the body cannot close the fence and inject
+ * instructions below. The escape tag is deliberately visible so an
+ * orchestrator reviewing the raw prompt can see an injection attempt
+ * was made.
+ *
+ * Principle 2: boundary escape on every untrusted concatenation site.
+ */
+function escapeUntrustedFenceTokens(untrusted: string): string {
+  // Match any `<<<BEGIN_UNTRUSTED_*>>>` or `<<<END_UNTRUSTED_*>>>`
+  // regardless of the inner tag suffix, so future fence variants are
+  // also caught.
+  return untrusted.replace(
+    /<<<(BEGIN|END)_UNTRUSTED_([A-Z0-9_]*)>>>/g,
+    "<<<$1_UNTRUSTED_$2_ESCAPED>>>",
+  );
 }
