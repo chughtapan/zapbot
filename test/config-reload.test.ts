@@ -315,7 +315,7 @@ describe("systemd integration: setup --server service generation", () => {
       .replace(/__ZAPBOT_DIR__/g, zapbotDir);
 
     expect(resolved).toContain(`WorkingDirectory=${projectDir}`);
-    expect(resolved).toContain(`EnvironmentFile=${projectDir}/.env`);
+    expect(resolved).toContain(`EnvironmentFile=-${projectDir}/.env`);
     expect(resolved).toContain(`ExecStart=/usr/bin/env bun ${zapbotDir}/bin/webhook-bridge.ts`);
     expect(resolved).not.toContain("__PROJECT_DIR__");
     expect(resolved).not.toContain("__ZAPBOT_DIR__");
@@ -334,18 +334,18 @@ describe("systemd integration: start.sh guard", () => {
     expect(startSh).toMatch(/systemctl is-active zapbot-bridge.*\n[\s\S]*?exit 1/);
   });
 
-  it("loads shared env before project env so checkout-local secrets win", () => {
+  it("reads secrets from ~/.zapbot/config.json via jq", () => {
     const startSh = fs.readFileSync(
       path.join(__dirname, "../start.sh"),
       "utf-8"
     );
 
-    const sharedIndex = startSh.indexOf('source "$HOME/.zapbot/.env"');
-    const projectIndex = startSh.indexOf('source "$PROJECT_DIR/.env"');
-
-    expect(sharedIndex).toBeGreaterThanOrEqual(0);
-    expect(projectIndex).toBeGreaterThanOrEqual(0);
-    expect(sharedIndex).toBeLessThan(projectIndex);
+    expect(startSh).toContain('$HOME/.zapbot/config.json');
+    expect(startSh).toContain('jq -er');
+    expect(startSh).toContain('.webhookSecret');
+    expect(startSh).toContain('.apiKey');
+    expect(startSh).not.toContain('source "$HOME/.zapbot/.env"');
+    expect(startSh).not.toContain('source "$PROJECT_DIR/.env"');
   });
 
   it("only forces claude-moltzap for the project path being bootstrapped", () => {
@@ -400,12 +400,8 @@ describe("systemd integration: start.sh guard", () => {
         ].join("\n"),
       );
       writeFile(
-        path.join(projectDir, ".env"),
-        [
-          "ZAPBOT_API_KEY=project-api-key",
-          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
-          "",
-        ].join("\n"),
+        path.join(tempHome, ".zapbot", "config.json"),
+        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
       );
 
       writeExecutable(
@@ -526,22 +522,8 @@ esac
         ].join("\n"),
       );
       writeFile(
-        path.join(projectDir, ".env"),
-        [
-          "# project-local secrets must win",
-          "ZAPBOT_API_KEY=project-api-key",
-          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
-          "",
-        ].join("\n"),
-      );
-      writeFile(
-        path.join(tempHome, ".zapbot", ".env"),
-        [
-          "# shared state intentionally stale",
-          "ZAPBOT_API_KEY=shared-api-key",
-          "ZAPBOT_WEBHOOK_SECRET=shared-webhook-secret",
-          "",
-        ].join("\n"),
+        path.join(tempHome, ".zapbot", "config.json"),
+        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
       );
 
       writeExecutable(
@@ -685,14 +667,8 @@ exit 0
         ].join("\n"),
       );
       writeFile(
-        path.join(projectDir, ".env"),
-        [
-          "ZAPBOT_API_KEY=project-api-key",
-          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
-          "ZAPBOT_GATEWAY_URL=   ",
-          "ZAPBOT_BRIDGE_URL=http://dead.example:3000",
-          "",
-        ].join("\n"),
+        path.join(tempHome, ".zapbot", "config.json"),
+        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
       );
 
       writeExecutable(
@@ -771,6 +747,8 @@ esac
           ...process.env,
           HOME: tempHome,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+          ZAPBOT_GATEWAY_URL: "   ",
+          ZAPBOT_BRIDGE_URL: "http://dead.example:3000",
         },
         encoding: "utf8",
       });
@@ -814,14 +792,8 @@ esac
         ].join("\n"),
       );
       writeFile(
-        path.join(projectDir, ".env"),
-        [
-          "ZAPBOT_API_KEY=project-api-key",
-          "ZAPBOT_WEBHOOK_SECRET=project-webhook-secret",
-          "ZAPBOT_GATEWAY_URL=https://gateway.example",
-          "ZAPBOT_BRIDGE_URL=http://dead.example:3000",
-          "",
-        ].join("\n"),
+        path.join(tempHome, ".zapbot", "config.json"),
+        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
       );
 
       writeExecutable(
@@ -868,6 +840,8 @@ esac
             ...process.env,
             HOME: tempHome,
             PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+            ZAPBOT_GATEWAY_URL: "https://gateway.example",
+            ZAPBOT_BRIDGE_URL: "http://dead.example:3000",
           },
           encoding: "utf8",
         });

@@ -27,10 +27,32 @@ if [ ! -f "$PROJECT_DIR/agent-orchestrator.yaml" ]; then
   exit 1
 fi
 
-# Load shared bootstrap defaults first, then let the project checkout override them.
-# Fresh repos must keep their generated webhook secret even if ~/.zapbot/.env still exists.
-[ -f "$HOME/.zapbot/.env" ] && set -a && source "$HOME/.zapbot/.env" && set +a
-[ -f "$PROJECT_DIR/.env" ] && set -a && source "$PROJECT_DIR/.env" && set +a
+# Load secrets from ~/.zapbot/config.json
+if [ ! -f "$HOME/.zapbot/config.json" ]; then
+  echo "ERROR: $HOME/.zapbot/config.json not found."
+  echo "FIX: Create $HOME/.zapbot/config.json with keys: webhookSecret, apiKey"
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required to read $HOME/.zapbot/config.json."
+  echo "FIX: Install jq (e.g. brew install jq or apt install jq)"
+  exit 1
+fi
+ZAPBOT_WEBHOOK_SECRET=$(jq -er '
+  if (.webhookSecret | type) == "string" and (.webhookSecret | length) > 0
+  then .webhookSecret else empty end
+' "$HOME/.zapbot/config.json") || {
+  echo "ERROR: webhookSecret missing or not a non-empty string in $HOME/.zapbot/config.json"
+  exit 1
+}
+ZAPBOT_API_KEY=$(jq -er '
+  if (.apiKey | type) == "string" and (.apiKey | length) > 0
+  then .apiKey else empty end
+' "$HOME/.zapbot/config.json") || {
+  echo "ERROR: apiKey missing or not a non-empty string in $HOME/.zapbot/config.json"
+  exit 1
+}
+export ZAPBOT_WEBHOOK_SECRET ZAPBOT_API_KEY
 
 BRIDGE_PORT="${ZAPBOT_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
@@ -136,12 +158,12 @@ NODE
 
 if [ -z "${ZAPBOT_API_KEY:-}" ]; then
   echo "ERROR: ZAPBOT_API_KEY is not set."
-  echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env, or set it manually."
+  echo "FIX: Set apiKey in $HOME/.zapbot/config.json"
   exit 1
 fi
 if [ -z "${ZAPBOT_WEBHOOK_SECRET:-}" ]; then
   echo "ERROR: ZAPBOT_WEBHOOK_SECRET is not set."
-  echo "FIX: Run '$ZAPBOT_DIR/bin/zapbot-team-init' to generate .env with both secrets."
+  echo "FIX: Set webhookSecret in $HOME/.zapbot/config.json"
   exit 1
 fi
 if [ "${ZAPBOT_WEBHOOK_SECRET}" = "${ZAPBOT_API_KEY}" ]; then
