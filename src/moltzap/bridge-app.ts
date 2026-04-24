@@ -13,10 +13,11 @@
  *   3. `new MoltZapApp({ serverUrl, agentKey, manifest: buildUnionManifest(...) })`.
  *   4. `app.start()` — internally connects WS (sends `auth/connect` with
  *      `agentKey`), calls `apps/register` with the union manifest, and
- *      ALSO calls `apps/create` with no `invitedAgentIds`. The seed
- *      session created at boot is closed immediately (see
- *      `closeBridgeBootSession`); per-spawn sessions are created via
- *      `createBridgeSession` below.
+ *      ALSO calls `apps/create` with no `invitedAgentIds` (SDK seed
+ *      session). The seed session is held by the SDK; per-spawn
+ *      sessions are created on demand via `createBridgeSession` below.
+ *      The seed-session disposition is an SDK-internal concern; the
+ *      bridge does not author messages on it.
  *   5. Singleton recorded in `__bridgeSingleton`. `bridgeAgentId()` is
  *      now non-null.
  *
