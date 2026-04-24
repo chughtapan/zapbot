@@ -1,18 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  buildMoltzapProcessEnv,
   buildMoltzapSpawnEnv,
   loadMoltzapRuntimeConfig,
   type MoltzapRuntimeConfig,
-} from "../src/moltzap/runtime.ts";
+} from "../v2/moltzap/runtime.ts";
 import {
   asAoSessionName,
   asIssueNumber,
   asProjectName,
   asRepoFullName,
-} from "../src/types.ts";
-import { checkSender } from "../src/moltzap/identity-allowlist.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
+} from "../v2/types.ts";
+import { gateInbound } from "../v2/moltzap/identity-allowlist.ts";
+import {
+  asMoltzapConversationId,
+  asMoltzapMessageId,
+  asMoltzapSenderId,
+} from "../v2/moltzap/types.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -66,11 +69,13 @@ describe("moltzap runtime / loadMoltzapRuntimeConfig", () => {
     expect(result.value._tag).toBe("MoltzapRegistration");
     if (result.value._tag !== "MoltzapRegistration") return;
     expect(result.value.allowlistCsv).toBe("agent-a,agent-b");
-    const gate = checkSender(
-      result.value.allowlist,
-      asMoltzapSenderId("agent-b"),
-      { conversationId: "conv-1", messageId: "m-1" },
-    );
+    const gate = gateInbound(result.value.allowlist, {
+      messageId: asMoltzapMessageId("m-1"),
+      conversationId: asMoltzapConversationId("conv-1"),
+      senderId: asMoltzapSenderId("agent-b"),
+      bodyText: "hello",
+      receivedAtMs: 1,
+    });
     expect(gate._tag).toBe("Ok");
   });
 });
@@ -117,7 +122,7 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
 
   it("registers a fresh agent when a registration secret is configured", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ apiKey: "registered-key", agentId: "agent-123" }), {
+      new Response(JSON.stringify({ apiKey: "registered-key" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
       }),
@@ -136,13 +141,12 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
       value: {
         MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
         MOLTZAP_API_KEY: "registered-key",
-        MOLTZAP_LOCAL_SENDER_ID: "agent-123",
         MOLTZAP_ALLOWED_SENDERS: "agent-a",
       },
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toBe("https://moltzap.example/ws/api/v1/auth/register");
+    expect(url).toBe("https://moltzap.example/api/v1/auth/register");
     expect(init?.method).toBe("POST");
     const parsedBody = JSON.parse(String(init?.body)) as {
       name: string;
@@ -168,57 +172,5 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
     if (result._tag !== "Err") return;
     expect(result.error._tag).toBe("MoltzapProvisionFailed");
     expect(result.error.cause).toContain("403");
-  });
-});
-
-describe("moltzap runtime / buildMoltzapProcessEnv", () => {
-  it("returns an empty env map when MoltZap is disabled", () => {
-    expect(buildMoltzapProcessEnv({ _tag: "MoltzapDisabled" })).toEqual({});
-  });
-
-  it("maps static config into parent-process env for ao sessions", () => {
-    expect(
-      buildMoltzapProcessEnv({
-        _tag: "MoltzapStatic",
-        serverUrl: "wss://moltzap.example/ws",
-        apiKey: "mz-key",
-        allowlistCsv: "orch-1,worker-1",
-        allowlist: loadMoltzapRuntimeConfig({
-          ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-          ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-          ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
-        })._tag === "Ok"
-          ? (loadMoltzapRuntimeConfig({
-              ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-              ZAPBOT_MOLTZAP_API_KEY: "mz-key",
-              ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
-            }) as Extract<
-              ReturnType<typeof loadMoltzapRuntimeConfig>,
-              { readonly _tag: "Ok" }
-            >).value.allowlist
-          : (() => {
-              throw new Error("unreachable");
-            })(),
-      }),
-    ).toEqual({
-      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      MOLTZAP_API_KEY: "mz-key",
-      MOLTZAP_ALLOWED_SENDERS: "orch-1,worker-1",
-    });
-  });
-
-  it("maps registration config into parent-process env for ao sessions", () => {
-    const result = loadMoltzapRuntimeConfig({
-      ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "reg-secret",
-      ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1",
-    });
-    expect(result._tag).toBe("Ok");
-    if (result._tag !== "Ok" || result.value._tag !== "MoltzapRegistration") return;
-    expect(buildMoltzapProcessEnv(result.value)).toEqual({
-      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      MOLTZAP_REGISTRATION_SECRET: "reg-secret",
-      MOLTZAP_ALLOWED_SENDERS: "orch-1",
-    });
   });
 });

@@ -10,8 +10,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Non-recursive: moltzap has no nested submodules; bootstrap handles init.
+          submodules: true
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('vendor/moltzap/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      # Must run before `bun install` — rewrites workspace:* specifiers that bun cannot resolve.
+      - run: bash scripts/bootstrap-moltzap.sh
       - run: bun install --frozen-lockfile
       - run: bun run lint

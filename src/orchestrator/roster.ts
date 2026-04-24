@@ -26,6 +26,14 @@ import type {
 } from "../types.ts";
 import { absurd, asIssueNumber, asProjectName, err, ok } from "../types.ts";
 import {
+  fromSenderIds,
+  type SenderAllowlist,
+} from "../moltzap/identity-allowlist.ts";
+import type {
+  PeerChannelKind,
+  RoleTopologyError,
+} from "../moltzap/role-topology.ts";
+import {
   ALL_WORKER_ROLES,
   decodeSessionRole,
   type WorkerRole,
@@ -125,6 +133,10 @@ export type RosterSpawnError =
       readonly _tag: "ReservedMcpKeyCollision";
       readonly key: "moltzap";
       readonly member: { readonly role: WorkerRole; readonly displayLabel: string };
+    }
+  | {
+      readonly _tag: "AllowlistBindFailed";
+      readonly cause: RoleTopologyError;
     };
 
 export type RosterTrackError = {
@@ -155,6 +167,10 @@ export interface RosterManagerDeps {
   readonly retireSession: (
     session: AoSessionName,
   ) => Promise<Result<void, Extract<RosterRetireError, { readonly _tag: "RetireReleaseFailed" }>>>;
+  readonly bindAllowlistFor: (
+    member: RosterMember,
+    peers: ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]>,
+  ) => Result<SenderAllowlist, RoleTopologyError>;
   readonly clock: () => number;
 }
 
@@ -441,15 +457,56 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
         });
       }
       const member = res.value;
+      const bindRes = deps.bindAllowlistFor(member, peers);
+      if (bindRes._tag === "Err") {
+        // Allowlist bind failed: rollback everything we've spawned
+        // (including the current one).
+        const allSpawned = [...spawned, member];
+        await rollback(allSpawned);
+        return err({ _tag: "AllowlistBindFailed", cause: bindRes.error });
+      }
       spawned.push(member);
     }
 
-    // Per spec rev 2 §5: sender admission moves to the server via
-    // `AppManifest.participantFilter` + `permissions`. The zapbot-side
-    // allowlist rebind loop that previously ran here is deleted — there is
-    // no client-side allowlist to keep in sync.
+    // Second-pass allowlist rebind (Invariant 3 — orchestrator-side
+    // bookkeeping): the first-member spawn saw no peers; the second-
+    // member spawn saw only the first peer; etc. After every member is
+    // up, rebind each member's in-memory allowlist with the FULL peer
+    // set so the orchestrator's view is symmetric.
     //
-    // Register roster once all members are up.
+    // NOTE (worker-side symmetry gap): the spawn-site MOLTZAP_ALLOWED_SENDERS
+    // env only carries peers spawned BEFORE each member. Later-spawned
+    // peers' senderIds are not pushed back to earlier workers (workers
+    // read this env only at boot). A follow-up MVP issue will add a
+    // worker-side allowlist-reload mechanism so the second-pass rebind
+    // propagates to already-running workers. For now, the gap is:
+    // architect-a cannot receive peer messages from architect-b spawned
+    // after it, even though the topology permits it. In-process tests
+    // pass; the asymmetry only surfaces under real ao-spawn transport.
+    const finalPeersByRole = new Map<WorkerRole, MoltzapSenderId[]>();
+    for (const role of ALL_WORKER_ROLES) finalPeersByRole.set(role, []);
+    for (const m of spawned) {
+      const bucket = finalPeersByRole.get(m.role);
+      if (bucket) bucket.push(m.senderId);
+    }
+    for (const m of spawned) {
+      // Exclude the member itself so a member's own senderId is not
+      // added to its own allowlist as a peer.
+      const perMemberPeers = new Map<WorkerRole, readonly MoltzapSenderId[]>();
+      for (const role of ALL_WORKER_ROLES) {
+        const ids = (finalPeersByRole.get(role) ?? []).filter(
+          (sid) => sid !== m.senderId,
+        );
+        if (ids.length > 0) perMemberPeers.set(role, ids);
+      }
+      const rebind = deps.bindAllowlistFor(m, perMemberPeers);
+      if (rebind._tag === "Err") {
+        await rollback(spawned);
+        return err({ _tag: "AllowlistBindFailed", cause: rebind.error });
+      }
+    }
+
+    // Register roster once all members are up and allowlists are symmetric.
     const statuses = new Map<AoSessionName, RosterMemberStatus>();
     for (const m of spawned) {
       statuses.set(m.session, { _tag: "Live", member: m });
@@ -718,3 +775,9 @@ export function resolveRetiredRecipientRoute(
   return { orchestrator: orchestratorSenderId };
 }
 
+// Expose allowlist constructor so downstream code that does not already
+// pull identity-allowlist into its import graph can still build the base.
+export { fromSenderIds };
+
+// Re-export peer channel kind for barrel convenience.
+export type { PeerChannelKind };
