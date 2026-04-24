@@ -335,6 +335,58 @@ describe("roster.resolveRetiredRecipientRoute", () => {
   });
 });
 
+describe("roster.retireMember TOCTOU (stamina round 3 #8)", () => {
+  it("overlapping retireMember calls do NOT double-invoke deps.retireSession", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("spawn failed");
+    const session = spawned.value[0].session;
+
+    // Fire two concurrent retires; the claim-and-mark-retired-before-
+    // await pattern must let the second see Retired and short-circuit.
+    const [r1, r2] = await Promise.all([
+      mgr.retireMember(ID, session, { _tag: "ExplicitRetire" }),
+      mgr.retireMember(ID, session, { _tag: "TaskComplete" }),
+    ]);
+    expect(r1._tag).toBe("Ok");
+    expect(r2._tag).toBe("Ok");
+    // deps.retireSession must have been called EXACTLY ONCE for this
+    // session — double-retire would push two entries.
+    const retiresForSession = events.retires.filter(
+      (s) => s === (session as string),
+    );
+    expect(retiresForSession).toHaveLength(1);
+  });
+
+  it("overlapping stepBudget+retireMember calls are also safe", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spec = specFromValid();
+    const spawned = await mgr.spawnRoster(spec);
+    if (spawned._tag !== "Ok") throw new Error("spawn failed");
+    const session = spawned.value[0].session;
+
+    // Advance time past the idle ceiling.
+    const t0 = deps.clock();
+    const future = asWallClockMs(t0 + spec.budget.sessionIdleSeconds * 1000 + 100);
+
+    // Fire stepBudget (which will retire) concurrently with an explicit
+    // retire for the same session.
+    const [stepResult, retireResult] = await Promise.all([
+      mgr.stepBudget(ID, future),
+      mgr.retireMember(ID, session, { _tag: "ExplicitRetire" }),
+    ]);
+    expect(retireResult._tag).toBe("Ok");
+    expect(["MemberRetired", "WithinBudget"]).toContain(stepResult._tag);
+    // deps.retireSession fired exactly once for this session.
+    const retiresForSession = events.retires.filter(
+      (s) => s === (session as string),
+    );
+    expect(retiresForSession.length).toBeLessThanOrEqual(1);
+  });
+});
+
 describe("roster budget wiring (SPEC §5(g) code-level enforcement)", () => {
   it("stepBudget returns WithinBudget immediately after spawn", async () => {
     const { deps } = makeDeps();

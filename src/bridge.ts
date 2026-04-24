@@ -19,8 +19,18 @@ import {
   type MoltzapRuntimeConfig,
 } from "./moltzap/runtime.ts";
 import type { IngressPolicy } from "./config/ingress.ts";
-import { createAoCliControlHost, forwardControlPrompt, type AoControlHost, type ForwardControlError } from "./orchestrator/runtime.ts";
+import {
+  createAoCliControlHost,
+  createAoCliRosterManagerDeps,
+  createRosterBudgetCoordinator,
+  forwardControlPrompt,
+  type AoControlHost,
+  type ForwardControlError,
+  type RosterBudgetCoordinator,
+} from "./orchestrator/runtime.ts";
+import { createRosterManager, type RosterManager } from "./orchestrator/roster.ts";
 import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
+import { asMoltzapSenderId } from "./moltzap/types.ts";
 import {
   absurd,
   asDeliveryId,
@@ -107,6 +117,15 @@ export interface BridgeHandlerContext {
   readonly mintToken: () => Promise<Result<InstallationToken, DispatchError>>;
   readonly gh: GhAdapter;
   readonly aoControlHost: AoControlHost;
+  /**
+   * WS2 MVP (sbd#149) budget enforcement seam: the RosterManager tracks
+   * spawned worker sessions per-roster; the coordinator folds ingress +
+   * tick events into its two-gate budget state machine (SPEC §5(g)).
+   * Production handlers invoke the coordinator's observe* methods; the
+   * boot-time periodic tick drives stepBudget across all active rosters.
+   */
+  readonly roster: RosterManager;
+  readonly rosterBudgetCoordinator: RosterBudgetCoordinator;
   readonly config: BridgeConfig;
 }
 
@@ -208,6 +227,15 @@ async function handleMention(
         return err(forwarded.error);
       }
       const session = forwarded.value.session;
+      // SPEC §5(g) wiring: a forwarded control prompt is a peer event
+      // on the orchestrator's session; record it and step all active
+      // budgets. Observer routes only to rosters that track this
+      // session (no-op for project-wide forwards).
+      ctx.rosterBudgetCoordinator.observeInboundPeerMessage({
+        session,
+        atMs: Date.now(),
+      });
+      void ctx.rosterBudgetCoordinator.tickAllBudgets();
       await postDurableStatusComment(
         { repo: c.repo, issue: c.issue },
         `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`,
@@ -761,12 +789,42 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       ...buildMoltzapProcessEnv(current.moltzap),
     },
   });
+  // WS2 MVP (sbd#149): instantiate the RosterManager + budget
+  // coordinator at boot. The manager tracks spawned worker sessions;
+  // the coordinator folds MoltZap inbound events (via the onInbound
+  // observer below) and a periodic tick (startPeriodicTick) into the
+  // two-gate budget state machine. This is the production wiring
+  // required by SPEC §5(g): stepBudget and record* are actually
+  // invoked by ingress + the tick, not just in tests.
+  const orchestratorSenderIdEnv =
+    process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID ??
+    process.env.MOLTZAP_LOCAL_SENDER_ID ??
+    "zapbot-orchestrator";
+  const rosterManagerDeps = createAoCliRosterManagerDeps(
+    {
+      configPath: current.aoConfigPath,
+      env: {
+        ...process.env,
+        AO_CALLER_TYPE: "orchestrator",
+        ...buildMoltzapProcessEnv(current.moltzap),
+      },
+    },
+    {
+      orchestratorSenderId: asMoltzapSenderId(orchestratorSenderIdEnv),
+    },
+  );
+  const rosterManager = createRosterManager(rosterManagerDeps);
+  const rosterBudgetCoordinator = createRosterBudgetCoordinator(rosterManager);
+  const BUDGET_TICK_MS = 30_000; // 30s tick — idle gate resolution.
+  const stopBudgetTick = rosterBudgetCoordinator.startPeriodicTick(BUDGET_TICK_MS);
   const ctx: BridgeHandlerContext = {
     mintToken: defaultMintToken,
     gh: ghAdapter,
     get aoControlHost() {
       return aoControlHost;
     },
+    roster: rosterManager,
+    rosterBudgetCoordinator,
     get config() {
       return current;
     },
@@ -783,6 +841,9 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
         stopHeartbeat();
         stopHeartbeat = null;
       }
+      // Stop the budget tick so the process exits cleanly (SPEC §5(g)
+      // periodic stepBudget runner).
+      stopBudgetTick();
       await deregisterAll(current);
       server.stop();
     },

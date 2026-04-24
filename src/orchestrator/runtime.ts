@@ -21,10 +21,13 @@ import type { AoSessionName, ProjectName, Result } from "../types.ts";
 import { err, ok } from "../types.ts";
 import type { OrchestratorControlPrompt } from "./control-event.ts";
 import type {
+  RosterManager,
   RosterManagerDeps,
   RosterMember,
   RosterMemberSpec,
 } from "./roster.ts";
+import { asWallClockMs, asTokenCount } from "./budget.ts";
+import type { TokenCount } from "./budget.ts";
 
 export interface OrchestratorReady {
   readonly session: AoSessionName;
@@ -473,6 +476,97 @@ export interface AoCliRosterManagerOptions {
    * `extendAllowlistForRole` unions per-role peers on top of this seed.
    */
   readonly orchestratorSenderId: MoltzapSenderId;
+}
+
+/**
+ * Bridge-side coordinator that folds MoltZap ingress events + an
+ * interval tick into the RosterManager's budget state machine. This is
+ * the production wiring point for SPEC §5(g) code-level enforcement:
+ * the coordinator converts raw inbound events (from
+ * `src/moltzap/bridge.ts` onInbound) into `recordPeerMessageObserved`
+ * + `stepBudget` calls, and runs `stepBudget` on a timer so gates
+ * trip even without fresh events.
+ *
+ * Instantiated once per bridge boot, alongside `aoControlHost`.
+ */
+export interface RosterBudgetCoordinator {
+  readonly observeInboundPeerMessage: (args: {
+    readonly session: AoSessionName;
+    readonly atMs: number;
+  }) => void;
+  readonly observeTokensConsumed: (args: {
+    readonly session: AoSessionName;
+    readonly tokens: number;
+  }) => void;
+  readonly tickAllBudgets: (nowMs?: number) => Promise<readonly RosterBudgetTickOutcome[]>;
+  readonly startPeriodicTick: (intervalMs: number) => () => void;
+}
+
+export interface RosterBudgetTickOutcome {
+  readonly rosterId: string;
+  readonly outcomeTag: string;
+}
+
+export function createRosterBudgetCoordinator(
+  manager: RosterManager,
+  nowFn: () => number = Date.now,
+): RosterBudgetCoordinator {
+  function observeInboundPeerMessage(args: {
+    readonly session: AoSessionName;
+    readonly atMs: number;
+  }): void {
+    const rosterId = manager.findRosterForSession(args.session);
+    if (rosterId === null) return;
+    // Fire-and-forget: the state fold is synchronous; errors only
+    // surface as RosterNotFound (which we just excluded).
+    manager.recordPeerMessageObserved(
+      rosterId,
+      args.session,
+      asWallClockMs(args.atMs),
+    );
+  }
+
+  function observeTokensConsumed(args: {
+    readonly session: AoSessionName;
+    readonly tokens: number;
+  }): void {
+    const rosterId = manager.findRosterForSession(args.session);
+    if (rosterId === null) return;
+    const tokens: TokenCount = asTokenCount(Math.max(0, Math.floor(args.tokens)));
+    manager.recordTokensConsumed(rosterId, args.session, tokens);
+  }
+
+  async function tickAllBudgets(
+    nowMs?: number,
+  ): Promise<readonly RosterBudgetTickOutcome[]> {
+    const t = asWallClockMs(nowMs ?? nowFn());
+    const ids = manager.listActiveRosterIds();
+    const outcomes: RosterBudgetTickOutcome[] = [];
+    for (const rosterId of ids) {
+      const outcome = await manager.stepBudget(rosterId, t);
+      outcomes.push({
+        rosterId: rosterId as unknown as string,
+        outcomeTag: outcome._tag,
+      });
+    }
+    return outcomes;
+  }
+
+  function startPeriodicTick(intervalMs: number): () => void {
+    const handle = setInterval(() => {
+      // Fire-and-forget; errors inside are already typed into
+      // BudgetStepOutcome.StepFailed.
+      void tickAllBudgets();
+    }, intervalMs);
+    return () => clearInterval(handle);
+  }
+
+  return {
+    observeInboundPeerMessage,
+    observeTokensConsumed,
+    tickAllBudgets,
+    startPeriodicTick,
+  };
 }
 
 export function createAoCliRosterManagerDeps(

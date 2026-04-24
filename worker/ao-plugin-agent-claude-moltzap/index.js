@@ -183,16 +183,31 @@ function decodeExistingMcpConfig(configPath) {
       if (moltzapEntry._zapbotAuthored === true) {
         return { kind: "ours", existing: parsed };
       }
-      // Legacy zapbot shape: command === "bun" and args ends with
-      // moltzap-claude-channel.ts.
+      // Legacy zapbot shape recognition (pre-sbd#149 worker writes).
+      // Tightened (stamina round 3 #9) so an attacker-supplied entry
+      // with a malicious prefix can't be whitewashed as "ours":
+      //   - command MUST be exactly "bun"
+      //   - args MUST be a single-element array (the legacy write
+      //     emitted exactly one arg, the script path)
+      //   - that single arg MUST end with "bin/moltzap-claude-channel.ts"
+      //     (not just "moltzap-claude-channel.ts" in some other dir)
+      //   - the entry MUST NOT carry extra top-level keys beyond the
+      //     known-legacy set {command, args, env}; anything extra is
+      //     evidence of divergence from the legacy shape and is
+      //     treated as a collision.
+      const LEGACY_KEYS = new Set(["command", "args", "env"]);
+      const entryKeys = Object.keys(moltzapEntry);
+      const onlyLegacyKeys = entryKeys.every((k) => LEGACY_KEYS.has(k));
+      const args = moltzapEntry.args;
+      const hasSingleScriptArg =
+        Array.isArray(args) &&
+        args.length === 1 &&
+        typeof args[0] === "string" &&
+        args[0].endsWith("/bin/moltzap-claude-channel.ts");
       if (
         moltzapEntry.command === "bun" &&
-        Array.isArray(moltzapEntry.args) &&
-        moltzapEntry.args.length > 0 &&
-        typeof moltzapEntry.args[moltzapEntry.args.length - 1] === "string" &&
-        moltzapEntry.args[moltzapEntry.args.length - 1].endsWith(
-          "moltzap-claude-channel.ts",
-        )
+        hasSingleScriptArg &&
+        onlyLegacyKeys
       ) {
         // Re-write as ours to stamp the new marker on next writeFileSync.
         return { kind: "ours", existing: parsed };

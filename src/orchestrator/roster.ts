@@ -236,6 +236,25 @@ export interface RosterManager {
     rosterId: RosterId,
     nowMs: WallClockMs,
   ) => Promise<BudgetStepOutcome>;
+
+  /**
+   * List every roster currently tracked (live or partially retired).
+   * Exposed so bridge-side coordinators can iterate active rosters
+   * without knowing individual rosterIds up-front — e.g. a peer-
+   * message inbound observer applies `recordPeerMessageObserved` to
+   * whichever roster owns the `session`.
+   */
+  readonly listActiveRosterIds: () => readonly RosterId[];
+
+  /**
+   * Find the rosterId that owns a session, if any. Returns null if
+   * the session is not tracked by any roster. Used by ingress
+   * observers to route events to the right roster without threading
+   * rosterId through every call site.
+   */
+  readonly findRosterForSession: (
+    session: AoSessionName,
+  ) => RosterId | null;
 }
 
 // ── Decoder ────────────────────────────────────────────────────────
@@ -539,8 +558,27 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     if (current._tag === "Retired") {
       return ok(undefined);
     }
+    // TOCTOU fix (stamina round 3 #8): claim-and-mark Retired BEFORE
+    // the await. Two overlapping `retireMember` or `stepBudget` calls
+    // were both seeing _tag==="Live", both invoking deps.retireSession,
+    // and both flipping state afterwards — double-retire. Now the
+    // second caller sees Retired before the first's await resolves and
+    // short-circuits (idempotent). We use a sentinel retiredAtMs=0
+    // while the retire is in-flight; the real retiredAtMs is written
+    // once deps.retireSession resolves so telemetry is accurate.
+    const retireInFlight: RosterMemberStatus = {
+      _tag: "Retired",
+      member: current.member,
+      reason,
+      retiredAtMs: 0,
+    };
+    rec.statuses.set(session, retireInFlight);
     const release = await deps.retireSession(session);
     if (release._tag === "Err") {
+      // Roll back the sentinel so a retry is possible. Leave the
+      // MemberRetired budget-event UN-applied until a successful
+      // release — otherwise the budget state desyncs from reality.
+      rec.statuses.set(session, current);
       return err(release.error);
     }
     const retiredAtMs = deps.clock();
@@ -668,6 +706,17 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     }
   }
 
+  function listActiveRosterIds(): readonly RosterId[] {
+    return [...rosters.keys()];
+  }
+
+  function findRosterForSession(session: AoSessionName): RosterId | null {
+    for (const [rid, rec] of rosters) {
+      if (rec.statuses.has(session)) return rid;
+    }
+    return null;
+  }
+
   return {
     spawnRoster,
     trackRoster,
@@ -676,6 +725,8 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     recordPeerMessageObserved,
     recordTokensConsumed,
     stepBudget,
+    listActiveRosterIds,
+    findRosterForSession,
   };
 }
 
