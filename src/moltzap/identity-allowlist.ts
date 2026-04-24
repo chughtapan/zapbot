@@ -49,6 +49,17 @@ export function fromSenderIds(ids: readonly MoltzapSenderId[]): SenderAllowlist 
   }) as SenderAllowlist;
 }
 
+/**
+ * Extract the sender-id set from an opaque allowlist. Used by
+ * `role-topology.extendAllowlistForRole` to union the base entries with
+ * per-role peer additions. Consumers outside this module should treat the
+ * allowlist as opaque; this accessor is the one authorised seam.
+ */
+export function toSenderIds(list: SenderAllowlist): readonly MoltzapSenderId[] {
+  const internal = list as SenderAllowlistInternal;
+  return [...internal[ALLOWLIST]] as unknown as readonly MoltzapSenderId[];
+}
+
 // ── Error channel ───────────────────────────────────────────────────
 
 export type AllowlistError = {
