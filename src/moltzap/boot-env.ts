@@ -23,7 +23,24 @@ export async function resolveChannelBootstrap(
   if (serverUrl === null) return err("MOLTZAP_SERVER_URL is required");
   const apiKey = trim(env.MOLTZAP_API_KEY);
   if (apiKey !== null) {
-    return ok({ serverUrl, apiKey, localSenderId: trim(env.MOLTZAP_LOCAL_SENDER_ID) ?? "" });
+    // Static-mode correctness: when MOLTZAP_API_KEY is provided (MoltzapStatic
+    // path in runtime.ts), the orchestrator does NOT derive a sender_id, so
+    // the operator must set MOLTZAP_LOCAL_SENDER_ID explicitly. Pre-sbd#172
+    // this path fell back to the MoltZapService `hello.agentId`, but that
+    // fallback was subsumed by upstream @moltzap/claude-code-channel and is
+    // no longer reachable from here. Failing loud beats silently writing an
+    // empty `moltzap_sender_id` into AO session metadata — downstream peer
+    // allowlist matching would drop orchestrator↔worker traffic otherwise.
+    // sbd#190 will delete MoltzapStatic entirely; until then, require the id.
+    const localSenderId = trim(env.MOLTZAP_LOCAL_SENDER_ID);
+    if (localSenderId === null) {
+      return err(
+        "MOLTZAP_LOCAL_SENDER_ID is required when MOLTZAP_API_KEY is set " +
+          "(static MoltZap mode). Registration-backed deployments (using " +
+          "MOLTZAP_REGISTRATION_SECRET) derive it automatically.",
+      );
+    }
+    return ok({ serverUrl, apiKey, localSenderId });
   }
   const registrationSecret = trim(env.MOLTZAP_REGISTRATION_SECRET);
   if (registrationSecret === null) {
