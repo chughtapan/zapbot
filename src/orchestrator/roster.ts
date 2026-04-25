@@ -26,15 +26,6 @@ import type {
 } from "../types.ts";
 import { absurd, asIssueNumber, asProjectName, err, ok } from "../types.ts";
 import {
-  fromSenderIds,
-  type SenderAllowlist,
-} from "../moltzap/identity-allowlist.ts";
-import type {
-  PeerChannelKind,
-  RoleTopologyError,
-} from "../moltzap/role-topology.ts";
-import {
-  ALL_WORKER_ROLES,
   decodeSessionRole,
   type WorkerRole,
 } from "../moltzap/session-role.ts";
@@ -133,10 +124,6 @@ export type RosterSpawnError =
       readonly _tag: "ReservedMcpKeyCollision";
       readonly key: "moltzap";
       readonly member: { readonly role: WorkerRole; readonly displayLabel: string };
-    }
-  | {
-      readonly _tag: "AllowlistBindFailed";
-      readonly cause: RoleTopologyError;
     };
 
 export type RosterTrackError = {
@@ -156,7 +143,6 @@ export interface RosterManagerDeps {
     readonly member: RosterMemberSpec;
     readonly issue: IssueNumber;
     readonly projectName: ProjectName;
-    readonly peers: ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]>;
   }) => Promise<
     Result<
       RosterMember,
@@ -167,10 +153,6 @@ export interface RosterManagerDeps {
   readonly retireSession: (
     session: AoSessionName,
   ) => Promise<Result<void, Extract<RosterRetireError, { readonly _tag: "RetireReleaseFailed" }>>>;
-  readonly bindAllowlistFor: (
-    member: RosterMember,
-    peers: ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]>,
-  ) => Result<SenderAllowlist, RoleTopologyError>;
   readonly clock: () => number;
 }
 
@@ -400,13 +382,11 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     const spawned: RosterMember[] = [];
 
     for (const memberSpec of spec.members) {
-      const peers = resolveSpawnPeers(spec, spawned, memberSpec);
       const res = await deps.spawnSession({
         rosterId: spec.rosterId,
         member: memberSpec,
         issue: spec.issue,
         projectName: spec.projectName,
-        peers,
       });
       if (res._tag === "Err") {
         const cleanupErr = await rollback(spawned);
@@ -456,57 +436,17 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
           cause,
         });
       }
-      const member = res.value;
-      const bindRes = deps.bindAllowlistFor(member, peers);
-      if (bindRes._tag === "Err") {
-        // Allowlist bind failed: rollback everything we've spawned
-        // (including the current one).
-        const allSpawned = [...spawned, member];
-        await rollback(allSpawned);
-        return err({ _tag: "AllowlistBindFailed", cause: bindRes.error });
-      }
-      spawned.push(member);
+      spawned.push(res.value);
     }
 
-    // Second-pass allowlist rebind (Invariant 3 — orchestrator-side
-    // bookkeeping): the first-member spawn saw no peers; the second-
-    // member spawn saw only the first peer; etc. After every member is
-    // up, rebind each member's in-memory allowlist with the FULL peer
-    // set so the orchestrator's view is symmetric.
-    //
-    // NOTE (worker-side symmetry gap): the spawn-site MOLTZAP_ALLOWED_SENDERS
-    // env only carries peers spawned BEFORE each member. Later-spawned
-    // peers' senderIds are not pushed back to earlier workers (workers
-    // read this env only at boot). A follow-up MVP issue will add a
-    // worker-side allowlist-reload mechanism so the second-pass rebind
-    // propagates to already-running workers. For now, the gap is:
-    // architect-a cannot receive peer messages from architect-b spawned
-    // after it, even though the topology permits it. In-process tests
-    // pass; the asymmetry only surfaces under real ao-spawn transport.
-    const finalPeersByRole = new Map<WorkerRole, MoltzapSenderId[]>();
-    for (const role of ALL_WORKER_ROLES) finalPeersByRole.set(role, []);
-    for (const m of spawned) {
-      const bucket = finalPeersByRole.get(m.role);
-      if (bucket) bucket.push(m.senderId);
-    }
-    for (const m of spawned) {
-      // Exclude the member itself so a member's own senderId is not
-      // added to its own allowlist as a peer.
-      const perMemberPeers = new Map<WorkerRole, readonly MoltzapSenderId[]>();
-      for (const role of ALL_WORKER_ROLES) {
-        const ids = (finalPeersByRole.get(role) ?? []).filter(
-          (sid) => sid !== m.senderId,
-        );
-        if (ids.length > 0) perMemberPeers.set(role, ids);
-      }
-      const rebind = deps.bindAllowlistFor(m, perMemberPeers);
-      if (rebind._tag === "Err") {
-        await rollback(spawned);
-        return err({ _tag: "AllowlistBindFailed", cause: rebind.error });
-      }
-    }
+    // sbd#201: client-side allowlist binding is gone. Admission lives
+    // server-side: the spawn dep calls `createBridgeSession` with
+    // `invitedAgentIds: [thisWorkerSenderId]` BEFORE each `ao spawn`, so
+    // the bridge's `apps/create` invite admits the worker on every
+    // conversation key in the union manifest. Role-pair topology is
+    // dissolved into role-pair conversation keys (`conversation-keys.ts`).
 
-    // Register roster once all members are up and allowlists are symmetric.
+    // Register roster once all members are up.
     const statuses = new Map<AoSessionName, RosterMemberStatus>();
     for (const m of spawned) {
       statuses.set(m.session, { _tag: "Live", member: m });
@@ -732,38 +672,6 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
 
 // ── Pure helpers ──────────────────────────────────────────────────
 
-export function resolveSpawnPeers(
-  spec: RosterSpec,
-  alreadySpawned: readonly RosterMember[],
-  incoming: RosterMemberSpec,
-): ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]> {
-  // `spec` is retained in the signature for forward-compat: a future
-  // revision may prune peers using the spec's declared-member list before
-  // a role's members have all spawned. Today we only need the
-  // already-spawned set.
-  void spec;
-  const byRole = new Map<WorkerRole, MoltzapSenderId[]>();
-  for (const role of ALL_WORKER_ROLES) {
-    byRole.set(role, []);
-  }
-  for (const m of alreadySpawned) {
-    const bucket = byRole.get(m.role);
-    if (bucket) bucket.push(m.senderId);
-  }
-  // Omit roles the incoming member cannot receive from directly. For the
-  // four-role topology, `implementer` and `reviewer` do not receive from
-  // sideways peers of their own role, so we drop those buckets from the
-  // returned map (the empty default would leak them as "present but
-  // empty" to the bind step).
-  // Drop buckets for roles the incoming member cannot receive from
-  // sideways (same-role peers for implementer/reviewer). The returned
-  // type narrows to `ReadonlyMap<_, readonly _[]>` so callers cannot
-  // mutate through it; no defensive freeze needed.
-  if (incoming.role === "implementer") byRole.delete("implementer");
-  if (incoming.role === "reviewer") byRole.delete("reviewer");
-  return byRole;
-}
-
 export function resolveRetiredRecipientRoute(
   roster: readonly RosterMemberStatus[],
   orchestratorSenderId: MoltzapSenderId,
@@ -775,9 +683,3 @@ export function resolveRetiredRecipientRoute(
   return { orchestrator: orchestratorSenderId };
 }
 
-// Expose allowlist constructor so downstream code that does not already
-// pull identity-allowlist into its import graph can still build the base.
-export { fromSenderIds };
-
-// Re-export peer channel kind for barrel convenience.
-export type { PeerChannelKind };

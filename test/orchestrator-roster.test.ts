@@ -4,25 +4,18 @@ import {
   createRosterManager,
   decodeRosterSpec,
   resolveRetiredRecipientRoute,
-  resolveSpawnPeers,
   type RosterManager,
   type RosterManagerDeps,
   type RosterMember,
   type RosterSpec,
 } from "../src/orchestrator/roster.ts";
 import {
-  asIdleSeconds,
   asTokenCount,
   asWallClockMs,
 } from "../src/orchestrator/budget.ts";
-import {
-  fromSenderIds,
-} from "../src/moltzap/identity-allowlist.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import {
   asAoSessionName,
-  asIssueNumber,
-  asProjectName,
   ok,
   err,
 } from "../src/types.ts";
@@ -170,7 +163,6 @@ function makeDeps(cfg: FakeSpawnConfig = {}): {
       }
       return ok(undefined);
     },
-    bindAllowlistFor: () => ok(fromSenderIds([])),
     clock: () => now,
   };
 
@@ -301,29 +293,6 @@ describe("roster.retireRoster", () => {
     expect(res._tag).toBe("Err");
     if (res._tag !== "Err") return;
     expect(res.error._tag).toBe("RosterNotFound");
-  });
-});
-
-describe("roster.resolveSpawnPeers", () => {
-  it("includes only already-spawned members, grouped by role", () => {
-    const spec = specFromValid();
-    const spawned: RosterMember[] = [
-      {
-        rosterId: ID,
-        session: asAoSessionName("sess-a"),
-        senderId: asMoltzapSenderId("sender-a"),
-        role: "architect",
-        displayLabel: "architect-a",
-        spawnedAtMs: 0,
-      },
-    ];
-    const peers = resolveSpawnPeers(spec, spawned, {
-      role: "architect",
-      displayLabel: "architect-b",
-    });
-    expect(peers.get("architect")).toEqual([asMoltzapSenderId("sender-a")]);
-    expect(peers.get("implementer")).toEqual([]);
-    expect(peers.get("reviewer")).toEqual([]);
   });
 });
 

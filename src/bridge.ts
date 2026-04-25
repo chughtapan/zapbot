@@ -831,6 +831,17 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     if (registered !== null) return bridgeAgentIdAsSenderId(registered);
     return asMoltzapSenderId("zapbot-orchestrator");
   })();
+  // sbd#201: when MoltZap is registration-backed, plumb auth into the
+  // roster manager so the spawn dep can mint per-worker creds and call
+  // `createBridgeSession({invitedAgentIds: [thisWorkerSenderId]})` BEFORE
+  // each `ao spawn` (architect rev 4 §4.3).
+  const moltzapAuth =
+    current.moltzap._tag === "MoltzapRegistration"
+      ? {
+          serverUrl: current.moltzap.serverUrl,
+          registrationSecret: current.moltzap.registrationSecret,
+        }
+      : null;
   const rosterManagerDeps = createAoCliRosterManagerDeps(
     {
       configPath: current.aoConfigPath,
@@ -842,6 +853,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     },
     {
       orchestratorSenderId,
+      moltzapAuth,
     },
   );
   const rosterManager = createRosterManager(rosterManagerDeps);

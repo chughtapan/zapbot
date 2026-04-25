@@ -22,12 +22,9 @@ import {
   type RosterMember,
   type RosterSpec,
 } from "../src/orchestrator/roster.ts";
-import { asTokenCount } from "../src/orchestrator/budget.ts";
-import { fromSenderIds } from "../src/moltzap/identity-allowlist.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import {
   asAoSessionName,
-  err,
   ok,
 } from "../src/types.ts";
 
@@ -80,7 +77,6 @@ function makeDeps(): {
       retires.push(session as string);
       return ok(undefined);
     },
-    bindAllowlistFor: () => ok(fromSenderIds([])),
     clock: () => t,
   };
   return { deps, retires, now: () => t };

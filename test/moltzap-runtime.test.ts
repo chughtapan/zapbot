@@ -10,8 +10,6 @@ import {
   asProjectName,
   asRepoFullName,
 } from "../src/types.ts";
-import { checkSender } from "../src/moltzap/identity-allowlist.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -48,23 +46,17 @@ describe("moltzap runtime / loadMoltzapRuntimeConfig", () => {
     expect(result.error.reason).toContain("ZAPBOT_MOLTZAP_REGISTRATION_SECRET");
   });
 
-  it("loads registration mode and builds a sender allowlist from CSV", () => {
+  it("loads registration mode (sbd#201: no client-side allowlist)", () => {
     const result = loadMoltzapRuntimeConfig({
       ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
       ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "reg-secret",
-      ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "agent-a, agent-b ",
     });
     expect(result._tag).toBe("Ok");
     if (result._tag !== "Ok") return;
     expect(result.value._tag).toBe("MoltzapRegistration");
     if (result.value._tag !== "MoltzapRegistration") return;
-    expect(result.value.allowlistCsv).toBe("agent-a,agent-b");
-    const gate = checkSender(
-      result.value.allowlist,
-      asMoltzapSenderId("agent-b"),
-      { conversationId: "conv-1", messageId: "m-1" },
-    );
-    expect(gate._tag).toBe("Ok");
+    expect(result.value.serverUrl).toBe("wss://moltzap.example/ws");
+    expect(result.value.registrationSecret).toBe("reg-secret");
   });
 });
 
@@ -84,7 +76,6 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
     const configResult = loadMoltzapRuntimeConfig({
       ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
       ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "reg-secret",
-      ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "agent-a",
     });
     expect(configResult._tag).toBe("Ok");
     if (configResult._tag !== "Ok" || configResult.value._tag !== "MoltzapRegistration") return;
@@ -96,7 +87,6 @@ describe("moltzap runtime / buildMoltzapSpawnEnv", () => {
         MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
         MOLTZAP_API_KEY: "registered-key",
         MOLTZAP_LOCAL_SENDER_ID: "agent-123",
-        MOLTZAP_ALLOWED_SENDERS: "agent-a",
       },
     });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -139,14 +129,12 @@ describe("moltzap runtime / buildMoltzapProcessEnv", () => {
     const result = loadMoltzapRuntimeConfig({
       ZAPBOT_MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
       ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "reg-secret",
-      ZAPBOT_MOLTZAP_ALLOWED_SENDERS: "orch-1",
     });
     expect(result._tag).toBe("Ok");
     if (result._tag !== "Ok" || result.value._tag !== "MoltzapRegistration") return;
     expect(buildMoltzapProcessEnv(result.value)).toEqual({
       MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
       MOLTZAP_REGISTRATION_SECRET: "reg-secret",
-      MOLTZAP_ALLOWED_SENDERS: "orch-1",
     });
   });
 });

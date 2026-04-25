@@ -3,8 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dispatch } from "../src/ao/dispatcher.ts";
-import { fromSenderIds } from "../src/moltzap/identity-allowlist.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import {
   asIssueNumber,
   asProjectName,
@@ -32,7 +30,6 @@ out="$AO_CONFIG_PATH.capture"
   printf '%s\\n' "$GH_TOKEN"
   printf '%s\\n' "$MOLTZAP_SERVER_URL"
   printf '%s\\n' "$MOLTZAP_API_KEY"
-  printf '%s\\n' "$MOLTZAP_ALLOWED_SENDERS"
 } > "$out"
 exit 0
 `,
@@ -60,8 +57,6 @@ exit 0
         _tag: "MoltzapRegistration",
         serverUrl: "wss://moltzap.example/ws",
         registrationSecret: "reg-secret",
-        allowlistCsv: "agent-a",
-        allowlist: fromSenderIds([asMoltzapSenderId("agent-a")]),
       },
     });
 
@@ -76,7 +71,6 @@ exit 0
       "gh-installation-token",
       "wss://moltzap.example/ws",
       "moltzap-key",
-      "agent-a",
     ]);
   });
 });

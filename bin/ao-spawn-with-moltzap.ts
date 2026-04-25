@@ -16,7 +16,7 @@ const moltzapEnvFile = readZapbotEnvFile();
 const MOLTZAP_ENV_FALLBACKS = {
   MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
   MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
-  MOLTZAP_ALLOWED_SENDERS: "ZAPBOT_MOLTZAP_ALLOWED_SENDERS",
+  MOLTZAP_AGENT_KEY: "ZAPBOT_MOLTZAP_AGENT_KEY",
   MOLTZAP_REGISTRATION_SECRET: "ZAPBOT_MOLTZAP_REGISTRATION_SECRET",
 } as const;
 
@@ -42,9 +42,18 @@ const childEnv: Record<string, string> = {
 };
 delete childEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC;
 
-const allowedSenders = resolveRuntimeEnv("MOLTZAP_ALLOWED_SENDERS");
-if (allowedSenders !== null) {
-  childEnv.MOLTZAP_ALLOWED_SENDERS = allowedSenders;
+// sbd#201: when the orchestrator pre-mints worker creds, propagate them
+// so the worker boots on the pre-minted-credentials path
+// (`bin/moltzap-claude-channel.ts:resolveCredentials`). Falling back to
+// the self-register path when these are absent is the transitional
+// behavior tracked by sbd#205.
+const preMintedAgentKey = trimEnv(process.env.MOLTZAP_AGENT_KEY);
+if (preMintedAgentKey !== null) {
+  childEnv.MOLTZAP_AGENT_KEY = preMintedAgentKey;
+}
+const preMintedSenderId = trimEnv(process.env.MOLTZAP_LOCAL_SENDER_ID);
+if (preMintedSenderId !== null) {
+  childEnv.MOLTZAP_LOCAL_SENDER_ID = preMintedSenderId;
 }
 
 const spawnedSession = await runAoSpawn(spawnArgs, childEnv);

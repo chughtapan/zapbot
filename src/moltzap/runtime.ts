@@ -17,8 +17,6 @@ import type {
   RepoFullName,
   Result,
 } from "../types.ts";
-import { fromSenderIds, type SenderAllowlist } from "./identity-allowlist.ts";
-import { asMoltzapSenderId } from "./types.ts";
 
 export interface MoltzapSpawnContext {
   readonly repo: RepoFullName;
@@ -33,8 +31,6 @@ export type MoltzapRuntimeConfig =
       readonly _tag: "MoltzapRegistration";
       readonly serverUrl: string;
       readonly registrationSecret: string;
-      readonly allowlistCsv: string | null;
-      readonly allowlist: SenderAllowlist;
     };
 
 export type MoltzapConfigError = {
@@ -52,8 +48,6 @@ export function loadMoltzapRuntimeConfig(
 ): Result<MoltzapRuntimeConfig, MoltzapConfigError> {
   const serverUrl = normalizeEnvVar(env.ZAPBOT_MOLTZAP_SERVER_URL);
   const registrationSecret = normalizeEnvVar(env.ZAPBOT_MOLTZAP_REGISTRATION_SECRET);
-  const allowlistCsv = normalizeCsv(env.ZAPBOT_MOLTZAP_ALLOWED_SENDERS);
-  const allowlist = fromSenderIds(parseAllowlist(allowlistCsv));
 
   if (serverUrl === null) {
     if (registrationSecret !== null) {
@@ -77,8 +71,6 @@ export function loadMoltzapRuntimeConfig(
     _tag: "MoltzapRegistration",
     serverUrl,
     registrationSecret,
-    allowlistCsv,
-    allowlist,
   });
 }
 
@@ -111,9 +103,6 @@ export function buildMoltzapProcessEnv(
       return {
         MOLTZAP_SERVER_URL: config.serverUrl,
         MOLTZAP_REGISTRATION_SECRET: config.registrationSecret,
-        ...(config.allowlistCsv !== null
-          ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
-          : {}),
       };
     default:
       return absurd(config);
@@ -177,14 +166,7 @@ async function registerSessionAgent(
     });
   }
 
-  return ok(
-    toSpawnEnv(
-      config.serverUrl,
-      apiKey.apiKey,
-      config.allowlistCsv,
-      apiKey.agentId,
-    ),
-  );
+  return ok(toSpawnEnv(config.serverUrl, apiKey.apiKey, apiKey.agentId));
 }
 
 function decodeRegistrationResponse(
@@ -207,7 +189,6 @@ function decodeRegistrationResponse(
 function toSpawnEnv(
   serverUrl: string,
   apiKey: string,
-  allowlistCsv: string | null,
   localSenderId?: string,
 ): Record<string, string> {
   const env: Record<string, string> = {
@@ -217,35 +198,13 @@ function toSpawnEnv(
   if (typeof localSenderId === "string" && localSenderId.length > 0) {
     env.MOLTZAP_LOCAL_SENDER_ID = localSenderId;
   }
-  if (allowlistCsv !== null) {
-    env.MOLTZAP_ALLOWED_SENDERS = allowlistCsv;
-  }
   return env;
-}
-
-function parseAllowlist(allowlistCsv: string | null) {
-  if (allowlistCsv === null) return [];
-  return allowlistCsv
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0)
-    .map((value) => asMoltzapSenderId(value));
 }
 
 function normalizeEnvVar(raw: string | undefined): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function normalizeCsv(raw: string | undefined): string | null {
-  const trimmed = normalizeEnvVar(raw);
-  if (trimmed === null) return null;
-  const parts = trimmed
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-  return parts.length > 0 ? parts.join(",") : null;
 }
 
 function toHttpBaseUrl(serverUrl: string): string {

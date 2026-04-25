@@ -13,8 +13,9 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fromSenderIds } from "../moltzap/identity-allowlist.ts";
-import { extendAllowlistForRole } from "../moltzap/role-topology.ts";
+import { Effect } from "effect";
+import { createBridgeSession } from "../moltzap/bridge-app.ts";
+import { registerBridgeAgent } from "../moltzap/bridge-identity.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
@@ -25,7 +26,6 @@ import type {
   RosterManager,
   RosterManagerDeps,
   RosterMember,
-  RosterMemberSpec,
 } from "./roster.ts";
 import { asWallClockMs, asTokenCount } from "./budget.ts";
 import type { TokenCount } from "./budget.ts";
@@ -463,20 +463,41 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
 // ── RosterManagerDeps factory (architect plan §2.7) ───────────────
 //
 // Bind the typed RosterManager interface to the AO CLI. `spawnSession`
-// invokes `bun run bin/ao-spawn-with-moltzap.ts` under the hood so the
-// spawned worker carries its MoltZap identity; `retireSession` issues
-// `ao kill`. `bindAllowlistFor` uses `extendAllowlistForRole` from the
-// topology module. `clock` defaults to `Date.now`.
+// mints the worker's MoltZap creds + admits them to bridge-owned
+// conversations via `createBridgeSession({invitedAgentIds:[senderId]})`
+// BEFORE invoking `bun run bin/ao-spawn-with-moltzap.ts`, so the worker
+// boots on the pre-minted-credentials path (sbd#201 + architect rev 4
+// §4.3). `retireSession` issues `ao kill`. `clock` defaults to
+// `Date.now`.
 //
 // Callers: `createRosterManager(createAoCliRosterManagerDeps(opts, {...}))`.
 
 export interface AoCliRosterManagerOptions {
   /**
-   * Orchestrator sender identity. Seeded into every worker's base
-   * allowlist so workers accept inbound messages from the orchestrator;
-   * `extendAllowlistForRole` unions per-role peers on top of this seed.
+   * Orchestrator sender identity. Recorded on every spawned member so
+   * downstream callers can route worker-to-orchestrator messages back to
+   * a known endpoint.
    */
   readonly orchestratorSenderId: MoltzapSenderId;
+  /**
+   * MoltZap auth used to mint per-worker credentials BEFORE spawn (sbd#201).
+   * When present:
+   *   1. The spawn dep calls `registerBridgeAgent({serverUrl,
+   *      registrationSecret, displayName})` to mint `(agentKey, senderId)`.
+   *   2. Calls `createBridgeSession({invitedAgentIds: [senderId]})` so
+   *      the worker is admitted to the bridge's manifest conversations
+   *      server-side via `apps/create` (architect rev 4 §4.3).
+   *   3. Spawns `bin/ao-spawn-with-moltzap.ts` with `MOLTZAP_AGENT_KEY` +
+   *      `MOLTZAP_LOCAL_SENDER_ID` so the worker boots on path 1
+   *      (pre-minted) — see `bin/moltzap-claude-channel.ts:resolveCredentials`.
+   * Absent (`null`) — the spawn path falls back to the worker
+   * self-register flow (transitional). Used by tests and MoltzapDisabled
+   * deployments.
+   */
+  readonly moltzapAuth: {
+    readonly serverUrl: string;
+    readonly registrationSecret: string;
+  } | null;
 }
 
 /**
@@ -575,8 +596,7 @@ export function createAoCliRosterManagerDeps(
   rosterOptions: AoCliRosterManagerOptions,
 ): RosterManagerDeps {
   return {
-    spawnSession: async ({ rosterId, member, issue, projectName, peers }) => {
-      void peers;
+    spawnSession: async ({ rosterId, member, issue, projectName }) => {
       // Sentinel-marked reserved-key collision: if the caller passed a
       // displayLabel that starts with "moltzap", reject it with the
       // ReservedMcpKeyCollision error tag (Invariant 4). The label becomes
@@ -601,21 +621,58 @@ export function createAoCliRosterManagerDeps(
           + `your acceptance criteria and publish durable artifacts to GitHub.`,
       ].join("\n");
 
-      // Architect plan §2.3: spawn through `bin/ao-spawn-with-moltzap.ts`
-      // so the worker carries its MoltZap identity. `ao spawn` directly
-      // bypasses the MoltZap bootstrap and leaves the worker without a
-      // peer-channel back to the orchestrator.
-      //
-      // Allowlist propagation (Invariant 3 / SPEC §5(c)): we serialize
-      // every peer senderId the spawned worker will need to accept
-      // inbound messages from, into MOLTZAP_ALLOWED_SENDERS. The wrapper
-      // (ao-spawn-with-moltzap.ts) reads that env at worker boot.
-      const allowedSenderIds = new Set<string>([
-        rosterOptions.orchestratorSenderId as string,
-      ]);
-      for (const ids of peers.values()) {
-        for (const id of ids) allowedSenderIds.add(id as string);
+      // sbd#201: mint worker creds + admit on bridge BEFORE spawn so the
+      // worker is admitted to bridge-owned conversations server-side via
+      // `apps/create({invitedAgentIds})` (architect rev 4 §4.3).
+      // `moltzapAuth: null` short-circuits — used by MoltzapDisabled
+      // deployments + tests that exercise the spawn path without a live
+      // bridge.
+      let preMinted: { agentKey: string; senderId: MoltzapSenderId } | null = null;
+      if (rosterOptions.moltzapAuth !== null) {
+        const auth = rosterOptions.moltzapAuth;
+        const displayName = `${rosterId as string}-${member.displayLabel}`.slice(0, 32);
+        const registration = await registerBridgeAgent({
+          serverUrl: auth.serverUrl,
+          registrationSecret: auth.registrationSecret,
+          displayName,
+        });
+        if (registration._tag === "Err") {
+          return err({
+            _tag: "MemberSpawnFailed",
+            role: member.role,
+            displayLabel: member.displayLabel,
+            cause: `worker registration failed: ${registration.error._tag}`,
+          });
+        }
+        const senderId = asMoltzapSenderId(registration.value.agentId as string);
+        const sessionResult = await Effect.runPromise(
+          createBridgeSession({ invitedAgentIds: [senderId] }).pipe(
+            Effect.either,
+          ),
+        );
+        if (sessionResult._tag === "Left") {
+          return err({
+            _tag: "MemberSpawnFailed",
+            role: member.role,
+            displayLabel: member.displayLabel,
+            cause: `bridge session create failed: ${sessionResult.left._tag}`,
+          });
+        }
+        preMinted = { agentKey: registration.value.agentKey, senderId };
       }
+
+      // Architect plan §2.3: spawn through `bin/ao-spawn-with-moltzap.ts`
+      // so the worker carries its MoltZap identity. When pre-minted creds
+      // are available, the worker resolveCredentials path picks them up
+      // directly via MOLTZAP_AGENT_KEY + MOLTZAP_LOCAL_SENDER_ID
+      // (bin/moltzap-claude-channel.ts:resolveCredentials).
+      const extraEnv: Record<string, string | undefined> =
+        preMinted !== null
+          ? {
+              MOLTZAP_AGENT_KEY: preMinted.agentKey,
+              MOLTZAP_LOCAL_SENDER_ID: preMinted.senderId as string,
+            }
+          : {};
       const spawnResult = await runBunScript(
         options,
         "bin/ao-spawn-with-moltzap.ts",
@@ -629,9 +686,7 @@ export function createAoCliRosterManagerDeps(
           "--project",
           projectName as string,
         ],
-        {
-          MOLTZAP_ALLOWED_SENDERS: [...allowedSenderIds].join(","),
-        },
+        extraEnv,
       );
       if (spawnResult._tag === "Err") {
         return err({
@@ -646,11 +701,10 @@ export function createAoCliRosterManagerDeps(
       }
       // Parse the newly-spawned session name out of stdout. The wrapper
       // `ao-spawn-with-moltzap.ts` writes a line containing
-      // `SESSION=<name>` on success (bin/ao-spawn-with-moltzap.ts:110).
-      // If the format drifts we fail loudly rather than fabricate: a
-      // wrong session name leaves the RosterManager tracking a ghost
-      // and every later retireSession fails on a name that was never
-      // spawned.
+      // `SESSION=<name>` on success. If the format drifts we fail loudly
+      // rather than fabricate: a wrong session name leaves the
+      // RosterManager tracking a ghost and every later retireSession
+      // fails on a name that was never spawned.
       const stdout = spawnResult.value.stdout;
       const match = stdout.match(/SESSION=([^\s]+)/);
       if (!match || !match[1]) {
@@ -662,25 +716,26 @@ export function createAoCliRosterManagerDeps(
         });
       }
       const sessionName = match[1] as AoSessionName;
-      // Parse the worker's REAL runtime-assigned MOLTZAP_LOCAL_SENDER_ID
-      // from the wrapper's stdout (bin/ao-spawn-with-moltzap.ts emits
-      // a `MOLTZAP_LOCAL_SENDER_ID=<id>` line after reading the worker
-      // metadata). Fall back to a derived id only if the wrapper did
-      // not emit the line — in which case allowlist matches will fail
-      // downstream and a diagnostic is logged.
-      const senderMatch = stdout.match(
-        /MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/,
-      );
-      const senderId = senderMatch && senderMatch[1]
-        ? asMoltzapSenderId(senderMatch[1])
-        : asMoltzapSenderId(
+      // sbd#201: when pre-minted, the senderId is authoritative. When
+      // not pre-minted (legacy / test path), parse the worker's
+      // self-registered id from stdout; fall back to a derived id with
+      // a diagnostic if the wrapper did not emit the line.
+      let senderId: MoltzapSenderId;
+      if (preMinted !== null) {
+        senderId = preMinted.senderId;
+      } else {
+        const senderMatch = stdout.match(/MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/);
+        if (senderMatch && senderMatch[1]) {
+          senderId = asMoltzapSenderId(senderMatch[1]);
+        } else {
+          senderId = asMoltzapSenderId(
             `${rosterId as string}-${member.displayLabel}`,
           );
-      if (!senderMatch || !senderMatch[1]) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${senderId as string}). Peer allowlist matches may fail until bin/ao-spawn-with-moltzap.ts emits it.`,
-        );
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${senderId as string}).`,
+          );
+        }
       }
       const rosterMember: RosterMember = {
         rosterId,
@@ -707,14 +762,6 @@ export function createAoCliRosterManagerDeps(
         });
       }
       return ok(undefined);
-    },
-    bindAllowlistFor: (member, peers) => {
-      // Seed the base with the orchestrator's senderId so every worker
-      // accepts inbound messages from the orchestrator; extendAllowlistForRole
-      // unions per-role peers on top (Invariant 3).
-      const base = fromSenderIds([rosterOptions.orchestratorSenderId]);
-      const extended = extendAllowlistForRole(base, member.role, peers);
-      return ok(extended);
     },
     clock: () => Date.now(),
   };

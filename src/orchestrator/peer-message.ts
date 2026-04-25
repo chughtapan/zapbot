@@ -17,10 +17,10 @@
 import type { AoSessionName, Result } from "../types.ts";
 import { absurd, asAoSessionName, err, ok } from "../types.ts";
 import {
-  ALL_PEER_CHANNEL_KINDS,
-  decodeChannelKind,
-  type PeerChannelKind,
-} from "../moltzap/role-topology.ts";
+  ALL_CONVERSATION_KEYS,
+  decodeConversationKey,
+  type ConversationKey,
+} from "../moltzap/conversation-keys.ts";
 import { decodeSessionRole, type SessionRole } from "../moltzap/session-role.ts";
 import { asMoltzapSenderId, type MoltzapSenderId } from "../moltzap/types.ts";
 
@@ -63,7 +63,7 @@ export interface PeerRecipient {
 export interface PeerMessage {
   readonly _tag: "PeerMessage";
   readonly kind: PeerMessageKind;
-  readonly channel: PeerChannelKind;
+  readonly channel: ConversationKey;
   readonly from: PeerEndpoint;
   readonly to: PeerRecipient;
   readonly body: string;
@@ -256,10 +256,11 @@ export function decodePeerMessage(
 
   const channelStr = requireString(parsed, "channel");
   if (channelStr._tag === "Err") return err(channelStr.error);
-  const channel = decodeChannelKind(channelStr.value);
-  if (channel._tag === "Err") {
+  const decodedChannel = decodeConversationKey(channelStr.value);
+  if (typeof decodedChannel !== "string") {
     return err({ _tag: "PeerMessageChannelUnknown", raw: channelStr.value });
   }
+  const channel: ConversationKey = decodedChannel;
 
   const from = decodeEndpoint(parsed.from, "from");
   if (from._tag === "Err") return err(from.error);
@@ -284,7 +285,7 @@ export function decodePeerMessage(
   return ok({
     _tag: "PeerMessage",
     kind,
-    channel: channel.value,
+    channel,
     from: from.value,
     to: to.value,
     body: body.value,
@@ -380,4 +381,5 @@ export function classifyForOrchestrator(
   }
 }
 
-export { ALL_PEER_CHANNEL_KINDS };
+export { ALL_CONVERSATION_KEYS };
+export type { ConversationKey };
