@@ -319,8 +319,8 @@ export function installBridgeProcessLifecycle(
     reloadSettled = (async () => {
       try {
         // Rebuild the previous BridgeConfig from the previous runtime.
-        // buildBridgeConfig is pure-fold over env + runtime; it can only
-        // fail if the Moltzap env env decode fails, which is identical to
+        // buildBridgeConfig is a pure fold over env + runtime; it can only
+        // fail if the Moltzap env decode fails, which is identical to
         // boot — env hasn't moved, so a failure here is anomalous.
         const previousConfigResult = buildBridgeConfig(deps.env, previousRuntime);
         if (previousConfigResult._tag === "Err") {
