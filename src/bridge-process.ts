@@ -21,8 +21,9 @@
  *
  *   - `installBridgeProcessLifecycle` installs SIGHUP/SIGINT/SIGTERM
  *     handlers BEFORE any boot I/O. Handlers dispatch through an explicit
- *     state machine: signals received during `Booting` queue (SIGHUP) or
- *     pre-empt boot (SIGINT/SIGTERM); signals during `Reloading` defer
+ *     state machine: SIGHUP during `Booting` is a no-op (logged + dropped,
+ *     same shape as SIGHUP during `Reloading`/`ShuttingDown`); SIGINT/SIGTERM
+ *     during `Booting` pre-empts boot; signals during `Reloading` defer
  *     shutdown until the reload commit/rollback completes; SIGHUP during
  *     `ShuttingDown` is a no-op.
  *
@@ -49,12 +50,16 @@ import type { Result } from "./types.ts";
  *                    └─ ShuttingDown   (terminal)
  *
  * - `Booting`: handlers installed; no live `RunningBridge` yet. SIGHUP
- *   queues until `markReady`. SIGTERM/SIGINT pre-empts boot — the
- *   caller of `installBridgeProcessLifecycle` MUST observe `state()`
+ *   is a no-op (logged + dropped — there is no `RunningBridge` to reload
+ *   against, and no queue; matches the "no-op-on-non-Ready" pattern used
+ *   by `Reloading` and `ShuttingDown`). SIGTERM/SIGINT pre-empts boot —
+ *   the caller of `installBridgeProcessLifecycle` MUST observe `state()`
  *   between boot steps and bail with `requestShutdown` if it has flipped.
  * - `Ready`: server up, registered, post-boot probe passed.
  * - `Reloading`: SIGHUP in flight. SIGHUP arriving in this phase logs
- *   and no-ops (existing `reloadInFlight` semantics, preserved).
+ *   and no-ops (existing `reloadInFlight` semantics, preserved). SIGINT/
+ *   SIGTERM records a shutdown intent and waits for the reload's
+ *   commit-or-rollback to settle before transitioning to `ShuttingDown`.
  * - `ShuttingDown`: terminal. SIGHUP is a no-op. SIGINT/SIGTERM is
  *   idempotent (prior `shuttingDown` flag, preserved).
  */
@@ -78,9 +83,10 @@ export interface BridgeProcessLifecycle {
 
   /**
    * Transition `Booting` → `Ready`. Idempotent: no-op if state is not
-   * `Booting`. After this call, queued SIGHUPs (if any) are dispatched
-   * onto the supplied `running` handle. The `runtime` param becomes the
-   * initial value of the live runtime ref returned by `liveRuntime()`.
+   * `Booting`. The `runtime` param becomes the initial value of the live
+   * runtime ref returned by `liveRuntime()`. SIGHUPs received during
+   * `Booting` are NOT queued — they were dropped at receive time, so
+   * `markReady` does not dispatch a deferred reload.
    */
   readonly markReady: (
     running: RunningBridge,
