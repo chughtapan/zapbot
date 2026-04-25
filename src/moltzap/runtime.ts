@@ -110,7 +110,6 @@ export function buildMoltzapProcessEnv(
     case "MoltzapRegistration":
       return {
         MOLTZAP_SERVER_URL: config.serverUrl,
-        MOLTZAP_REGISTRATION_SECRET: config.registrationSecret,
         ...(config.allowlistCsv !== null
           ? { MOLTZAP_ALLOWED_SENDERS: config.allowlistCsv }
           : {}),
