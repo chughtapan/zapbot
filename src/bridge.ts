@@ -836,12 +836,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   // `createBridgeSession({invitedAgentIds: [thisWorkerSenderId]})` BEFORE
   // each `ao spawn` (architect rev 4 §4.3).
   const moltzapAuth =
-    current.moltzap._tag === "MoltzapRegistration"
-      ? {
-          serverUrl: current.moltzap.serverUrl,
-          registrationSecret: current.moltzap.registrationSecret,
-        }
-      : null;
+    current.moltzap._tag === "MoltzapRegistration" ? current.moltzap : null;
   const rosterManagerDeps = createAoCliRosterManagerDeps(
     {
       configPath: current.aoConfigPath,

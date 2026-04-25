@@ -14,8 +14,12 @@ import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { createBridgeSession } from "../moltzap/bridge-app.ts";
+import {
+  closeBridgeSession,
+  createBridgeSession,
+} from "../moltzap/bridge-app.ts";
 import { registerBridgeAgent } from "../moltzap/bridge-identity.ts";
+import type { MoltzapRuntimeConfig } from "../moltzap/runtime.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
@@ -480,24 +484,14 @@ export interface AoCliRosterManagerOptions {
    */
   readonly orchestratorSenderId: MoltzapSenderId;
   /**
-   * MoltZap auth used to mint per-worker credentials BEFORE spawn (sbd#201).
-   * When present:
-   *   1. The spawn dep calls `registerBridgeAgent({serverUrl,
-   *      registrationSecret, displayName})` to mint `(agentKey, senderId)`.
-   *   2. Calls `createBridgeSession({invitedAgentIds: [senderId]})` so
-   *      the worker is admitted to the bridge's manifest conversations
-   *      server-side via `apps/create` (architect rev 4 §4.3).
-   *   3. Spawns `bin/ao-spawn-with-moltzap.ts` with `MOLTZAP_AGENT_KEY` +
-   *      `MOLTZAP_LOCAL_SENDER_ID` so the worker boots on path 1
-   *      (pre-minted) — see `bin/moltzap-claude-channel.ts:resolveCredentials`.
-   * Absent (`null`) — the spawn path falls back to the worker
-   * self-register flow (transitional). Used by tests and MoltzapDisabled
-   * deployments.
+   * MoltZap auth used to mint per-worker credentials BEFORE spawn
+   * (architect rev 4 §4.3). When set, the spawn dep mints creds via
+   * `registerBridgeAgent`, admits via `createBridgeSession`, and passes
+   * `MOLTZAP_AGENT_KEY` + `MOLTZAP_LOCAL_SENDER_ID` to the wrapper so
+   * the worker boots on the pre-minted-credentials path. `null` short-
+   * circuits to the worker self-register flow (transitional, sbd#205).
    */
-  readonly moltzapAuth: {
-    readonly serverUrl: string;
-    readonly registrationSecret: string;
-  } | null;
+  readonly moltzapAuth: Extract<MoltzapRuntimeConfig, { readonly _tag: "MoltzapRegistration" }> | null;
 }
 
 /**
@@ -591,6 +585,77 @@ export function createRosterBudgetCoordinator(
   };
 }
 
+/**
+ * Mint a worker MoltZap credential pair and admit the worker to bridge-owned
+ * conversations server-side via `apps/create({invitedAgentIds})`. Returns a
+ * tagged result; on `Ok(null)` the caller should fall back to the worker
+ * self-register flow (transitional path, sbd#205). On `Ok({...})` the spawn
+ * dep MUST close the returned `sessionId` if the downstream `ao spawn`
+ * fails — otherwise the bridge session leaks past the spawn failure.
+ */
+async function mintWorkerCreds(
+  auth: AoCliRosterManagerOptions["moltzapAuth"],
+  rosterId: RosterId,
+  displayLabel: string,
+): Promise<
+  Result<
+    | {
+        readonly agentKey: string;
+        readonly senderId: MoltzapSenderId;
+        readonly sessionId: string;
+      }
+    | null,
+    string
+  >
+> {
+  if (auth === null) return ok(null);
+  const displayName = `${rosterId as string}-${displayLabel}`.slice(0, 32);
+  const registration = await registerBridgeAgent({
+    serverUrl: auth.serverUrl,
+    registrationSecret: auth.registrationSecret,
+    displayName,
+  });
+  if (registration._tag === "Err") {
+    return err(`worker registration failed: ${registration.error._tag}`);
+  }
+  const senderId = asMoltzapSenderId(registration.value.agentId as string);
+  const sessionResult = await Effect.runPromise(
+    createBridgeSession({ invitedAgentIds: [senderId] }).pipe(Effect.either),
+  );
+  if (sessionResult._tag === "Left") {
+    return err(`bridge session create failed: ${sessionResult.left._tag}`);
+  }
+  return ok({
+    agentKey: registration.value.agentKey,
+    senderId,
+    sessionId: sessionResult.right.sessionId,
+  });
+}
+
+/**
+ * Transitional path (sbd#205 deletes this). When the orchestrator did not
+ * pre-mint creds, parse the worker's self-registered MOLTZAP_LOCAL_SENDER_ID
+ * from the wrapper's stdout. Fall back to a derived id with a diagnostic
+ * when the line is missing.
+ */
+function resolveSelfRegisteredSenderId(
+  stdout: string,
+  rosterId: RosterId,
+  displayLabel: string,
+  sessionName: AoSessionName,
+): MoltzapSenderId {
+  const senderMatch = stdout.match(/MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/);
+  if (senderMatch && senderMatch[1]) {
+    return asMoltzapSenderId(senderMatch[1]);
+  }
+  const fallback = asMoltzapSenderId(`${rosterId as string}-${displayLabel}`);
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${fallback as string}).`,
+  );
+  return fallback;
+}
+
 export function createAoCliRosterManagerDeps(
   options: AoCliOptions,
   rosterOptions: AoCliRosterManagerOptions,
@@ -621,51 +686,32 @@ export function createAoCliRosterManagerDeps(
           + `your acceptance criteria and publish durable artifacts to GitHub.`,
       ].join("\n");
 
-      // sbd#201: mint worker creds + admit on bridge BEFORE spawn so the
-      // worker is admitted to bridge-owned conversations server-side via
-      // `apps/create({invitedAgentIds})` (architect rev 4 §4.3).
-      // `moltzapAuth: null` short-circuits — used by MoltzapDisabled
-      // deployments + tests that exercise the spawn path without a live
-      // bridge.
-      let preMinted: { agentKey: string; senderId: MoltzapSenderId } | null = null;
-      if (rosterOptions.moltzapAuth !== null) {
-        const auth = rosterOptions.moltzapAuth;
-        const displayName = `${rosterId as string}-${member.displayLabel}`.slice(0, 32);
-        const registration = await registerBridgeAgent({
-          serverUrl: auth.serverUrl,
-          registrationSecret: auth.registrationSecret,
-          displayName,
+      const memberFail = (cause: string) =>
+        err({
+          _tag: "MemberSpawnFailed" as const,
+          role: member.role,
+          displayLabel: member.displayLabel,
+          cause,
         });
-        if (registration._tag === "Err") {
-          return err({
-            _tag: "MemberSpawnFailed",
-            role: member.role,
-            displayLabel: member.displayLabel,
-            cause: `worker registration failed: ${registration.error._tag}`,
-          });
-        }
-        const senderId = asMoltzapSenderId(registration.value.agentId as string);
-        const sessionResult = await Effect.runPromise(
-          createBridgeSession({ invitedAgentIds: [senderId] }).pipe(
-            Effect.either,
-          ),
-        );
-        if (sessionResult._tag === "Left") {
-          return err({
-            _tag: "MemberSpawnFailed",
-            role: member.role,
-            displayLabel: member.displayLabel,
-            cause: `bridge session create failed: ${sessionResult.left._tag}`,
-          });
-        }
-        preMinted = { agentKey: registration.value.agentKey, senderId };
-      }
 
-      // Architect plan §2.3: spawn through `bin/ao-spawn-with-moltzap.ts`
-      // so the worker carries its MoltZap identity. When pre-minted creds
-      // are available, the worker resolveCredentials path picks them up
-      // directly via MOLTZAP_AGENT_KEY + MOLTZAP_LOCAL_SENDER_ID
-      // (bin/moltzap-claude-channel.ts:resolveCredentials).
+      const preMintRes = await mintWorkerCreds(
+        rosterOptions.moltzapAuth,
+        rosterId,
+        member.displayLabel,
+      );
+      if (preMintRes._tag === "Err") return memberFail(preMintRes.error);
+      const preMinted = preMintRes.value;
+
+      // Best-effort cleanup if a downstream step fails after createBridgeSession
+      // succeeded — otherwise the bridge session would leak past the spawn
+      // failure and only drain on SIGTERM (moltzap#230 leak class).
+      const cleanupBridgeSession = async (): Promise<void> => {
+        if (preMinted === null) return;
+        await Effect.runPromise(
+          closeBridgeSession(preMinted.sessionId).pipe(Effect.either),
+        );
+      };
+
       const extraEnv: Record<string, string | undefined> =
         preMinted !== null
           ? {
@@ -689,54 +735,30 @@ export function createAoCliRosterManagerDeps(
         extraEnv,
       );
       if (spawnResult._tag === "Err") {
-        return err({
-          _tag: "MemberSpawnFailed",
-          role: member.role,
-          displayLabel: member.displayLabel,
-          cause:
-            spawnResult.error.stderr.trim().length > 0
-              ? spawnResult.error.stderr.trim()
-              : spawnResult.error.cause,
-        });
+        await cleanupBridgeSession();
+        return memberFail(
+          spawnResult.error.stderr.trim().length > 0
+            ? spawnResult.error.stderr.trim()
+            : spawnResult.error.cause,
+        );
       }
-      // Parse the newly-spawned session name out of stdout. The wrapper
-      // `ao-spawn-with-moltzap.ts` writes a line containing
-      // `SESSION=<name>` on success. If the format drifts we fail loudly
-      // rather than fabricate: a wrong session name leaves the
-      // RosterManager tracking a ghost and every later retireSession
+      // The wrapper writes `SESSION=<name>` on success. If the format drifts
+      // we fail loudly rather than fabricate: a wrong session name leaves
+      // the RosterManager tracking a ghost and every later retireSession
       // fails on a name that was never spawned.
       const stdout = spawnResult.value.stdout;
       const match = stdout.match(/SESSION=([^\s]+)/);
       if (!match || !match[1]) {
-        return err({
-          _tag: "MemberSpawnFailed",
-          role: member.role,
-          displayLabel: member.displayLabel,
-          cause: `could not parse SESSION= from ao-spawn-with-moltzap stdout: ${stdout.trim()}`,
-        });
+        await cleanupBridgeSession();
+        return memberFail(
+          `could not parse SESSION= from ao-spawn-with-moltzap stdout: ${stdout.trim()}`,
+        );
       }
       const sessionName = match[1] as AoSessionName;
-      // sbd#201: when pre-minted, the senderId is authoritative. When
-      // not pre-minted (legacy / test path), parse the worker's
-      // self-registered id from stdout; fall back to a derived id with
-      // a diagnostic if the wrapper did not emit the line.
-      let senderId: MoltzapSenderId;
-      if (preMinted !== null) {
-        senderId = preMinted.senderId;
-      } else {
-        const senderMatch = stdout.match(/MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/);
-        if (senderMatch && senderMatch[1]) {
-          senderId = asMoltzapSenderId(senderMatch[1]);
-        } else {
-          senderId = asMoltzapSenderId(
-            `${rosterId as string}-${member.displayLabel}`,
-          );
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${senderId as string}).`,
-          );
-        }
-      }
+      const senderId =
+        preMinted !== null
+          ? preMinted.senderId
+          : resolveSelfRegisteredSenderId(stdout, rosterId, member.displayLabel, sessionName);
       const rosterMember: RosterMember = {
         rosterId,
         session: sessionName,

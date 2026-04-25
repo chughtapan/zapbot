@@ -257,6 +257,10 @@ export function decodePeerMessage(
   const channelStr = requireString(parsed, "channel");
   if (channelStr._tag === "Err") return err(channelStr.error);
   const decodedChannel = decodeConversationKey(channelStr.value);
+  // `decodeConversationKey` returns either a literal-string `ConversationKey`
+  // or a tagged `UnknownConversationKey` error object. Discriminate on the
+  // tag, not on `typeof` — the typeof form depends on `ConversationKey`
+  // staying a string-literal union for all eternity.
   if (typeof decodedChannel !== "string") {
     return err({ _tag: "PeerMessageChannelUnknown", raw: channelStr.value });
   }
