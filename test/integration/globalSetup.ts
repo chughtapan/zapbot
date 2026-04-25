@@ -194,6 +194,13 @@ function sleep(ms: number): Promise<void> {
  * Best-effort: kill any process listening on `port` before we spawn our own.
  * Uses `fuser -k PORT/tcp`; silently swallows errors (fuser absent, no
  * process, permission denied). Waits up to 800 ms for the port to be released.
+ *
+ * Port-scoping rationale: The test setup pins the port to a deterministic value
+ * (TEST_PORT=41990) and runs in isolated CI environments where this port is not
+ * expected to be in use by unrelated services. PID-scoping (kill only our
+ * previous test process) would be more precise but requires tracking the prior
+ * process ID across restarts, adding complexity without benefit in the test
+ * isolation model.
  */
 async function killPortIfOccupied(port: number): Promise<void> {
   try {

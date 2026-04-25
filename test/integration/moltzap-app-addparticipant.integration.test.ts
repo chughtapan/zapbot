@@ -126,15 +126,10 @@ describe("moltzap app-sdk integration — late-joiner conversation admission", (
           ),
       );
 
-      // The RPC must succeed (Right) or fail with a typed RPC error.
-      // Failure is acceptable here if the helper agent is not the conversation
-      // owner; what matters is the RPC is reachable (no 5xx / connection error).
-      if (addResult._tag === "Left") {
-        // Allow permission-level RPC failures (not a transport/crash failure).
-        const err = addResult.left;
-        expect(typeof err).not.toBe("undefined");
-      } else {
-        // Success case: participant was added.
+      // In dev mode, the helper agent has open access to the RPC.
+      // We expect the RPC to succeed and add the participant.
+      expect(addResult._tag).toBe("Right");
+      if (addResult._tag === "Right") {
         expect(addResult.right).toBeDefined();
       }
     } finally {
