@@ -1237,7 +1237,7 @@ export async function runBridgeProcess(
   if (cfg.ingress.mode === "github-demo" && cfg.publicUrl !== null) {
     const reachable = await probe(cfg.publicUrl);
     if (!reachable) {
-      log.warn(`boot_probe_unreachable url=${cfg.publicUrl} — continuing (hairpin-NAT safe)`);
+      log.warn(`boot_probe_unreachable url="${cfg.publicUrl}" — continuing (hairpin-NAT safe)`);
     }
   }
 
