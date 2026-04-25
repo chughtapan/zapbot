@@ -32,6 +32,15 @@ import { createRosterManager, type RosterManager } from "./orchestrator/roster.t
 import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
 import { asMoltzapSenderId } from "./moltzap/types.ts";
 import {
+  bootBridgeApp,
+  bridgeAgentId,
+  shutdownBridgeApp,
+  drainBridgeSessions,
+  type BridgeAppBootError,
+} from "./moltzap/bridge-app.ts";
+import { bridgeAgentIdAsSenderId } from "./moltzap/bridge-identity.ts";
+import { Effect } from "effect";
+import {
   absurd,
   asDeliveryId,
   asIssueNumber,
@@ -790,31 +799,38 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       ...buildMoltzapProcessEnv(current.moltzap),
     },
   });
-  // WS2 MVP (sbd#149): instantiate the RosterManager + budget
-  // coordinator at boot. The manager tracks spawned worker sessions;
-  // the coordinator folds MoltZap inbound events (via the onInbound
-  // observer below) and a periodic tick (startPeriodicTick) into the
-  // two-gate budget state machine. This is the production wiring
-  // required by SPEC §5(g): stepBudget and record* are actually
+  // WS2 MVP (sbd#149) + sbd#200 rev 4: instantiate the RosterManager +
+  // budget coordinator at boot. The manager tracks spawned worker
+  // sessions; the coordinator folds MoltZap inbound events (via the
+  // onInbound observer below) and a periodic tick (startPeriodicTick)
+  // into the two-gate budget state machine. This is the production
+  // wiring required by SPEC §5(g): stepBudget and record* are actually
   // invoked by ingress + the tick, not just in tests.
-  const orchestratorSenderIdEnv =
-    process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID ??
-    process.env.MOLTZAP_LOCAL_SENDER_ID ??
-    "zapbot-orchestrator";
-  if (
-    !process.env.MOLTZAP_ORCHESTRATOR_SENDER_ID &&
-    !process.env.MOLTZAP_LOCAL_SENDER_ID
-  ) {
-    // Stamina round 3 finding: registration-backed MoltZap deployments
-    // assign senderIds at runtime; neither env var will be set and
-    // the derived "zapbot-orchestrator" fallback won't match the real
-    // registered id. Log loudly so operators see the mismatch before
-    // rosters are exercised and silently drop traffic.
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[bridge] MOLTZAP_ORCHESTRATOR_SENDER_ID / MOLTZAP_LOCAL_SENDER_ID are unset; RosterManager is seeding the orchestrator-side allowlist with the literal fallback 'zapbot-orchestrator'. Registration-backed deployments will see orchestrator→worker traffic dropped until these env vars are set to the real registered sender id. Follow-up: register-and-emit path needed for the bridge to read the real id at boot (cross-process gap documented in sbd#149 PR body).",
+  //
+  // Bridge identity (sbd#199 rev 4 §2 A+C(2)): when MoltZap is
+  // registration-backed, boot the bridge's MoltZapApp before the roster
+  // so `bridgeAgentId()` resolves to the just-registered id. The
+  // literal `"zapbot-orchestrator"` fallback is gone — it only ever
+  // matched when operators hand-set MOLTZAP_ORCHESTRATOR_SENDER_ID, and
+  // registration-backed deployments cannot predict that value.
+  //
+  // MoltzapDisabled: no MoltZap at all. Keep a fixed senderId for the
+  // few roster tests that run disabled; production never hits this path.
+  if (current.moltzap._tag === "MoltzapRegistration") {
+    const boot = await Effect.runPromise(
+      bootBridgeApp({ serverUrl: current.moltzap.serverUrl }).pipe(
+        Effect.either,
+      ),
     );
+    if (boot._tag === "Left") {
+      throw new Error(`[bridge] bootBridgeApp failed: ${formatBridgeBootError(boot.left)}`);
+    }
   }
+  const orchestratorSenderId: ReturnType<typeof asMoltzapSenderId> = (() => {
+    const registered = bridgeAgentId();
+    if (registered !== null) return bridgeAgentIdAsSenderId(registered);
+    return asMoltzapSenderId("zapbot-orchestrator");
+  })();
   const rosterManagerDeps = createAoCliRosterManagerDeps(
     {
       configPath: current.aoConfigPath,
@@ -825,7 +841,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       },
     },
     {
-      orchestratorSenderId: asMoltzapSenderId(orchestratorSenderIdEnv),
+      orchestratorSenderId,
     },
   );
   const rosterManager = createRosterManager(rosterManagerDeps);
@@ -861,6 +877,20 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       stopBudgetTick();
       await deregisterAll(current);
       server.stop();
+      // sbd#200 rev 4 §4.6 SIGTERM drain: close active bridge sessions
+      // under a bounded budget, then tear down the MoltZapApp. Order
+      // matters — drain BEFORE shutdown so the SDK's unconditional
+      // close-all does not pre-empt the budgeted close.
+      if (current.moltzap._tag === "MoltzapRegistration") {
+        const leaked = await drainBridgeSessions({ timeoutMs: 60_000 });
+        if (leaked.length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[bridge] SIGTERM drain leaked ${leaked.length} session(s) (moltzap#230): ${leaked.join(",")}`,
+          );
+        }
+        await Effect.runPromise(shutdownBridgeApp());
+      }
     },
     async reload(nextConfig: BridgeConfig): Promise<void> {
       // Stop stale heartbeat when ingress mode flips github-demo → local-only.
@@ -884,6 +914,25 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     },
   };
   return running;
+}
+
+function formatBridgeBootError(e: BridgeAppBootError): string {
+  switch (e._tag) {
+    case "BridgeAppAlreadyBooted":
+      return "BridgeAppAlreadyBooted (singleton violated)";
+    case "BridgeAppEnvInvalid":
+      return `BridgeAppEnvInvalid: ${e.reason}`;
+    case "BridgeAppRegistrationFailed":
+      return `BridgeAppRegistrationFailed: ${e.cause._tag} (${JSON.stringify(e.cause)})`;
+    case "BridgeAppManifestInvalid":
+      return `BridgeAppManifestInvalid: ${e.cause.message}`;
+    case "BridgeAppConnectFailed":
+      return `BridgeAppConnectFailed: ${e.cause.message}`;
+    case "BridgeAppSessionFailed":
+      return `BridgeAppSessionFailed: ${e.cause.message}`;
+    default:
+      return absurd(e);
+  }
 }
 
 function resolveSecret(repo: RepoFullName, cfg: BridgeConfig): string | null {

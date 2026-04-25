@@ -3,8 +3,23 @@
 ## Local setup
 
 ```bash
+bash scripts/bootstrap-moltzap.sh
 bun install
 ```
+
+`scripts/bootstrap-moltzap.sh` initialises the `vendor/moltzap` git
+submodule, runs `pnpm install --prefer-frozen-lockfile` + `pnpm --filter
+"@moltzap/claude-code-channel..." --filter "@moltzap/app-sdk..." build`
+inside it, and rewrites `workspace:*` specifiers so bun can resolve the
+`file:./vendor/moltzap/packages/*` deps at `bun install` time. It is
+idempotent: the build step skips if every required `dist/index.js`
+already exists. The sbd#200 MoltZap rework added `@moltzap/app-sdk` to
+the build set — the bridge owns `MoltZapApp` lifecycle and imports the
+SDK directly.
+
+Prerequisites: `pnpm` on `PATH` (install once via `npm i -g pnpm` or
+`corepack enable`). CI invokes the bootstrap script before `bun install`
+automatically.
 
 Bridge operators also need:
 

@@ -32,9 +32,19 @@ if [ ! -d "$PACKAGES_DIR/claude-code-channel" ]; then
 fi
 
 # Build in a subshell to avoid changing CWD for the rest of this script.
-if [ ! -f "$PACKAGES_DIR/claude-code-channel/dist/index.js" ]; then
+# sbd#200: @moltzap/app-sdk joins the build set — the bridge now owns
+# MoltZapApp lifecycle and imports it directly. `...` picks up the
+# transitive deps (protocol + client) in topological order.
+# --prefer-frozen-lockfile (not --frozen-lockfile) so a drifted
+# vendor/moltzap/pnpm-lock.yaml does not wedge fresh clones.
+if [ ! -f "$PACKAGES_DIR/protocol/dist/index.js" ] \
+  || [ ! -f "$PACKAGES_DIR/client/dist/index.js" ] \
+  || [ ! -f "$PACKAGES_DIR/claude-code-channel/dist/index.js" ] \
+  || [ ! -f "$PACKAGES_DIR/app-sdk/dist/index.js" ]; then
   echo "[bootstrap-moltzap] building @moltzap/* workspace packages..."
-  (cd "$SUBMODULE_DIR" && pnpm install --frozen-lockfile && pnpm --filter "@moltzap/claude-code-channel..." build)
+  (cd "$SUBMODULE_DIR" \
+    && pnpm install --prefer-frozen-lockfile \
+    && pnpm --filter "@moltzap/claude-code-channel..." --filter "@moltzap/app-sdk..." build)
 else
   echo "[bootstrap-moltzap] dist already present — skipping build."
 fi

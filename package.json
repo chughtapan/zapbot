@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@moltzap/app-sdk": "file:./vendor/moltzap/packages/app-sdk",
     "@moltzap/claude-code-channel": "file:./vendor/moltzap/packages/claude-code-channel",
     "@moltzap/client": "file:./vendor/moltzap/packages/client",
     "@moltzap/protocol": "file:./vendor/moltzap/packages/protocol",
@@ -31,5 +32,12 @@
     "@octokit/rest": "^22.0.1",
     "effect": "3.21.0",
     "yaml": "^2.8.3"
+  },
+  "overrides": {
+    "@moltzap/app-sdk": "file:./vendor/moltzap/packages/app-sdk",
+    "@moltzap/client": "file:./vendor/moltzap/packages/client",
+    "@moltzap/protocol": "file:./vendor/moltzap/packages/protocol",
+    "@moltzap/claude-code-channel": "file:./vendor/moltzap/packages/claude-code-channel",
+    "@moltzap/server-core": "file:./vendor/moltzap/packages/server"
   }
 }
