@@ -68,9 +68,14 @@ if (allBuilt()) {
   process.exit(0);
 }
 
+// `--prefer-frozen-lockfile` (not `--frozen-lockfile`) so a stale
+// vendor/moltzap/pnpm-lock.yaml does not fail CI — the vendor submodule
+// can drift its package.json between updates, and forcing frozen would
+// wedge zapbot installs on every drift. `--ignore-scripts` keeps
+// vendor postinstall hooks from recursing.
 const pnpmArgs = [
   "install",
-  "--frozen-lockfile",
+  "--prefer-frozen-lockfile",
   "--ignore-scripts",
   "--config.confirmModulesPurge=false",
 ];
