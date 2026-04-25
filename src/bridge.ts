@@ -1227,8 +1227,9 @@ export async function runBridgeProcess(
   const running = await start(cfg);
 
   if (lifecycle.state()._tag === "ShuttingDown") {
-    // Signal arrived during start(). Hand `running` to the lifecycle so
-    // requestShutdown can stop it cleanly, then drive shutdown.
+    // Signal arrived during start(). Hand `running` to the lifecycle —
+    // markReady stashes it even when state is ShuttingDown so the
+    // signal-driven shutdown path can stop it gracefully.
     lifecycle.markReady(running, initialInputs.value);
     await lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGTERM" });
     return;
@@ -1247,6 +1248,19 @@ export async function runBridgeProcess(
       });
       return;
     }
+  }
+
+  // Race-1 corner case (codex review P1): a signal arriving DURING the
+  // post-boot probe (when the probe returns true) flips state to
+  // ShuttingDown without the boot caller noticing. Without this check,
+  // markReady would stash `running` + auto-fire startShutdown but
+  // runBridgeProcess would return before the shutdown promise resolved,
+  // and the boot caller would not log "listening". Stop the bridge
+  // explicitly so the operator sees a clean shutdown trace.
+  if (lifecycle.state()._tag === "ShuttingDown") {
+    lifecycle.markReady(running, initialInputs.value);
+    await lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGTERM" });
+    return;
   }
 
   log.info(`Webhook bridge listening on ${cfg.ingress.mode === "github-demo" ? cfg.publicUrl : "local-only ingress"}`);

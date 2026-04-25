@@ -443,10 +443,27 @@ export function installBridgeProcessLifecycle(
   return {
     state: () => state,
     markReady: (r, runtime) => {
-      if (state._tag !== "Booting") return;
-      running = r;
-      liveRuntimeRef = runtime;
-      state = { _tag: "Ready" };
+      // Always stash the running bridge on the FIRST hand-off — even if a
+      // signal pre-empted boot and flipped state to `ShuttingDown` between
+      // `start(cfg)` resolving and the boot caller reaching `markReady`.
+      // Without this, `running` is leaked: the lifecycle's
+      // `requestShutdown`/`performShutdown` see `running === null` and skip
+      // graceful `running.stop()`, dropping gateway deregistration and
+      // MoltZap session drain (codex review P1+P2 against impl-staff/sbd-220).
+      if (running === null) {
+        running = r;
+        liveRuntimeRef = runtime;
+      }
+      if (state._tag === "Booting") {
+        state = { _tag: "Ready" };
+        return;
+      }
+      if (state._tag === "ShuttingDown") {
+        // Signal flipped state during boot; drive the shutdown the signal
+        // handler couldn't (it had no `running` to stop). Idempotent via
+        // `shutdownPromise`.
+        void startShutdown(state.reason);
+      }
     },
     liveRuntime: () => liveRuntimeRef,
     requestShutdown: async (reason) => {

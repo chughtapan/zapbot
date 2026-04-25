@@ -653,3 +653,50 @@ describe("BridgeProcessLifecycle handle", () => {
     expect(fakeProcess.listenerCount("SIGTERM")).toBe(0);
   });
 });
+
+// ── Codex review regression: signal-during-boot must not orphan running ──
+
+describe("installBridgeProcessLifecycle: late-arriving running on signal-preempted boot", () => {
+  it("markReady stashes running even when state is ShuttingDown (codex P2)", async () => {
+    const { deps, fakeProcess, exitTrap } = makeDeps();
+    const lifecycle = installBridgeProcessLifecycle(deps);
+    try {
+      // Simulate signal-during-start: SIGTERM fires BEFORE the boot caller
+      // hands `running` to the lifecycle.
+      fakeProcess.fire("SIGTERM");
+      expect(lifecycle.state()._tag).toBe("ShuttingDown");
+
+      // Boot caller now reaches markReady with the just-created `running`.
+      const running = makeFakeRunning();
+      lifecycle.markReady(running, makeRuntime());
+
+      // markReady must trigger graceful shutdown — running.stop() and
+      // exit(0). Without the fix, running was orphaned: stop() never fired.
+      const code = await exitTrap.next();
+      expect(code).toBe(0);
+      expect(running.stopCalls).toBe(1);
+    } finally {
+      lifecycle.dispose();
+    }
+  });
+
+  it("markReady-after-signal is idempotent with a concurrent requestShutdown", async () => {
+    const { deps, fakeProcess, exitTrap } = makeDeps();
+    const lifecycle = installBridgeProcessLifecycle(deps);
+    try {
+      fakeProcess.fire("SIGINT");
+      const running = makeFakeRunning();
+      lifecycle.markReady(running, makeRuntime());
+      // Boot caller also calls requestShutdown explicitly (race-cleanup pattern).
+      await Promise.all([
+        lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGINT" }),
+        lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGINT" }),
+      ]);
+      // Exactly one stop, exactly one exit.
+      expect(running.stopCalls).toBe(1);
+      expect(exitTrap.exitCalls).toEqual([0]);
+    } finally {
+      lifecycle.dispose();
+    }
+  });
+});
