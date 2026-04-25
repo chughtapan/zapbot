@@ -1142,7 +1142,7 @@ export function formatIngressError(error: IngressResolutionError): string {
  * SIGINT/SIGTERM shutdown; the HTTP server keeps the event loop alive
  * until `running.stop()` resolves and `process.exit` is requested.
  *
- * On config-load or reachability failure, the lifecycle exits with code 1.
+ * On config-load failure, the lifecycle exits with code 1.
  *
  * Race fixes (sbd#215, see `bridge-process.ts` module header):
  *   - Race 1: `installBridgeProcessLifecycle` is the FIRST line — signal
@@ -1232,17 +1232,12 @@ export async function runBridgeProcess(
   }
 
   // Post-boot reachability probe — fires against the now-live /healthz endpoint.
-  // If the probe fails, tear down the bridge cleanly before exiting.
+  // Failure is non-fatal: hairpin-NAT / split-horizon DNS deployments cannot
+  // reach their own external URL from inside the container.
   if (cfg.ingress.mode === "github-demo" && cfg.publicUrl !== null) {
     const reachable = await probe(cfg.publicUrl);
     if (!reachable) {
-      console.error(`[bridge] ZAPBOT_BRIDGE_URL is unreachable: ${cfg.publicUrl}`);
-      lifecycle.markReady(running, initialInputs.value);
-      await lifecycle.requestShutdown({
-        _tag: "BootProbeFailed",
-        publicUrl: cfg.publicUrl,
-      });
-      return;
+      log.warn(`boot_probe_unreachable url="${cfg.publicUrl}" — continuing (hairpin-NAT safe)`);
     }
   }
 
