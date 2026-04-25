@@ -6,7 +6,7 @@
  */
 
 import type { Result } from "../types.ts";
-import { err, ok } from "../types.ts";
+import { absurd, err, ok } from "../types.ts";
 
 export type ClaudeChannelEntry =
   | { readonly _tag: "DevelopmentServer"; readonly serverName: string }
@@ -140,6 +140,3 @@ function isValidEntryName(value: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(value);
 }
 
-function absurd(x: never): never {
-  throw new Error(`unreachable: ${JSON.stringify(x)}`);
-}
