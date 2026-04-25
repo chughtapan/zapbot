@@ -667,7 +667,7 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       .map((r) => r.value)
       .find((v) => v._tag === "Err");
     const retireError = firstFailure
-      ? err(firstFailure.reason as RosterTrackError | RosterRetireError)
+      ? err(firstFailure.reason)
       : firstErr
         ? err(firstErr.error)
         : null;

@@ -12,7 +12,11 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 };
 
 const LOG_DIR = path.join(os.homedir(), ".zapbot", "logs");
-fs.mkdirSync(LOG_DIR, { recursive: true });
+try {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+} catch (err: any) {
+  process.stderr.write(`[log dir init failed: ${err.message}]\n`);
+}
 
 function getLogFilePath(): string {
   const date = new Date().toISOString().slice(0, 10);

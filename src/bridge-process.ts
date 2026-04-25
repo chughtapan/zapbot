@@ -85,7 +85,6 @@ export type BridgeProcessState =
 
 export type ShutdownReason =
   | { readonly _tag: "Signal"; readonly signal: "SIGINT" | "SIGTERM" }
-  | { readonly _tag: "BootProbeFailed"; readonly publicUrl: string }
   | { readonly _tag: "BootConfigInvalid"; readonly reason: string }
   | { readonly _tag: "Manual"; readonly reason: string };
 
@@ -228,7 +227,6 @@ export function installBridgeProcessLifecycle(
     switch (reason._tag) {
       case "Signal":
         return 0;
-      case "BootProbeFailed":
       case "BootConfigInvalid":
       case "Manual":
         return 1;

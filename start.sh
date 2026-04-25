@@ -302,6 +302,7 @@ cleanup() {
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
   [ -n "${AO_CONFIG_FILE:-}" ] && rm -f "$AO_CONFIG_FILE"
+  [ -n "${AO_CONFIG_FILE_RAW:-}" ] && rm -f "$AO_CONFIG_FILE_RAW"
   echo "All processes stopped."
 }
 trap cleanup EXIT INT TERM
