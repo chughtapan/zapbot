@@ -46,7 +46,7 @@
 
 import type { AppManifest } from "@moltzap/app-sdk";
 import type { AppIdentity } from "./manifest.ts";
-import { ALL_CONVERSATION_KEYS, type ConversationKey } from "./conversation-keys.ts";
+import { ALL_CONVERSATION_KEYS } from "./conversation-keys.ts";
 
 /**
  * Build the single bridge-owned union manifest. Declares every key in
@@ -117,6 +117,3 @@ export function verifyUnionManifest(
   };
 }
 
-// Named re-export so consumers can switch on ConversationKey without
-// walking two imports.
-export type { ConversationKey };

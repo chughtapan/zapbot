@@ -170,9 +170,14 @@ interface FetchLike {
   (input: string, init?: RequestInit): Promise<Response>;
 }
 
-function resolveRegisterUrl(serverUrl: string): string {
-  const trimmed = serverUrl.replace(/\/+$/u, "");
-  return `${trimmed}/api/v1/auth/register`;
+const REGISTER_TIMEOUT_MS = 10_000;
+
+// Coerce ws(s)://host/path into http(s)://host/path so HTTP fetch resolves.
+function toHttpBaseUrl(serverUrl: string): string {
+  return serverUrl
+    .replace(/^wss:/u, "https:")
+    .replace(/^ws:/u, "http:")
+    .replace(/\/+$/u, "");
 }
 
 function decodeRegisterResponse(
@@ -208,7 +213,7 @@ export async function registerBridgeAgent(
   input: BridgeRegistrationInput,
   fetchImpl: FetchLike = fetch,
 ): Promise<Result<BridgeIdentity, BridgeRegistrationError>> {
-  const url = resolveRegisterUrl(input.serverUrl);
+  const url = `${toHttpBaseUrl(input.serverUrl)}/api/v1/auth/register`;
   const payload = JSON.stringify({
     name: input.displayName,
     inviteCode: input.registrationSecret,
@@ -221,6 +226,7 @@ export async function registerBridgeAgent(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: payload,
+      signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
     });
   } catch (cause) {
     const reason = cause instanceof Error ? cause.message : String(cause);

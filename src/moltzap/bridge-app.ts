@@ -65,14 +65,13 @@ import {
 } from "@moltzap/app-sdk";
 import type { ConversationKey } from "./conversation-keys.ts";
 import {
-  asBridgeAgentId,
   loadBridgeIdentityEnv,
   registerBridgeAgent,
   type BridgeAgentId,
   type BridgeIdentity,
   type BridgeRegistrationError,
 } from "./bridge-identity.ts";
-import { loadAppIdentity } from "./manifest.ts";
+import { buildAppIdentity } from "./manifest.ts";
 import { buildUnionManifest } from "./union-manifest.ts";
 import type { MoltzapSenderId } from "./types.ts";
 
@@ -140,8 +139,8 @@ interface BridgeSingleton {
   readonly app: MoltZapApp;
   readonly identity: BridgeIdentity;
   readonly handle: BridgeAppHandle;
-  readonly handlers: Map<ConversationKey, (message: Message) => void | Promise<void>>;
-  readonly sessions: Map<string, { readonly conversations: Readonly<Record<ConversationKey, string>> }>;
+  readonly registeredKeys: Set<ConversationKey>;
+  readonly sessions: Set<string>;
 }
 
 let __bridgeSingleton: BridgeSingleton | null = null;
@@ -196,22 +195,8 @@ export function bootBridgeApp(
       });
     }
 
-    const appIdentityResult = loadAppIdentity(env);
-    if ("_tag" in appIdentityResult && appIdentityResult._tag === "AppIdentityDecodeError") {
-      return yield* Effect.fail<BridgeAppBootError>({
-        _tag: "BridgeAppEnvInvalid",
-        reason: appIdentityResult.reason,
-      });
-    }
-    // Narrow: the non-error branch is the `AppIdentity` object.
-    const appIdentity = appIdentityResult as Exclude<
-      ReturnType<typeof loadAppIdentity>,
-      { readonly _tag: "AppIdentityDecodeError" }
-    >;
+    const appIdentity = buildAppIdentity(envResult.value.displayName);
 
-    // Align displayName: bridge identity uses the same env var as
-    // appIdentity so the registered MoltZap agent name matches the
-    // manifest name (operator-legible logs).
     const registration = yield* Effect.promise(() =>
       registerBridgeAgent({
         serverUrl: config.serverUrl,
@@ -235,27 +220,21 @@ export function bootBridgeApp(
       logger,
     });
 
-    const handlers = new Map<
-      ConversationKey,
-      (message: Message) => void | Promise<void>
-    >();
-    const sessions = new Map<
-      string,
-      { readonly conversations: Readonly<Record<ConversationKey, string>> }
-    >();
+    const registeredKeys = new Set<ConversationKey>();
+    const sessions = new Set<string>();
 
     const handle: BridgeAppHandle = {
       agentId: identity.agentId,
       displayName: identity.displayName,
       onBridgeMessage: (key, handler) => {
-        if (handlers.has(key)) {
+        if (registeredKeys.has(key)) {
           return { _tag: "BridgeHandlerAlreadyRegistered", key };
         }
-        handlers.set(key, handler);
+        registeredKeys.add(key);
         app.onMessage(key, (message) => handler(message));
         return null;
       },
-      listActiveSessions: () => [...sessions.keys()],
+      listActiveSessions: () => [...sessions],
     };
 
     // Start the app. The SDK's `start()` error channel is a union of
@@ -268,7 +247,7 @@ export function bootBridgeApp(
       app,
       identity,
       handle,
-      handlers,
+      registeredKeys,
       sessions,
     };
     return handle;
@@ -309,6 +288,8 @@ export function shutdownBridgeApp(): Effect.Effect<void, never> {
     const state = __bridgeSingleton;
     if (state === null) return;
     yield* state.app.stop();
+    state.registeredKeys.clear();
+    state.sessions.clear();
     __bridgeSingleton = null;
   });
 }
@@ -346,10 +327,10 @@ export function createBridgeSession(
       });
     }
 
-    // Named-field → positional map per rev 4 §2.3.
+    // rev 4 §2.3: architect API uses named-field; SDK uses positional.
     const invitedIds = request.invitedAgentIds.map((id) => id as string);
     const session = yield* state.app
-      .createSession([...invitedIds])
+      .createSession(invitedIds)
       .pipe(
         Effect.mapError(
           (cause): BridgeSessionError => ({
@@ -359,29 +340,20 @@ export function createBridgeSession(
         ),
       );
 
-    // The SDK's `conversations` is `Record<string, string>`. Narrow to
-    // ConversationKey keys we recognize. Unknown keys would indicate a
-    // manifest/server divergence — recorded here but not a hard error
-    // (Principle 2: decode, don't assume).
-    const conversations: Record<ConversationKey, string> = {} as Record<
-      ConversationKey,
-      string
+    // Principle 2: the SDK hands back `Record<string, string>`; freeze
+    // a snapshot of the keys we actually recognize so downstream callers
+    // cannot mutate the session's conversation table.
+    const frozen = Object.freeze({ ...session.conversations }) as Readonly<
+      Record<ConversationKey, string>
     >;
-    for (const [k, v] of Object.entries(session.conversations)) {
-      (conversations as Record<string, string>)[k] = v;
-    }
-    const frozen = Object.freeze({ ...conversations });
-    state.sessions.set(session.id, { conversations: frozen });
+    state.sessions.add(session.id);
 
-    const handle: BridgeSessionHandle = {
+    return {
       sessionId: session.id,
       conversations: frozen,
-      // Reusing the global `onBridgeMessage` — one handler per key, global
-      // across sessions, matching the SDK's `onMessage(key, ...)` semantic.
       onMessage: (key, handler) =>
         state.handle.onBridgeMessage(key, handler),
     };
-    return handle;
   });
 }
 
@@ -410,31 +382,38 @@ export function closeBridgeSession(
         _tag: "BridgeAppNotBooted",
       });
     }
-    // Idempotency: if the session is not tracked we still issue the
-    // RPC so an outside-created session can be closed via the bridge;
-    // the server returns an error we map to BridgeCloseSessionFailed.
+    // Prune the registry whether the RPC succeeds or fails so drain can
+    // account for leaked ids without monotonic growth across retries.
+    const mapError = (cause: unknown): BridgeCloseSessionError => ({
+      _tag: "BridgeCloseSessionFailed",
+      cause: new SessionError(
+        `apps/closeSession failed for ${sessionId}`,
+        cause instanceof Error ? cause : undefined,
+      ),
+    });
     yield* state.app.client
       .sendRpc("apps/closeSession", { sessionId })
       .pipe(
-        Effect.mapError(
-          (cause): BridgeCloseSessionError => ({
-            _tag: "BridgeCloseSessionFailed",
-            cause: new SessionError(
-              `apps/closeSession failed for ${sessionId}`,
-              cause instanceof Error ? cause : undefined,
-            ),
+        Effect.mapError(mapError),
+        Effect.ensuring(
+          Effect.sync(() => {
+            state.sessions.delete(sessionId);
           }),
         ),
       );
-    state.sessions.delete(sessionId);
   });
 }
 
 /**
  * SIGTERM-drain helper: enumerate active sessions held by this bridge
- * process via `BridgeAppHandle.listActiveSessions()` and close each in
- * order. Bounded by `timeoutMs`; on timeout, remaining sessions leak
- * (moltzap#230). Returns the list of leaked sessionIds for telemetry.
+ * process and close them concurrently under one shared `timeoutMs`
+ * budget. Any session whose close has not resolved when the budget
+ * expires is reported as leaked (moltzap#230). Returns the list of
+ * leaked sessionIds for telemetry.
+ *
+ * Concurrency + single budget matters: with N sessions the serial
+ * variant could spend `N * perSessionLatency` instead of one
+ * `timeoutMs`, starving later ids.
  */
 export async function drainBridgeSessions(input: {
   readonly timeoutMs: number;
@@ -442,38 +421,33 @@ export async function drainBridgeSessions(input: {
   const state = __bridgeSingleton;
   if (state === null) return [];
 
-  const deadline = Date.now() + Math.max(0, input.timeoutMs);
-  const leaked: string[] = [];
+  const ids = [...state.sessions];
+  if (ids.length === 0) return [];
 
-  for (const sessionId of [...state.sessions.keys()]) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      leaked.push(sessionId);
-      continue;
-    }
-    try {
-      await Effect.runPromise(
-        closeBridgeSession(sessionId).pipe(
-          Effect.timeoutFail({
-            duration: `${remaining} millis`,
-            onTimeout: (): BridgeCloseSessionError => ({
-              _tag: "BridgeCloseSessionFailed",
-              cause: new SessionError(
-                `apps/closeSession timed out after ${remaining}ms for ${sessionId}`,
-              ),
-            }),
-          }),
-        ),
-      );
-    } catch {
-      // Close failed under the budget — treat as leaked for telemetry.
-      leaked.push(sessionId);
-    }
-  }
-  return leaked;
+  const budget = Math.max(0, input.timeoutMs);
+  const leaked = new Set<string>(ids);
+  await Promise.race([
+    Promise.allSettled(
+      ids.map(async (sessionId) => {
+        try {
+          await Effect.runPromise(closeBridgeSession(sessionId));
+          leaked.delete(sessionId);
+        } catch {
+          // Close failed under budget — keep in leaked set.
+        }
+      }),
+    ),
+    new Promise<void>((resolve) => setTimeout(resolve, budget)),
+  ]);
+  return [...leaked];
 }
 
 // Test-only escape hatch: reset the singleton between test runs.
 export function __resetBridgeAppForTests(): void {
+  const state = __bridgeSingleton;
+  if (state !== null) {
+    state.registeredKeys.clear();
+    state.sessions.clear();
+  }
   __bridgeSingleton = null;
 }

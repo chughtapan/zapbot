@@ -170,8 +170,8 @@ export type ConversationKeyDecodeError = {
 export function decodeConversationKey(
   raw: string,
 ): ConversationKey | ConversationKeyDecodeError {
-  if (typeof raw !== "string" || !CONVERSATION_KEY_SET.has(raw)) {
-    return { _tag: "UnknownConversationKey", raw: String(raw) };
+  if (!CONVERSATION_KEY_SET.has(raw)) {
+    return { _tag: "UnknownConversationKey", raw };
   }
   return raw as ConversationKey;
 }
