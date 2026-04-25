@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "crypto";
+
 /**
  * Verify a GitHub webhook HMAC-SHA256 signature.
  * Returns true when the signature matches, false otherwise.
@@ -22,7 +24,6 @@ export async function verifySignature(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")}`;
 
-  // Constant-time comparison to prevent timing attacks
   if (expected.length !== signature.length) return false;
-  return Buffer.from(expected).equals(Buffer.from(signature));
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
