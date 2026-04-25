@@ -172,12 +172,31 @@ interface FetchLike {
 
 const REGISTER_TIMEOUT_MS = 10_000;
 
+/**
+ * Normalize a MoltZap server URL before it is passed to the vendor
+ * ws-client or the HTTP registration endpoint.
+ *
+ * The vendor `@moltzap/client` ws-client appends `/ws` unconditionally
+ * (`serverUrl.replace(/^http/, "ws") + "/ws"` at ws-client.ts:341).
+ * A URL already ending in `/ws` would therefore produce `/ws/ws` at
+ * connect time. This strips any trailing `/ws` segment and any trailing
+ * `/` so the vendor gets the bare base URL every time.
+ *
+ * Both `ws://host:port` and `ws://host:port/ws` normalize to
+ * `ws://host:port`, which the vendor then turns into `ws://host:port/ws`.
+ *
+ * Codex delta-review concern (b) in PR #338 post-cleanup.
+ * Anchor: sbd#204 Fix 3.
+ */
+export function normalizeServerUrl(url: string): string {
+  return url.replace(/\/ws\/?$/u, "").replace(/\/$/u, "");
+}
+
 // Coerce ws(s)://host/path into http(s)://host/path so HTTP fetch resolves.
 function toHttpBaseUrl(serverUrl: string): string {
-  return serverUrl
+  return normalizeServerUrl(serverUrl)
     .replace(/^wss:/u, "https:")
-    .replace(/^ws:/u, "http:")
-    .replace(/\/+$/u, "");
+    .replace(/^ws:/u, "http:");
 }
 
 function decodeRegisterResponse(
