@@ -7,10 +7,10 @@
  * resolution, AO resume metadata, debug logging) lives in
  * `src/moltzap/worker-channel.ts`.
  *
- * The transitional self-register path (sbd#205 deletion target) is
- * still reachable through `resolveWorkerCredentials`. Once sbd#205
- * lands, this bin can collapse to env decode + bootWorkerChannel +
- * signal handlers (architect rev 4 ≤50 LOC end state).
+ * The worker channel now self-registers at startup. This bin decodes
+ * the zapbot parent env (agent key, server, role) and passes it to
+ * bootWorkerChannel, which completes registration and establishes
+ * the transport identity (architect rev 4 final state).
  */
 
 import process from "node:process";
