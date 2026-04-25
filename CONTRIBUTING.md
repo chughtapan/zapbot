@@ -3,22 +3,23 @@
 ## Local setup
 
 ```bash
-git submodule update --init vendor/moltzap
+bash scripts/bootstrap-moltzap.sh
 bun install
 ```
 
-`bun install` triggers `scripts/build-moltzap-vendor.mjs` as a postinstall
-step. The script runs `pnpm install --frozen-lockfile --ignore-scripts`
-and `pnpm -r build` inside `vendor/moltzap/` against the four required
-packages (`protocol`, `client`, `app-sdk`, `claude-code-channel`), so the
-`file:./vendor/moltzap/packages/*` deps resolve with working `dist/`. The
-step is idempotent: if every `packages/*/dist/index.js` already exists it
-exits early. Set `ZAPBOT_SKIP_MOLTZAP_BUILD=1` to bypass (CI images that
-bake prebuilt vendor artifacts).
+`scripts/bootstrap-moltzap.sh` initialises the `vendor/moltzap` git
+submodule, runs `pnpm install --prefer-frozen-lockfile` + `pnpm --filter
+"@moltzap/claude-code-channel..." --filter "@moltzap/app-sdk..." build`
+inside it, and rewrites `workspace:*` specifiers so bun can resolve the
+`file:./vendor/moltzap/packages/*` deps at `bun install` time. It is
+idempotent: the build step skips if every required `dist/index.js`
+already exists. The sbd#200 MoltZap rework added `@moltzap/app-sdk` to
+the build set — the bridge owns `MoltZapApp` lifecycle and imports the
+SDK directly.
 
 Prerequisites: `pnpm` on `PATH` (install once via `npm i -g pnpm` or
-`corepack enable`). If the postinstall fails because `pnpm` is missing,
-install it and rerun `bun install`.
+`corepack enable`). CI invokes the bootstrap script before `bun install`
+automatically.
 
 Bridge operators also need:
 

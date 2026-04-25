@@ -7,9 +7,7 @@
     "test": "vitest run",
     "lint": "eslint 'src/**/*.ts' 'gateway/src/**/*.ts' 'bin/**/*.ts'",
     "bridge": "bun run bin/webhook-bridge.ts",
-    "build": "tsc",
-    "build:vendor": "node scripts/build-moltzap-vendor.mjs",
-    "postinstall": "node scripts/build-moltzap-vendor.mjs"
+    "build": "tsc"
   },
   "keywords": [],
   "author": "",
