@@ -389,6 +389,35 @@ describe("roster.retireRoster", () => {
     if (res._tag !== "Err") return;
     expect(res.error._tag).toBe("RosterNotFound");
   });
+
+  it("surfaces RetireReleaseFailed when a retireSession dep returns Err (firstErr branch)", async () => {
+    const spawned0 = asAoSessionName("roster-145-r1-architect-a");
+    const { deps, events } = makeDeps({ retireFailures: new Set([spawned0 as string]) });
+    const mgr = createRosterManager(deps);
+    await mgr.spawnRoster(specFromValid());
+    const res = await mgr.retireRoster(ID, { _tag: "TaskComplete" });
+    expect(res._tag).toBe("Err");
+    // The failed session was still attempted.
+    expect(events.retires).toContain(spawned0 as string);
+  });
+
+  it("surfaces the thrown reason when a retireSession dep rejects (firstFailure branch)", async () => {
+    const boom = new Error("simulated retireSession rejection");
+    const { deps } = makeDeps();
+    const throwingDeps = {
+      ...deps,
+      retireSession: async () => {
+        throw boom;
+      },
+    };
+    const mgr = createRosterManager(throwingDeps);
+    await mgr.spawnRoster(specFromValid());
+    // Promise.allSettled catches the throw and returns err(reason), not a rejection.
+    const res = await mgr.retireRoster(ID, { _tag: "TaskComplete" });
+    expect(res._tag).toBe("Err");
+    if (res._tag !== "Err") return;
+    expect(res.error).toBe(boom);
+  });
 });
 
 describe("roster.resolveRetiredRecipientRoute", () => {

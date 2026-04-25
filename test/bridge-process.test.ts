@@ -307,4 +307,33 @@ describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
 
     expect(reloadCount).toBe(1);
   });
+
+  it("probe returning false is non-fatal in github-demo mode — bridge starts normally", async () => {
+    // runBridgeProcess passes async () => true as isPublicUrlReachable during
+    // initial config load (bridge not live yet). The post-boot probe is the
+    // separate `overrides.probe` below, which simulates a hairpin-NAT host.
+    let started = false;
+    const fakeRunning: RunningBridge = {
+      stop: async () => { /* no-op */ },
+      reload: async () => { /* no-op */ },
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      HOME: tempHome,
+      ZAPBOT_BOT_USERNAME: "test-bot",
+      ZAPBOT_GATEWAY_URL: "http://gateway.example.com",
+      ZAPBOT_BRIDGE_URL: "http://bridge.example.com",
+    };
+
+    // Should resolve without throwing — probe=false is a warning, not a fatal.
+    await runBridgeProcess(env, {
+      start: async () => {
+        started = true;
+        return fakeRunning;
+      },
+      probe: async () => false,
+    });
+
+    expect(started).toBe(true);
+  });
 });
