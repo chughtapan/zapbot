@@ -295,6 +295,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   );
 }
 
+// Input arrives from an untrusted MoltZap network boundary; callers must validate the decoded Result before acting on any field.
 export function decodeRosterSpec(
   input: unknown,
 ): Result<RosterSpec, RosterSpecDecodeError> {
