@@ -160,7 +160,7 @@ GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
 # ZAPBOT_BRIDGE_URL=https://bridge.example.com
 
 # Optional: MoltZap
-# ZAPBOT_MOLTZAP_SERVER_URL=wss://moltzap.example/ws
+# ZAPBOT_MOLTZAP_SERVER_URL=wss://moltzap.example
 # ZAPBOT_MOLTZAP_API_KEY=...
 # ZAPBOT_MOLTZAP_REGISTRATION_SECRET=...
 # ZAPBOT_MOLTZAP_ALLOWED_SENDERS=agent-a,agent-b

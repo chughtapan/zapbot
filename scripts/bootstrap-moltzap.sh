@@ -37,7 +37,9 @@ fi
 # transitive deps (protocol + client) in topological order.
 # --prefer-frozen-lockfile (not --frozen-lockfile) so a drifted
 # vendor/moltzap/pnpm-lock.yaml does not wedge fresh clones.
-if [ ! -f "$PACKAGES_DIR/claude-code-channel/dist/index.js" ] \
+if [ ! -f "$PACKAGES_DIR/protocol/dist/index.js" ] \
+  || [ ! -f "$PACKAGES_DIR/client/dist/index.js" ] \
+  || [ ! -f "$PACKAGES_DIR/claude-code-channel/dist/index.js" ] \
   || [ ! -f "$PACKAGES_DIR/app-sdk/dist/index.js" ]; then
   echo "[bootstrap-moltzap] building @moltzap/* workspace packages..."
   (cd "$SUBMODULE_DIR" \

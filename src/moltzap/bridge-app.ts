@@ -145,6 +145,12 @@ interface BridgeSingleton {
 
 let __bridgeSingleton: BridgeSingleton | null = null;
 
+// In-flight boot sentinel: assigned synchronously (before any yield*) in
+// bootBridgeApp so concurrent callers coalesce onto the same boot rather than
+// starting a second registration + MoltZapApp.start(). Cleared on success
+// (once __bridgeSingleton is set) or on failure (so a retry starts fresh).
+let __bootInFlight: Promise<BridgeAppHandle> | null = null;
+
 // ── Boot ────────────────────────────────────────────────────────────
 
 function defaultLogger(): WsClientLogger {
@@ -170,20 +176,75 @@ function classifyStartError(
 /**
  * Boot the bridge's `MoltZapApp` per the A+C(2) boot sequence above.
  *
- * Invariant 1 (one MoltZapApp per bridge process): the second call in
- * the same process fails with `BridgeAppAlreadyBooted` regardless of
- * the first call's resolution state.
+ * Invariant 1 (one MoltZapApp per bridge process): concurrent calls coalesce
+ * onto the same in-flight boot; after boot, subsequent calls fail with
+ * `BridgeAppAlreadyBooted`.
+ *
+ * Race-free: `__bootInFlight` is assigned synchronously (no yield* before it)
+ * so the second concurrent caller always sees the sentinel and coalesces.
  */
 export function bootBridgeApp(
   config: BridgeAppBootConfig,
 ): Effect.Effect<BridgeAppHandle, BridgeAppBootError> {
   return Effect.gen(function* () {
+    // Already booted: reject immediately.
     if (__bridgeSingleton !== null) {
       return yield* Effect.fail<BridgeAppBootError>({
         _tag: "BridgeAppAlreadyBooted",
       });
     }
 
+    // Boot in progress: coalesce — await the same in-flight result.
+    // If the in-flight boot fails, the rejection reason is the BridgeAppBootError
+    // from the first caller, so the second caller surfaces the same error tag.
+    if (__bootInFlight !== null) {
+      return yield* Effect.tryPromise({
+        try: () => __bootInFlight!,
+        catch: (e) => e as BridgeAppBootError,
+      });
+    }
+
+    // First caller: assign the sentinel SYNCHRONOUSLY before the first yield*.
+    // JS is single-threaded — no other fiber can enter between the null-check
+    // above and this assignment, closing the TOCTOU window.
+    let resolveInFlight!: (h: BridgeAppHandle) => void;
+    let rejectInFlight!: (e: BridgeAppBootError) => void;
+    __bootInFlight = new Promise<BridgeAppHandle>((res, rej) => {
+      resolveInFlight = res;
+      rejectInFlight = rej;
+    });
+    // Suppress "unhandled rejection" warnings: if no concurrent caller
+    // coalesces, this no-op handler marks the rejection as handled.
+    // Actual error handling is done by callers that call rejectInFlight.
+    __bootInFlight.catch(() => {});
+
+    // Run the actual boot; capture success/failure without losing control flow.
+    const bootResult = yield* _doBoot(config).pipe(Effect.either);
+
+    if (bootResult._tag === "Left") {
+      // Clear sentinel so a retry starts a fresh boot.
+      __bootInFlight = null;
+      rejectInFlight(bootResult.left);
+      return yield* Effect.fail(bootResult.left);
+    }
+
+    // Success: __bridgeSingleton set inside _doBoot.
+    // Clear sentinel then resolve so concurrent waiters get the same handle.
+    __bootInFlight = null;
+    resolveInFlight(bootResult.right);
+    return bootResult.right;
+  });
+}
+
+/**
+ * Internal boot sequence. On success, assigns `__bridgeSingleton` and returns
+ * the handle. Does NOT manage `__bootInFlight` — that is `bootBridgeApp`'s
+ * responsibility.
+ */
+function _doBoot(
+  config: BridgeAppBootConfig,
+): Effect.Effect<BridgeAppHandle, BridgeAppBootError> {
+  return Effect.gen(function* () {
     const env = config.env ?? process.env;
     const logger = config.logger ?? defaultLogger();
 
@@ -426,19 +487,27 @@ export async function drainBridgeSessions(input: {
 
   const budget = Math.max(0, input.timeoutMs);
   const leaked = new Set<string>(ids);
-  await Promise.race([
-    Promise.allSettled(
-      ids.map(async (sessionId) => {
-        try {
-          await Effect.runPromise(closeBridgeSession(sessionId));
-          leaked.delete(sessionId);
-        } catch {
-          // Close failed under budget — keep in leaked set.
-        }
-      }),
+
+  // Effect.race interrupts the losing fiber so in-flight closes do not
+  // continue mutating state past the deadline. Previously, Promise.race
+  // left orphaned in-flight Effects that mutated state.sessions after
+  // drainBridgeSessions returned. Effect.tap only runs on success, so
+  // timed-out sessions stay in the leaked set.
+  await Effect.runPromise(
+    Effect.race(
+      Effect.forEach(
+        ids,
+        (sessionId) =>
+          closeBridgeSession(sessionId).pipe(
+            Effect.tap(() => Effect.sync(() => leaked.delete(sessionId))),
+            Effect.ignore,
+          ),
+        { concurrency: "unbounded", discard: true },
+      ),
+      Effect.sleep(budget),
     ),
-    new Promise<void>((resolve) => setTimeout(resolve, budget)),
-  ]);
+  );
+
   return [...leaked];
 }
 
@@ -450,4 +519,5 @@ export function __resetBridgeAppForTests(): void {
     state.sessions.clear();
   }
   __bridgeSingleton = null;
+  __bootInFlight = null;
 }

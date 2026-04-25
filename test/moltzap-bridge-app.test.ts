@@ -115,3 +115,60 @@ describe("bridge-app: silence invariant (structural)", () => {
     expect(true).toBe(true);
   });
 });
+
+describe("bridge-app: concurrent boot coalesces — singleton race guard (P1 #3 regression)", () => {
+  // Regression for the TOCTOU in the original bootBridgeApp: __bridgeSingleton
+  // guard ran BEFORE the first async yield (registerBridgeAgent), so two
+  // concurrent callers could both pass the guard, both register, both create a
+  // MoltZapApp, and both start it — leaving one orphaned with an open WS.
+  //
+  // Fix: __bootInFlight sentinel is assigned synchronously (no yield*) before
+  // the first async operation. The second caller sees it and coalesces.
+
+  it("two concurrent calls with registration failure: one fetch call, both callers fail with BridgeAppRegistrationFailed", async () => {
+    let fetchCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetchCount++;
+      return new Response("forbidden", { status: 403 });
+    });
+
+    const config = {
+      serverUrl: "https://moltzap.example",
+      env: { ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "test-secret" },
+    };
+
+    const [r1, r2] = await Promise.all([
+      Effect.runPromise(bootBridgeApp(config).pipe(Effect.either)),
+      Effect.runPromise(bootBridgeApp(config).pipe(Effect.either)),
+    ]);
+
+    // Only one registration RPC sent — second caller coalesced onto the in-flight boot.
+    expect(fetchCount).toBe(1);
+    // Both callers surface the same failure tag.
+    expect(r1._tag).toBe("Left");
+    expect(r2._tag).toBe("Left");
+    if (r1._tag === "Left") expect(r1.left._tag).toBe("BridgeAppRegistrationFailed");
+    if (r2._tag === "Left") expect(r2.left._tag).toBe("BridgeAppRegistrationFailed");
+  });
+
+  it("sentinel clears on failure — a subsequent boot attempt makes a fresh registration call", async () => {
+    let fetchCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetchCount++;
+      return new Response("forbidden", { status: 403 });
+    });
+
+    const config = {
+      serverUrl: "https://moltzap.example",
+      env: { ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "test-secret" },
+    };
+
+    // First attempt fails; sentinel is cleared inside bootBridgeApp on failure.
+    await Effect.runPromise(bootBridgeApp(config).pipe(Effect.either));
+    expect(fetchCount).toBe(1);
+
+    // Second attempt should start a fresh boot (not coalesce onto the cleared sentinel).
+    await Effect.runPromise(bootBridgeApp(config).pipe(Effect.either));
+    expect(fetchCount).toBe(2); // sentinel was cleared → new fetch
+  });
+});
