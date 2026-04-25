@@ -565,11 +565,16 @@ export function createBridgeSession(
  * timeout. Pure helper: state mutation lives in the shared
  * `pendingAdmissions` map and the handlers wired in `_doBoot`.
  *
- * Race correctness: `apps/create` admission can fan in fast enough that
- * `app/sessionReady` arrives between the SDK's `createSession` resolving
- * and us registering the pending entry. The post-registration
- * `getSession()?.isActive` check below catches that case (the SDK has
- * already swapped in the active handle inside `handleSessionReady`).
+ * Race correctness: `apps/create` admission can theoretically fan in fast
+ * enough that `app/sessionReady` arrives between the SDK's `createSession`
+ * resolving and `pendingAdmissions.set()` registering this entry. In
+ * practice JS event-loop ordering closes this window: `createSession`
+ * resolves via a Promise microtask continuation, so `pendingAdmissions.set`
+ * runs synchronously within that microtask before any WS macrotask
+ * (`participantAdmitted` / `sessionReady`) can fire. A post-registration
+ * replay-check is omitted: `AppSessionHandle` exposes no per-agent
+ * admission state, so we cannot distinguish full vs partial admission in
+ * the replay window without an additional SDK API.
  *
  * Interrupt safety: returning a cleanup Effect from `Effect.async` makes
  * the timer + pending entry release on caller cancellation; otherwise a
