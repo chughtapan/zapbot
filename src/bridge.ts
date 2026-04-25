@@ -831,6 +831,12 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     if (registered !== null) return bridgeAgentIdAsSenderId(registered);
     return asMoltzapSenderId("zapbot-orchestrator");
   })();
+  // sbd#201: when MoltZap is registration-backed, plumb auth into the
+  // roster manager so the spawn dep can mint per-worker creds and call
+  // `createBridgeSession({invitedAgentIds: [thisWorkerSenderId]})` BEFORE
+  // each `ao spawn` (architect rev 4 §4.3).
+  const moltzapAuth =
+    current.moltzap._tag === "MoltzapRegistration" ? current.moltzap : null;
   const rosterManagerDeps = createAoCliRosterManagerDeps(
     {
       configPath: current.aoConfigPath,
@@ -842,6 +848,7 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
     },
     {
       orchestratorSenderId,
+      moltzapAuth,
     },
   );
   const rosterManager = createRosterManager(rosterManagerDeps);
@@ -884,7 +891,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       if (current.moltzap._tag === "MoltzapRegistration") {
         const leaked = await drainBridgeSessions({ timeoutMs: 60_000 });
         if (leaked.length > 0) {
-          // eslint-disable-next-line no-console
           console.warn(
             `[bridge] SIGTERM drain leaked ${leaked.length} session(s) (moltzap#230): ${leaked.join(",")}`,
           );

@@ -26,15 +26,6 @@ import type {
 } from "../types.ts";
 import { absurd, asIssueNumber, asProjectName, err, ok } from "../types.ts";
 import {
-  fromSenderIds,
-  type SenderAllowlist,
-} from "../moltzap/identity-allowlist.ts";
-import type {
-  PeerChannelKind,
-  RoleTopologyError,
-} from "../moltzap/role-topology.ts";
-import {
-  ALL_WORKER_ROLES,
   decodeSessionRole,
   type WorkerRole,
 } from "../moltzap/session-role.ts";
@@ -112,6 +103,19 @@ export type RosterSpecDecodeError =
   | { readonly _tag: "RosterDuplicateLabel"; readonly label: string }
   | { readonly _tag: "RosterMemberRoleUnknown"; readonly raw: string };
 
+/**
+ * Architect rev 4 §4.3: ONE bridge session is created per roster (invited =
+ * union of all worker senderIds), BEFORE any worker is spawned. This error
+ * surfaces failures of that prepare phase so the roster manager can report
+ * them as a normal `MemberSpawnFailed` (with the first member as the
+ * stand-in role/label) without inventing a new caller-facing error tag —
+ * callers downstream of `spawnRoster` already handle MemberSpawnFailed.
+ */
+export type RosterSessionPrepareError = {
+  readonly _tag: "RosterSessionPrepareFailed";
+  readonly cause: string;
+};
+
 export type RosterSpawnError =
   | RosterSpecDecodeError
   | {
@@ -133,10 +137,6 @@ export type RosterSpawnError =
       readonly _tag: "ReservedMcpKeyCollision";
       readonly key: "moltzap";
       readonly member: { readonly role: WorkerRole; readonly displayLabel: string };
-    }
-  | {
-      readonly _tag: "AllowlistBindFailed";
-      readonly cause: RoleTopologyError;
     };
 
 export type RosterTrackError = {
@@ -151,12 +151,29 @@ export type RosterRetireError =
 // ── Injection boundary ──────────────────────────────────────────────
 
 export interface RosterManagerDeps {
+  /**
+   * Architect rev 4 §4.3 prepare phase. Called ONCE per roster before any
+   * `spawnSession`. Implementations register all worker creds and create
+   * exactly one bridge session whose `invitedAgentIds` is the union of
+   * worker senderIds, then wait for admission to complete. Per-roster
+   * state (the bridgeSessionId, premised credentials by displayLabel)
+   * lives inside the implementation; `RosterManager` does not introspect
+   * it.
+   *
+   * Implementations that don't need a prepare phase (e.g. tests, the
+   * transitional `moltzapAuth: null` path) return `Ok(undefined)`.
+   */
+  readonly prepareRosterSession: (args: {
+    readonly rosterId: RosterId;
+    readonly members: readonly RosterMemberSpec[];
+    readonly issue: IssueNumber;
+    readonly projectName: ProjectName;
+  }) => Promise<Result<void, RosterSessionPrepareError>>;
   readonly spawnSession: (args: {
     readonly rosterId: RosterId;
     readonly member: RosterMemberSpec;
     readonly issue: IssueNumber;
     readonly projectName: ProjectName;
-    readonly peers: ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]>;
   }) => Promise<
     Result<
       RosterMember,
@@ -167,10 +184,17 @@ export interface RosterManagerDeps {
   readonly retireSession: (
     session: AoSessionName,
   ) => Promise<Result<void, Extract<RosterRetireError, { readonly _tag: "RetireReleaseFailed" }>>>;
-  readonly bindAllowlistFor: (
-    member: RosterMember,
-    peers: ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]>,
-  ) => Result<SenderAllowlist, RoleTopologyError>;
+  /**
+   * Best-effort close of the per-roster bridge session and removal of any
+   * roster-scoped state held by the implementation. Called by `spawnRoster`
+   * after a failed-spawn rollback (so a half-prepared roster does not
+   * leak its bridge session) and by `retireRoster` after the last member
+   * is retired (so the bridge session lifetime tracks the roster's, per
+   * architect rev 4 §4.3). Failures are the implementation's to log; the
+   * roster manager surfaces no error channel here because retire/cleanup
+   * paths must remain best-effort.
+   */
+  readonly releaseRosterSession: (rosterId: RosterId) => Promise<void>;
   readonly clock: () => number;
 }
 
@@ -397,19 +421,79 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
   async function spawnRoster(
     spec: RosterSpec,
   ): Promise<Result<readonly RosterMember[], RosterSpawnError>> {
+    // Validate reserved labels BEFORE the prepare phase. The reserved-key
+    // guard (Invariant 4) used to live inside `spawnSession`, but with
+    // `prepareRosterSession` registering MoltZap workers + creating a
+    // bridge session in front of `spawnSession`, an invalid label would
+    // mint server-side credentials before the guard rejected it.
+    for (const memberSpec of spec.members) {
+      if (
+        memberSpec.displayLabel === "moltzap" ||
+        memberSpec.displayLabel.startsWith("moltzap-reserved-")
+      ) {
+        return err({
+          _tag: "ReservedMcpKeyCollision",
+          key: "moltzap",
+          member: {
+            role: memberSpec.role,
+            displayLabel: memberSpec.displayLabel,
+          },
+        });
+      }
+    }
+
+    // Architect rev 4 §4.3 prepare phase: ONE bridge session per roster,
+    // invited-list = union of all worker senderIds. Per-spawn sessions
+    // would create per-worker conversation IDs, so workers in the same
+    // roster could not exchange messages on shared `coord-*` keys.
+    const prepared = await deps.prepareRosterSession({
+      rosterId: spec.rosterId,
+      members: spec.members,
+      issue: spec.issue,
+      projectName: spec.projectName,
+    });
+    if (prepared._tag === "Err") {
+      // Cause-the-string surfaces the typed prepare-failure tag for
+      // operator-visible distinction (registration failed vs admission
+      // timed out); private typed detail stays inside the dep impl.
+      const head = spec.members[0];
+      // Defensive: decoder rejects empty members, but the type permits a
+      // zero-length array — surface a stable error tag rather than throw.
+      if (head === undefined) {
+        return err({
+          _tag: "MemberSpawnFailed",
+          role: "implementer",
+          displayLabel: "<roster-prepare>",
+          cause: prepared.error.cause,
+        });
+      }
+      // Best-effort: even if prepare reported failure, the impl may have
+      // partially allocated state (e.g. registered workers before the
+      // bridge session create failed). Release ensures cleanup.
+      await deps.releaseRosterSession(spec.rosterId);
+      return err({
+        _tag: "MemberSpawnFailed",
+        role: head.role,
+        displayLabel: head.displayLabel,
+        cause: prepared.error.cause,
+      });
+    }
+
     const spawned: RosterMember[] = [];
 
     for (const memberSpec of spec.members) {
-      const peers = resolveSpawnPeers(spec, spawned, memberSpec);
       const res = await deps.spawnSession({
         rosterId: spec.rosterId,
         member: memberSpec,
         issue: spec.issue,
         projectName: spec.projectName,
-        peers,
       });
       if (res._tag === "Err") {
         const cleanupErr = await rollback(spawned);
+        // Always release the per-roster bridge session after rollback;
+        // when no member spawned, the rollback retired nothing and the
+        // bridge session would leak otherwise (architect rev 4 §4.3).
+        await deps.releaseRosterSession(spec.rosterId);
         const errTag = res.error._tag;
         if (errTag === "ReservedMcpKeyCollision") {
           // Reserved-key collision is a typed error in its own right
@@ -456,57 +540,17 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
           cause,
         });
       }
-      const member = res.value;
-      const bindRes = deps.bindAllowlistFor(member, peers);
-      if (bindRes._tag === "Err") {
-        // Allowlist bind failed: rollback everything we've spawned
-        // (including the current one).
-        const allSpawned = [...spawned, member];
-        await rollback(allSpawned);
-        return err({ _tag: "AllowlistBindFailed", cause: bindRes.error });
-      }
-      spawned.push(member);
+      spawned.push(res.value);
     }
 
-    // Second-pass allowlist rebind (Invariant 3 — orchestrator-side
-    // bookkeeping): the first-member spawn saw no peers; the second-
-    // member spawn saw only the first peer; etc. After every member is
-    // up, rebind each member's in-memory allowlist with the FULL peer
-    // set so the orchestrator's view is symmetric.
-    //
-    // NOTE (worker-side symmetry gap): the spawn-site MOLTZAP_ALLOWED_SENDERS
-    // env only carries peers spawned BEFORE each member. Later-spawned
-    // peers' senderIds are not pushed back to earlier workers (workers
-    // read this env only at boot). A follow-up MVP issue will add a
-    // worker-side allowlist-reload mechanism so the second-pass rebind
-    // propagates to already-running workers. For now, the gap is:
-    // architect-a cannot receive peer messages from architect-b spawned
-    // after it, even though the topology permits it. In-process tests
-    // pass; the asymmetry only surfaces under real ao-spawn transport.
-    const finalPeersByRole = new Map<WorkerRole, MoltzapSenderId[]>();
-    for (const role of ALL_WORKER_ROLES) finalPeersByRole.set(role, []);
-    for (const m of spawned) {
-      const bucket = finalPeersByRole.get(m.role);
-      if (bucket) bucket.push(m.senderId);
-    }
-    for (const m of spawned) {
-      // Exclude the member itself so a member's own senderId is not
-      // added to its own allowlist as a peer.
-      const perMemberPeers = new Map<WorkerRole, readonly MoltzapSenderId[]>();
-      for (const role of ALL_WORKER_ROLES) {
-        const ids = (finalPeersByRole.get(role) ?? []).filter(
-          (sid) => sid !== m.senderId,
-        );
-        if (ids.length > 0) perMemberPeers.set(role, ids);
-      }
-      const rebind = deps.bindAllowlistFor(m, perMemberPeers);
-      if (rebind._tag === "Err") {
-        await rollback(spawned);
-        return err({ _tag: "AllowlistBindFailed", cause: rebind.error });
-      }
-    }
+    // sbd#201: client-side allowlist binding is gone. Admission lives
+    // server-side: the spawn dep calls `createBridgeSession` with
+    // `invitedAgentIds: [thisWorkerSenderId]` BEFORE each `ao spawn`, so
+    // the bridge's `apps/create` invite admits the worker on every
+    // conversation key in the union manifest. Role-pair topology is
+    // dissolved into role-pair conversation keys (`conversation-keys.ts`).
 
-    // Register roster once all members are up and allowlists are symmetric.
+    // Register roster once all members are up.
     const statuses = new Map<AoSessionName, RosterMemberStatus>();
     for (const m of spawned) {
       statuses.set(m.session, { _tag: "Live", member: m });
@@ -610,6 +654,11 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       const res = await retireMember(rosterId, session, reason);
       if (res._tag === "Err") return err(res.error);
     }
+    // Architect rev 4 §4.3: bridge session lifetime tracks the roster's,
+    // not the per-worker session's. Close the bridge session AFTER every
+    // member is down so admission is revoked + the session's
+    // `apps/closeSession` call lands.
+    await deps.releaseRosterSession(rosterId);
     return ok(undefined);
   }
 
@@ -732,38 +781,6 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
 
 // ── Pure helpers ──────────────────────────────────────────────────
 
-export function resolveSpawnPeers(
-  spec: RosterSpec,
-  alreadySpawned: readonly RosterMember[],
-  incoming: RosterMemberSpec,
-): ReadonlyMap<WorkerRole, readonly MoltzapSenderId[]> {
-  // `spec` is retained in the signature for forward-compat: a future
-  // revision may prune peers using the spec's declared-member list before
-  // a role's members have all spawned. Today we only need the
-  // already-spawned set.
-  void spec;
-  const byRole = new Map<WorkerRole, MoltzapSenderId[]>();
-  for (const role of ALL_WORKER_ROLES) {
-    byRole.set(role, []);
-  }
-  for (const m of alreadySpawned) {
-    const bucket = byRole.get(m.role);
-    if (bucket) bucket.push(m.senderId);
-  }
-  // Omit roles the incoming member cannot receive from directly. For the
-  // four-role topology, `implementer` and `reviewer` do not receive from
-  // sideways peers of their own role, so we drop those buckets from the
-  // returned map (the empty default would leak them as "present but
-  // empty" to the bind step).
-  // Drop buckets for roles the incoming member cannot receive from
-  // sideways (same-role peers for implementer/reviewer). The returned
-  // type narrows to `ReadonlyMap<_, readonly _[]>` so callers cannot
-  // mutate through it; no defensive freeze needed.
-  if (incoming.role === "implementer") byRole.delete("implementer");
-  if (incoming.role === "reviewer") byRole.delete("reviewer");
-  return byRole;
-}
-
 export function resolveRetiredRecipientRoute(
   roster: readonly RosterMemberStatus[],
   orchestratorSenderId: MoltzapSenderId,
@@ -775,9 +792,3 @@ export function resolveRetiredRecipientRoute(
   return { orchestrator: orchestratorSenderId };
 }
 
-// Expose allowlist constructor so downstream code that does not already
-// pull identity-allowlist into its import graph can still build the base.
-export { fromSenderIds };
-
-// Re-export peer channel kind for barrel convenience.
-export type { PeerChannelKind };

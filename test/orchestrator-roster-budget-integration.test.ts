@@ -22,12 +22,9 @@ import {
   type RosterMember,
   type RosterSpec,
 } from "../src/orchestrator/roster.ts";
-import { asTokenCount } from "../src/orchestrator/budget.ts";
-import { fromSenderIds } from "../src/moltzap/identity-allowlist.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import {
   asAoSessionName,
-  err,
   ok,
 } from "../src/types.ts";
 
@@ -60,6 +57,8 @@ function makeDeps(): {
   let t = 1_000_000;
   const retires: string[] = [];
   const deps: RosterManagerDeps = {
+    prepareRosterSession: async () => ok(undefined),
+    releaseRosterSession: async () => {},
     spawnSession: async ({ rosterId, member }) => {
       t += 1;
       const session = asAoSessionName(
@@ -80,7 +79,6 @@ function makeDeps(): {
       retires.push(session as string);
       return ok(undefined);
     },
-    bindAllowlistFor: () => ok(fromSenderIds([])),
     clock: () => t,
   };
   return { deps, retires, now: () => t };

@@ -10,7 +10,7 @@ import {
   type PeerMessage,
   type PeerMessageKind,
 } from "../src/orchestrator/peer-message.ts";
-import { ALL_PEER_CHANNEL_KINDS } from "../src/moltzap/role-topology.ts";
+import { ALL_CONVERSATION_KEYS } from "../src/moltzap/conversation-keys.ts";
 import { asAoSessionName } from "../src/types.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 
@@ -18,7 +18,7 @@ function baseMessage(overrides: Partial<PeerMessage> = {}): PeerMessage {
   return {
     _tag: "PeerMessage",
     kind: "status-update",
-    channel: "worker-to-orchestrator",
+    channel: "coord-worker-to-orch",
     from: {
       role: "architect",
       session: asAoSessionName("sess-a"),
@@ -111,7 +111,7 @@ describe("peer-message.encodePeerMessage roundtrip", () => {
       fc.property(
         fc.record({
           kind: fc.constantFrom<PeerMessageKind>(...ALL_PEER_MESSAGE_KINDS),
-          channel: fc.constantFrom(...ALL_PEER_CHANNEL_KINDS),
+          channel: fc.constantFrom(...ALL_CONVERSATION_KEYS),
           body: fc.string({ minLength: 0, maxLength: 200 }),
           artifactUrl: fc.option(
             fc.webUrl(),

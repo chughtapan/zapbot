@@ -13,8 +13,17 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fromSenderIds } from "../moltzap/identity-allowlist.ts";
-import { extendAllowlistForRole } from "../moltzap/role-topology.ts";
+import { Effect } from "effect";
+import {
+  closeBridgeSession,
+  createBridgeSession,
+  type BridgeSessionError,
+} from "../moltzap/bridge-app.ts";
+import {
+  registerBridgeAgent,
+  type BridgeRegistrationError,
+} from "../moltzap/bridge-identity.ts";
+import type { MoltzapRuntimeConfig } from "../moltzap/runtime.ts";
 import type { MoltzapSenderId } from "../moltzap/types.ts";
 import { asMoltzapSenderId } from "../moltzap/types.ts";
 import type { AoSessionName, ProjectName, Result } from "../types.ts";
@@ -463,20 +472,31 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
 // ── RosterManagerDeps factory (architect plan §2.7) ───────────────
 //
 // Bind the typed RosterManager interface to the AO CLI. `spawnSession`
-// invokes `bun run bin/ao-spawn-with-moltzap.ts` under the hood so the
-// spawned worker carries its MoltZap identity; `retireSession` issues
-// `ao kill`. `bindAllowlistFor` uses `extendAllowlistForRole` from the
-// topology module. `clock` defaults to `Date.now`.
+// mints the worker's MoltZap creds + admits them to bridge-owned
+// conversations via `createBridgeSession({invitedAgentIds:[senderId]})`
+// BEFORE invoking `bun run bin/ao-spawn-with-moltzap.ts`, so the worker
+// boots on the pre-minted-credentials path (sbd#201 + architect rev 4
+// §4.3). `retireSession` issues `ao kill`. `clock` defaults to
+// `Date.now`.
 //
 // Callers: `createRosterManager(createAoCliRosterManagerDeps(opts, {...}))`.
 
 export interface AoCliRosterManagerOptions {
   /**
-   * Orchestrator sender identity. Seeded into every worker's base
-   * allowlist so workers accept inbound messages from the orchestrator;
-   * `extendAllowlistForRole` unions per-role peers on top of this seed.
+   * Orchestrator sender identity. Recorded on every spawned member so
+   * downstream callers can route worker-to-orchestrator messages back to
+   * a known endpoint.
    */
   readonly orchestratorSenderId: MoltzapSenderId;
+  /**
+   * MoltZap auth used to mint per-worker credentials BEFORE spawn
+   * (architect rev 4 §4.3). When set, the spawn dep mints creds via
+   * `registerBridgeAgent`, admits via `createBridgeSession`, and passes
+   * `MOLTZAP_AGENT_KEY` + `MOLTZAP_LOCAL_SENDER_ID` to the wrapper so
+   * the worker boots on the pre-minted-credentials path. `null` short-
+   * circuits to the worker self-register flow (transitional, sbd#205).
+   */
+  readonly moltzapAuth: Extract<MoltzapRuntimeConfig, { readonly _tag: "MoltzapRegistration" }> | null;
 }
 
 /**
@@ -570,13 +590,237 @@ export function createRosterBudgetCoordinator(
   };
 }
 
+/**
+ * Internal failure cause for the prepare/spawn pipeline. Public API
+ * (`MemberSpawnFailed.cause: string`) is preserved by stringifying at the
+ * boundary; the typed union lives module-locally so rollback paths and
+ * `console.warn` diagnostics keep operator-actionable detail
+ * (HTTP status + body for registration, `_tag` + agentId for admission)
+ * without widening the caller-facing surface (codex stamina round-1 P2).
+ */
+type SpawnFailureCause =
+  | { readonly _tag: "RegistrationFailed"; readonly cause: BridgeRegistrationError }
+  | { readonly _tag: "BridgeSessionFailed"; readonly cause: BridgeSessionError }
+  | { readonly _tag: "RosterContextMissing"; readonly rosterId: RosterId }
+  | { readonly _tag: "SpawnProcessFailed"; readonly stderr: string; readonly exitCode: number | null; readonly cause: string }
+  | { readonly _tag: "SpawnStdoutMalformed"; readonly stdout: string };
+
+function describeRegistrationError(error: BridgeRegistrationError): string {
+  switch (error._tag) {
+    case "BridgeRegistrationHttpFailed":
+      return `${error._tag} (status=${error.status}, body=${error.body.slice(0, 200)})`;
+    case "BridgeRegistrationDecodeFailed":
+      return `${error._tag} (${error.reason})`;
+  }
+}
+
+function describeBridgeSessionError(error: BridgeSessionError): string {
+  switch (error._tag) {
+    case "BridgeAppNotBooted":
+      return error._tag;
+    case "BridgeSessionCreateFailed":
+      return `${error._tag} (${error.cause.message})`;
+    case "BridgeSessionAdmissionTimeout":
+      return `${error._tag} (sessionId=${error.sessionId}, waitedMs=${error.waitedMs})`;
+    case "BridgeSessionAdmissionRejected":
+      return `${error._tag} (sessionId=${error.sessionId}, agentId=${error.agentId}, reason=${error.reason})`;
+  }
+}
+
+function describeSpawnFailure(cause: SpawnFailureCause): string {
+  switch (cause._tag) {
+    case "RegistrationFailed":
+      return `worker registration failed: ${describeRegistrationError(cause.cause)}`;
+    case "BridgeSessionFailed":
+      return `bridge session failed: ${describeBridgeSessionError(cause.cause)}`;
+    case "RosterContextMissing":
+      return `roster session not prepared for ${cause.rosterId as string}`;
+    case "SpawnProcessFailed":
+      return cause.stderr.trim().length > 0 ? cause.stderr.trim() : cause.cause;
+    case "SpawnStdoutMalformed":
+      return `could not parse SESSION= from ao-spawn-with-moltzap stdout: ${cause.stdout.trim()}`;
+  }
+}
+
+/**
+ * Transitional path (sbd#205 deletes this). When the orchestrator did not
+ * pre-mint creds, parse the worker's self-registered MOLTZAP_LOCAL_SENDER_ID
+ * from the wrapper's stdout. Fall back to a derived id with a diagnostic
+ * when the line is missing.
+ */
+function resolveSelfRegisteredSenderId(
+  stdout: string,
+  rosterId: RosterId,
+  displayLabel: string,
+  sessionName: AoSessionName,
+): MoltzapSenderId {
+  const senderMatch = stdout.match(/MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/);
+  if (senderMatch && senderMatch[1]) {
+    return asMoltzapSenderId(senderMatch[1]);
+  }
+  const fallback = asMoltzapSenderId(`${rosterId as string}-${displayLabel}`);
+  console.warn(
+    `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${fallback as string}).`,
+  );
+  return fallback;
+}
+
+/**
+ * Per-roster state held inside the deps closure. Architect rev 4 §4.3
+ * model: ONE bridge session per roster, invited = union of all worker
+ * senderIds. The session lifetime tracks the roster's, not the per-
+ * worker session's; `retireSession` releases the worker process and
+ * drops the `rosterIdBySession` entry, but does NOT close the bridge
+ * session. `releaseRosterSession` closes the bridge session and removes
+ * this entry — invoked by the roster manager after a failed-spawn
+ * rollback or after the last member is retired.
+ */
+interface RosterContext {
+  readonly bridgeSessionId: string | null;
+  readonly premintedByLabel: ReadonlyMap<
+    string,
+    { readonly agentKey: string; readonly senderId: MoltzapSenderId }
+  >;
+}
+
 export function createAoCliRosterManagerDeps(
   options: AoCliOptions,
   rosterOptions: AoCliRosterManagerOptions,
 ): RosterManagerDeps {
+  const rosterContexts = new Map<RosterId, RosterContext>();
+  // Inverted index: session → owning roster. Maintained in lockstep with
+  // worker spawn/retire so `retireSession` finds its roster in O(1) and
+  // `releaseRoster` can defensively drain leftover entries (e.g. after
+  // partial-rollback paths) without an extra structure.
+  const rosterIdBySession = new Map<string, RosterId>();
+
+  /**
+   * Architect rev 4 §4.3 prepare phase — register all worker creds and
+   * create ONE bridge session whose `invitedAgentIds` is the union of
+   * worker senderIds. Codex stamina round-1 P1 #1 fix: per-spawn was
+   * structurally wrong because conversations are session-scoped, so
+   * workers in different sessions could not exchange messages on shared
+   * `coord-*` conversation keys.
+   */
+  async function prepareRoster(
+    rosterId: RosterId,
+    members: readonly RosterMemberSpec[],
+  ): Promise<Result<void, SpawnFailureCause>> {
+    const auth = rosterOptions.moltzapAuth;
+    if (auth === null) {
+      // Transitional path (sbd#205): no creds minted, no bridge session.
+      // Still install an empty roster context so spawnSession +
+      // retireSession can route by rosterId without conditional logic.
+      rosterContexts.set(rosterId, {
+        bridgeSessionId: null,
+        premintedByLabel: new Map(),
+      });
+      return ok(undefined);
+    }
+
+    // Register every worker before the single createBridgeSession call.
+    // Workers are independent → run in parallel; first-failure-wins via
+    // Promise.all (rejects-on-first-reject). Earlier successful
+    // registrations on a failure path become server-side dead agents,
+    // which is the same shape as the prior per-spawn implementation.
+    const registrations = await Promise.all(
+      members.map(async (member) => {
+        const displayName = `${rosterId as string}-${member.displayLabel}`.slice(
+          0,
+          32,
+        );
+        const registration = await registerBridgeAgent({
+          serverUrl: auth.serverUrl,
+          registrationSecret: auth.registrationSecret,
+          displayName,
+        });
+        return { member, registration };
+      }),
+    );
+    const premintedByLabel = new Map<
+      string,
+      { readonly agentKey: string; readonly senderId: MoltzapSenderId }
+    >();
+    for (const { member, registration } of registrations) {
+      if (registration._tag === "Err") {
+        return err({
+          _tag: "RegistrationFailed",
+          cause: registration.error,
+        });
+      }
+      premintedByLabel.set(member.displayLabel, {
+        agentKey: registration.value.agentKey,
+        senderId: asMoltzapSenderId(registration.value.agentId as string),
+      });
+    }
+
+    const allSenderIds = [...premintedByLabel.values()].map((v) => v.senderId);
+    const sessionResult = await Effect.runPromise(
+      createBridgeSession({ invitedAgentIds: allSenderIds }).pipe(Effect.either),
+    );
+    if (sessionResult._tag === "Left") {
+      return err({
+        _tag: "BridgeSessionFailed",
+        cause: sessionResult.left,
+      });
+    }
+
+    rosterContexts.set(rosterId, {
+      bridgeSessionId: sessionResult.right.sessionId,
+      premintedByLabel,
+    });
+    return ok(undefined);
+  }
+
+  async function releaseRoster(rosterId: RosterId): Promise<void> {
+    const ctx = rosterContexts.get(rosterId);
+    if (ctx === undefined) return;
+    // Close FIRST, then delete the context entry on success. If close
+    // fails, leave the context intact so a SIGTERM drain (or a follow-up
+    // releaseRosterSession call) can retry.
+    if (ctx.bridgeSessionId !== null && ctx.bridgeSessionId !== "") {
+      const closeResult = await Effect.runPromise(
+        closeBridgeSession(ctx.bridgeSessionId).pipe(Effect.either),
+      );
+      if (closeResult._tag === "Left") {
+        console.warn(
+          `[roster] releaseRosterSession: closeBridgeSession failed for roster ${rosterId as string} (${closeResult.left._tag}); will retry on SIGTERM drain.`,
+        );
+        return;
+      }
+    }
+    // Defensive sweep: drop any session→roster entries still pointing at
+    // this rosterId. retireSession normally clears them, but partial
+    // rollbacks can leave dirty entries when ao kill failed mid-cleanup.
+    for (const [session, owner] of [...rosterIdBySession]) {
+      if (owner === rosterId) rosterIdBySession.delete(session);
+    }
+    rosterContexts.delete(rosterId);
+  }
+
   return {
-    spawnSession: async ({ rosterId, member, issue, projectName, peers }) => {
-      void peers;
+    prepareRosterSession: async ({ rosterId, members }) => {
+      // Idempotency-by-prevention: prepare should only run once per
+      // rosterId. The roster manager calls prepare exactly once per
+      // spawnRoster, but a retry-after-failure could land here twice;
+      // surface the duplicate as a stable error rather than silently
+      // overwriting state and orphaning the prior bridge session.
+      if (rosterContexts.has(rosterId)) {
+        return err({
+          _tag: "RosterSessionPrepareFailed",
+          cause: `roster ${rosterId as string} already prepared`,
+        });
+      }
+      const result = await prepareRoster(rosterId, members);
+      if (result._tag === "Err") {
+        return err({
+          _tag: "RosterSessionPrepareFailed",
+          cause: describeSpawnFailure(result.error),
+        });
+      }
+      return ok(undefined);
+    },
+    spawnSession: async ({ rosterId, member, issue, projectName }) => {
       // Sentinel-marked reserved-key collision: if the caller passed a
       // displayLabel that starts with "moltzap", reject it with the
       // ReservedMcpKeyCollision error tag (Invariant 4). The label becomes
@@ -593,6 +837,19 @@ export function createAoCliRosterManagerDeps(
         });
       }
 
+      const memberFail = (cause: SpawnFailureCause) =>
+        err({
+          _tag: "MemberSpawnFailed" as const,
+          role: member.role,
+          displayLabel: member.displayLabel,
+          cause: describeSpawnFailure(cause),
+        });
+
+      const ctx = rosterContexts.get(rosterId);
+      if (ctx === undefined) {
+        return memberFail({ _tag: "RosterContextMissing", rosterId });
+      }
+
       const prompt = [
         `This session is a WS2 roster member for project `
           + `${projectName as string}, roster ${rosterId as string}, `
@@ -601,21 +858,14 @@ export function createAoCliRosterManagerDeps(
           + `your acceptance criteria and publish durable artifacts to GitHub.`,
       ].join("\n");
 
-      // Architect plan §2.3: spawn through `bin/ao-spawn-with-moltzap.ts`
-      // so the worker carries its MoltZap identity. `ao spawn` directly
-      // bypasses the MoltZap bootstrap and leaves the worker without a
-      // peer-channel back to the orchestrator.
-      //
-      // Allowlist propagation (Invariant 3 / SPEC §5(c)): we serialize
-      // every peer senderId the spawned worker will need to accept
-      // inbound messages from, into MOLTZAP_ALLOWED_SENDERS. The wrapper
-      // (ao-spawn-with-moltzap.ts) reads that env at worker boot.
-      const allowedSenderIds = new Set<string>([
-        rosterOptions.orchestratorSenderId as string,
-      ]);
-      for (const ids of peers.values()) {
-        for (const id of ids) allowedSenderIds.add(id as string);
-      }
+      const preminted = ctx.premintedByLabel.get(member.displayLabel) ?? null;
+      const extraEnv: Record<string, string | undefined> =
+        preminted !== null
+          ? {
+              MOLTZAP_AGENT_KEY: preminted.agentKey,
+              MOLTZAP_LOCAL_SENDER_ID: preminted.senderId as string,
+            }
+          : {};
       const spawnResult = await runBunScript(
         options,
         "bin/ao-spawn-with-moltzap.ts",
@@ -629,59 +879,31 @@ export function createAoCliRosterManagerDeps(
           "--project",
           projectName as string,
         ],
-        {
-          MOLTZAP_ALLOWED_SENDERS: [...allowedSenderIds].join(","),
-        },
+        extraEnv,
       );
       if (spawnResult._tag === "Err") {
-        return err({
-          _tag: "MemberSpawnFailed",
-          role: member.role,
-          displayLabel: member.displayLabel,
-          cause:
-            spawnResult.error.stderr.trim().length > 0
-              ? spawnResult.error.stderr.trim()
-              : spawnResult.error.cause,
+        return memberFail({
+          _tag: "SpawnProcessFailed",
+          stderr: spawnResult.error.stderr,
+          exitCode: spawnResult.error.exitCode,
+          cause: spawnResult.error.cause,
         });
       }
-      // Parse the newly-spawned session name out of stdout. The wrapper
-      // `ao-spawn-with-moltzap.ts` writes a line containing
-      // `SESSION=<name>` on success (bin/ao-spawn-with-moltzap.ts:110).
-      // If the format drifts we fail loudly rather than fabricate: a
-      // wrong session name leaves the RosterManager tracking a ghost
-      // and every later retireSession fails on a name that was never
-      // spawned.
+      // The wrapper writes `SESSION=<name>` on success. If the format drifts
+      // we fail loudly rather than fabricate: a wrong session name leaves
+      // the RosterManager tracking a ghost and every later retireSession
+      // fails on a name that was never spawned.
       const stdout = spawnResult.value.stdout;
       const match = stdout.match(/SESSION=([^\s]+)/);
       if (!match || !match[1]) {
-        return err({
-          _tag: "MemberSpawnFailed",
-          role: member.role,
-          displayLabel: member.displayLabel,
-          cause: `could not parse SESSION= from ao-spawn-with-moltzap stdout: ${stdout.trim()}`,
-        });
+        return memberFail({ _tag: "SpawnStdoutMalformed", stdout });
       }
       const sessionName = match[1] as AoSessionName;
-      // Parse the worker's REAL runtime-assigned MOLTZAP_LOCAL_SENDER_ID
-      // from the wrapper's stdout (bin/ao-spawn-with-moltzap.ts emits
-      // a `MOLTZAP_LOCAL_SENDER_ID=<id>` line after reading the worker
-      // metadata). Fall back to a derived id only if the wrapper did
-      // not emit the line — in which case allowlist matches will fail
-      // downstream and a diagnostic is logged.
-      const senderMatch = stdout.match(
-        /MOLTZAP_LOCAL_SENDER_ID=([^\s]+)/,
-      );
-      const senderId = senderMatch && senderMatch[1]
-        ? asMoltzapSenderId(senderMatch[1])
-        : asMoltzapSenderId(
-            `${rosterId as string}-${member.displayLabel}`,
-          );
-      if (!senderMatch || !senderMatch[1]) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[roster] worker ${sessionName as string} spawn stdout did not include MOLTZAP_LOCAL_SENDER_ID; using derived fallback (${senderId as string}). Peer allowlist matches may fail until bin/ao-spawn-with-moltzap.ts emits it.`,
-        );
-      }
+      const senderId =
+        preminted !== null
+          ? preminted.senderId
+          : resolveSelfRegisteredSenderId(stdout, rosterId, member.displayLabel, sessionName);
+      rosterIdBySession.set(sessionName as string, rosterId);
       const rosterMember: RosterMember = {
         rosterId,
         session: sessionName,
@@ -693,6 +915,13 @@ export function createAoCliRosterManagerDeps(
       return ok(rosterMember);
     },
     retireSession: async (session) => {
+      // Per-roster session model: retireSession only takes the worker
+      // process down (`ao kill`) and drops the session→roster mapping.
+      // The bridge session itself lives until `releaseRosterSession` is
+      // invoked by the roster manager — architect rev 4 §4.3 lifetime
+      // contract — which is also where the close-before-delete-on-success
+      // ordering is enforced.
+      rosterIdBySession.delete(session as string);
       const killResult = await runAoCommand(options, [
         "kill",
         session as string,
@@ -708,14 +937,7 @@ export function createAoCliRosterManagerDeps(
       }
       return ok(undefined);
     },
-    bindAllowlistFor: (member, peers) => {
-      // Seed the base with the orchestrator's senderId so every worker
-      // accepts inbound messages from the orchestrator; extendAllowlistForRole
-      // unions per-role peers on top (Invariant 3).
-      const base = fromSenderIds([rosterOptions.orchestratorSenderId]);
-      const extended = extendAllowlistForRole(base, member.role, peers);
-      return ok(extended);
-    },
+    releaseRosterSession: releaseRoster,
     clock: () => Date.now(),
   };
 }

@@ -84,15 +84,15 @@ Zapbot does not splice raw comment text into a shell command.
 
 Zapbot can provision MoltZap credentials for orchestrator and worker sessions.
 
-Supported modes:
+Required env (when MoltZap is enabled):
 
 | Env | Meaning |
 |---|---|
-| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for each spawned worker; this takes precedence over a static API key if both are set |
-| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_API_KEY` | pass through a pre-provisioned MoltZap agent key to the runtime |
-| `ZAPBOT_MOLTZAP_ALLOWED_SENDERS` | optional comma-separated sender allowlist forwarded to the session runtime |
+| `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for the bridge at every boot, then mint per-worker creds at spawn time (architect rev 4 §4.3) |
 
-If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap.
+If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap. The
+static `ZAPBOT_MOLTZAP_API_KEY` mode was removed in sbd#199 — `loadMoltzapRuntimeConfig`
+now requires a registration secret whenever a server URL is set.
 
 Worker env posture:
 
@@ -159,11 +159,9 @@ GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
 # ZAPBOT_GATEWAY_SECRET=...
 # ZAPBOT_BRIDGE_URL=https://bridge.example.com
 
-# Optional: MoltZap
+# Optional: MoltZap (registration secret is required when SERVER_URL is set)
 # ZAPBOT_MOLTZAP_SERVER_URL=wss://moltzap.example
-# ZAPBOT_MOLTZAP_API_KEY=...
 # ZAPBOT_MOLTZAP_REGISTRATION_SECRET=...
-# ZAPBOT_MOLTZAP_ALLOWED_SENDERS=agent-a,agent-b
 ```
 
 `start.sh` automatically points `ZAPBOT_CONFIG` at `./agent-orchestrator.yaml`,
@@ -206,8 +204,8 @@ appear. If the readiness lines do not appear earlier in the shell output, check
 
 ## Dummy-project demo
 
-This demo assumes you have a reachable MoltZap server and have set either
-`ZAPBOT_MOLTZAP_API_KEY` or `ZAPBOT_MOLTZAP_REGISTRATION_SECRET`.
+This demo assumes you have a reachable MoltZap server and have set
+`ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET`.
 
 1. Create a dummy project checkout, initialize zapbot, and start the stack:
 

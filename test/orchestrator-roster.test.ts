@@ -4,25 +4,18 @@ import {
   createRosterManager,
   decodeRosterSpec,
   resolveRetiredRecipientRoute,
-  resolveSpawnPeers,
   type RosterManager,
   type RosterManagerDeps,
   type RosterMember,
   type RosterSpec,
 } from "../src/orchestrator/roster.ts";
 import {
-  asIdleSeconds,
   asTokenCount,
   asWallClockMs,
 } from "../src/orchestrator/budget.ts";
-import {
-  fromSenderIds,
-} from "../src/moltzap/identity-allowlist.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import {
   asAoSessionName,
-  asIssueNumber,
-  asProjectName,
   ok,
   err,
 } from "../src/types.ts";
@@ -120,15 +113,29 @@ interface FakeSpawnConfig {
 function makeDeps(cfg: FakeSpawnConfig = {}): {
   deps: RosterManagerDeps;
   events: {
+    prepares: string[];
     spawns: string[];
     retires: string[];
+    releases: string[];
   };
 } {
-  const events = { spawns: [] as string[], retires: [] as string[] };
+  const events = {
+    prepares: [] as string[],
+    spawns: [] as string[],
+    retires: [] as string[],
+    releases: [] as string[],
+  };
   let spawnIndex = 0;
   let now = 1_000_000;
 
   const deps: RosterManagerDeps = {
+    prepareRosterSession: async ({ rosterId }) => {
+      events.prepares.push(rosterId as string);
+      return ok(undefined);
+    },
+    releaseRosterSession: async (rosterId) => {
+      events.releases.push(rosterId as string);
+    },
     spawnSession: async ({ rosterId, member }) => {
       const i = spawnIndex++;
       events.spawns.push(member.displayLabel);
@@ -170,7 +177,6 @@ function makeDeps(cfg: FakeSpawnConfig = {}): {
       }
       return ok(undefined);
     },
-    bindAllowlistFor: () => ok(fromSenderIds([])),
     clock: () => now,
   };
 
@@ -198,6 +204,11 @@ describe("roster.spawnRoster", () => {
       "reviewer-1",
     ]);
     expect(events.retires).toEqual([]);
+    // Architect rev 4 §4.3 prepare phase: ONE prepare per roster, BEFORE
+    // any per-member spawn. No release on the happy path (the bridge
+    // session lifetime tracks the live roster).
+    expect(events.prepares).toEqual(["roster-145-r1"]);
+    expect(events.releases).toEqual([]);
   });
 
   it("rolls back previously spawned members on a mid-sequence failure", async () => {
@@ -212,6 +223,21 @@ describe("roster.spawnRoster", () => {
       "roster-145-r1-architect-a",
       "roster-145-r1-architect-b",
     ]);
+    // After rollback, releaseRosterSession fires so the per-roster bridge
+    // session does not leak past the failure (architect rev 4 §4.3,
+    // codex stamina round-1 P1 #1 + #3).
+    expect(events.releases).toEqual(["roster-145-r1"]);
+  });
+
+  it("first-member failure releases the per-roster bridge session even with no spawned members", async () => {
+    const { deps, events } = makeDeps({ failAfter: 0 });
+    const mgr = createRosterManager(deps);
+    const res = await mgr.spawnRoster(specFromValid());
+    expect(res._tag).toBe("Err");
+    // No members ever spawned, so retires is empty — but release MUST
+    // fire to close the bridge session prepare allocated.
+    expect(events.retires).toEqual([]);
+    expect(events.releases).toEqual(["roster-145-r1"]);
   });
 
   it("emits MemberSpawnFailed (not PartialSpawnRolledBack) on first-member failure", async () => {
@@ -232,6 +258,47 @@ describe("roster.spawnRoster", () => {
     expect(res.error._tag).toBe("ReservedMcpKeyCollision");
     if (res.error._tag !== "ReservedMcpKeyCollision") return;
     expect(res.error.key).toBe("moltzap");
+  });
+
+  it("rejects reserved 'moltzap' displayLabel BEFORE prepareRosterSession runs", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spec = specFromValid();
+    const reservedSpec: RosterSpec = {
+      ...spec,
+      members: [
+        ...spec.members.slice(0, 1),
+        { role: "implementer", displayLabel: "moltzap" },
+        ...spec.members.slice(2),
+      ],
+    };
+    const res = await mgr.spawnRoster(reservedSpec);
+    expect(res._tag).toBe("Err");
+    if (res._tag !== "Err") return;
+    expect(res.error._tag).toBe("ReservedMcpKeyCollision");
+    // Prepare must NOT have run — no MoltZap worker creds were minted
+    // server-side for an invalid label.
+    expect(events.prepares).toEqual([]);
+    expect(events.spawns).toEqual([]);
+    expect(events.releases).toEqual([]);
+  });
+
+  it("rejects 'moltzap-reserved-*' displayLabel BEFORE prepareRosterSession runs", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spec = specFromValid();
+    const reservedSpec: RosterSpec = {
+      ...spec,
+      members: [
+        { role: "architect", displayLabel: "moltzap-reserved-x" },
+        ...spec.members.slice(1),
+      ],
+    };
+    const res = await mgr.spawnRoster(reservedSpec);
+    expect(res._tag).toBe("Err");
+    if (res._tag !== "Err") return;
+    expect(res.error._tag).toBe("ReservedMcpKeyCollision");
+    expect(events.prepares).toEqual([]);
   });
 });
 
@@ -282,13 +349,33 @@ describe("roster.retireMember (idempotent)", () => {
 });
 
 describe("roster.retireRoster", () => {
-  it("retires every live member", async () => {
+  it("retires every live member and releases the per-roster bridge session", async () => {
     const { deps, events } = makeDeps();
     const mgr = createRosterManager(deps);
     await mgr.spawnRoster(specFromValid());
     const res = await mgr.retireRoster(ID, { _tag: "TaskComplete" });
     expect(res._tag).toBe("Ok");
     expect(events.retires).toHaveLength(4);
+    // Architect rev 4 §4.3: bridge session lifetime tracks roster's, not
+    // per-worker session's. retireRoster MUST close it after the last
+    // member is down.
+    expect(events.releases).toEqual(["roster-145-r1"]);
+  });
+
+  it("retireMember (single worker) does NOT release the per-roster bridge session", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("setup failure");
+    const member = spawned.value[0];
+
+    const res = await mgr.retireMember(ID, member.session, {
+      _tag: "ExplicitRetire",
+    });
+    expect(res._tag).toBe("Ok");
+    // Single retire does not touch the bridge session — siblings still
+    // need it for `coord-*` admission.
+    expect(events.releases).toEqual([]);
   });
 
   it("returns RosterNotFound for an unknown roster", async () => {
@@ -301,29 +388,6 @@ describe("roster.retireRoster", () => {
     expect(res._tag).toBe("Err");
     if (res._tag !== "Err") return;
     expect(res.error._tag).toBe("RosterNotFound");
-  });
-});
-
-describe("roster.resolveSpawnPeers", () => {
-  it("includes only already-spawned members, grouped by role", () => {
-    const spec = specFromValid();
-    const spawned: RosterMember[] = [
-      {
-        rosterId: ID,
-        session: asAoSessionName("sess-a"),
-        senderId: asMoltzapSenderId("sender-a"),
-        role: "architect",
-        displayLabel: "architect-a",
-        spawnedAtMs: 0,
-      },
-    ];
-    const peers = resolveSpawnPeers(spec, spawned, {
-      role: "architect",
-      displayLabel: "architect-b",
-    });
-    expect(peers.get("architect")).toEqual([asMoltzapSenderId("sender-a")]);
-    expect(peers.get("implementer")).toEqual([]);
-    expect(peers.get("reviewer")).toEqual([]);
   });
 });
 

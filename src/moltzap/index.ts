@@ -10,10 +10,8 @@
  */
 
 export * from "./types.ts";
-export * from "./identity-allowlist.ts";
 export * from "./runtime.ts";
 export * from "./session-role.ts";
-export * from "./role-topology.ts";
 export * from "./manifest.ts";
 
 // sbd#199 rev 4 — bridge/worker split per operator A+C(2) decision.

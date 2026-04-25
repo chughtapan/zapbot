@@ -5,8 +5,8 @@
  *   Goal 1, Invariant 2, Acceptance (a).
  *
  * Lives in its own module (rather than in `session-client.ts`) so that
- * (1) role-topology, roster, peer-message can type-check at architect stage
- *     against the expanded enum,
+ * (1) roster + peer-message can type-check at architect stage against the
+ *     expanded enum,
  * (2) `implement-staff` can collapse `session-client.ts`'s binary
  *     `"orchestrator" | "worker"` into a re-export from this file without
  *     cascading churn through every caller,

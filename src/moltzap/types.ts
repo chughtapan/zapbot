@@ -7,7 +7,7 @@
  * lifecycle, listener, supervisor, channel-runtime, and claude-channel
  * modules moved upstream or were subsumed by `@moltzap/client`. The
  * residue is this file: brand tags and their coercers, kept because
- * `identity-allowlist.ts`, `role-topology.ts`, `orchestrator/*.ts`, and
+ * `bridge-app.ts`, `bridge-identity.ts`, `orchestrator/*.ts`, and
  * `runtime.ts` compile against `MoltzapSenderId`.
  *
  * Removed: `MoltzapInbound`, `MoltzapInboundMeta`, `ListenerHandle`,
