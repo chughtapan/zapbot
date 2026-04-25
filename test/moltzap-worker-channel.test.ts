@@ -147,20 +147,13 @@ describe("worker-channel: zapbot#336 — workers never register or create (grep-
   });
 });
 
-// sbd#202: bin glue helpers relocated from `bin/moltzap-claude-channel.ts`.
-// The bin keeps env decode + bootWorkerChannel + signal handlers; these
-// helpers carry the credential resolution + AO resume metadata write.
-// The transitional self-register path (path 2) is kept until sbd#205
-// removes worker self-register end-to-end.
+// sbd#205: Worker credentials are now pre-minted by the bridge only.
+// No self-register path. Workers fail-fast if pre-minted creds are missing.
 describe("worker-channel: resolveWorkerCredentials", () => {
-  it("path 1 — uses pre-minted MOLTZAP_AGENT_KEY + MOLTZAP_LOCAL_SENDER_ID directly", async () => {
+  it("accepts pre-minted MOLTZAP_AGENT_KEY + MOLTZAP_LOCAL_SENDER_ID", async () => {
     const result = await resolveWorkerCredentials({
       MOLTZAP_AGENT_KEY: "key-from-bridge",
       MOLTZAP_LOCAL_SENDER_ID: "sender-123",
-      // Server URL + registration secret would normally trigger path 2,
-      // but path 1 wins when both pre-minted creds are present.
-      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      MOLTZAP_REGISTRATION_SECRET: "should-not-be-used",
     });
     expect(result._tag).toBe("Ok");
     if (result._tag !== "Ok") return;
@@ -170,7 +163,7 @@ describe("worker-channel: resolveWorkerCredentials", () => {
     });
   });
 
-  it("path 1 — accepts legacy MOLTZAP_API_KEY as agent key", async () => {
+  it("accepts legacy MOLTZAP_API_KEY as agent key when MOLTZAP_AGENT_KEY is unset", async () => {
     const result = await resolveWorkerCredentials({
       MOLTZAP_API_KEY: "legacy-key",
       MOLTZAP_LOCAL_SENDER_ID: "sender-legacy",
@@ -180,37 +173,41 @@ describe("worker-channel: resolveWorkerCredentials", () => {
     expect(result.value.agentKey).toBe("legacy-key");
   });
 
-  it("rejects when no creds are present and no registration path is wired", async () => {
-    const result = await resolveWorkerCredentials({});
-    expect(result._tag).toBe("Err");
-    if (result._tag !== "Err") return;
-    expect(result.error._tag).toBe("WorkerCredentialsMissingServerUrl");
-  });
-
-  it("rejects when MOLTZAP_SERVER_URL is set but neither pre-minted creds nor registration secret is provided", async () => {
+  it("fails-fast when MOLTZAP_AGENT_KEY (and legacy MOLTZAP_API_KEY) is missing", async () => {
     const result = await resolveWorkerCredentials({
-      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      MOLTZAP_LOCAL_SENDER_ID: "sender-123",
     });
     expect(result._tag).toBe("Err");
     if (result._tag !== "Err") return;
-    expect(result.error._tag).toBe("WorkerCredentialsMissingSecrets");
+    expect(result.error._tag).toBe("WorkerCredentialsMissingAgentKey");
+    expect(result.error.reason).toContain("MOLTZAP_AGENT_KEY");
+  });
+
+  it("fails-fast when MOLTZAP_LOCAL_SENDER_ID is missing", async () => {
+    const result = await resolveWorkerCredentials({
+      MOLTZAP_AGENT_KEY: "key-from-bridge",
+    });
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("WorkerCredentialsMissingSenderId");
+    expect(result.error.reason).toContain("MOLTZAP_LOCAL_SENDER_ID");
   });
 });
 
 describe("worker-channel: formatWorkerCredentialsError", () => {
   it("formats every error tag (exhaustiveness check)", () => {
     expect(
-      formatWorkerCredentialsError({ _tag: "WorkerCredentialsMissingServerUrl" }),
-    ).toContain("MOLTZAP_SERVER_URL");
-    expect(
-      formatWorkerCredentialsError({ _tag: "WorkerCredentialsMissingSecrets" }),
+      formatWorkerCredentialsError({
+        _tag: "WorkerCredentialsMissingAgentKey",
+        reason: "MOLTZAP_AGENT_KEY (or legacy MOLTZAP_API_KEY) must be set — provisioned by the bridge per-spawn",
+      }),
     ).toContain("MOLTZAP_AGENT_KEY");
     expect(
       formatWorkerCredentialsError({
-        _tag: "WorkerCredentialsRegisterFailed",
-        cause: "BridgeRegistrationHttpFailed",
+        _tag: "WorkerCredentialsMissingSenderId",
+        reason: "MOLTZAP_LOCAL_SENDER_ID must be set — provisioned by the bridge per-spawn",
       }),
-    ).toContain("BridgeRegistrationHttpFailed");
+    ).toContain("MOLTZAP_LOCAL_SENDER_ID");
   });
 });
 
