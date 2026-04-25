@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.3 (2026-04-25)
+
+Tighten reliability: parallelize roster shutdown, use constant-time HMAC, make boot probe non-fatal, and harden a few small spots flagged in pre-landing review.
+
+### Changed
+
+- **`retireRoster` now retires members in parallel** via `Promise.allSettled` instead of a sequential `for await` loop, and `releaseRosterSession` always fires (even on partial failure) so the roster bridge session never leaks.
+- **Post-boot reachability probe is non-fatal** — bridge in `github-demo` mode no longer shuts down when it can't reach its own public URL, so hairpin-NAT and split-horizon DNS deployments keep running.
+- **`src/logger.ts` mkdirSync wrapped in try/catch** — log dir init no longer crashes on read-only or missing-home environments.
+- **`start.sh` cleanup trap removes `AO_CONFIG_FILE_RAW`** — covers the edge case where the script dies between `mktemp` and `mv`.
+- **`bin/zapbot-team-init` uses `pwd -P`** — physical-path resolution is explicit, matching `start.sh`'s canonical-path comparison.
+
+### Fixed
+
+- **`verifySignature` uses `crypto.timingSafeEqual`** instead of `Buffer.equals`, eliminating the timing-side-channel risk in webhook HMAC verification.
+- **Removed dead `BootProbeFailed` variant** from `ShutdownReason` and its `exitCodeFor` case — no path constructed it after the probe became non-fatal.
+- **Stale docstrings** in `src/bridge.ts` and `src/bridge-process.ts` that still referred to the old fail-fast probe behavior.
+
+### Added
+
+- **Trust-model comment** on `decodeRosterSpec` clarifying that input arrives from an untrusted MoltZap network boundary; callers must handle the `Err` branch.
+- **Test coverage** for `retireRoster` error branches (`firstErr`, `firstFailure`, empty `liveEntries`, precedence) and the non-fatal boot probe path.
+
 ## 0.5.2 (2026-04-25)
 
 Remove dead v2 code, fix macOS test failures, and simplify the moltzap plugin.

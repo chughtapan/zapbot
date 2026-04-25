@@ -20,6 +20,7 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
+import { absurd } from "../../types.ts";
 
 // ── Branded types ──────────────────────────────────────────────────
 
@@ -64,12 +65,6 @@ export interface MintedInstallationToken {
 export interface InstallationTokenDeps {
   readonly mintToken: () => Promise<MintedInstallationToken | null>;
   readonly apiKey: string;
-}
-
-// ── Exhaustiveness helper ──────────────────────────────────────────
-
-function absurd(x: never): never {
-  throw new Error(`unreachable installation-token status: ${JSON.stringify(x)}`);
 }
 
 // ── Bearer auth middleware ─────────────────────────────────────────

@@ -9,7 +9,7 @@
  * public shape only.
  */
 
-import { err, ok } from "../types.ts";
+import { absurd, err, ok } from "../types.ts";
 import type {
   AoSessionName,
   IssueNumber,
@@ -236,8 +236,4 @@ function shortSuffix(): string {
 
 function stringifyCause(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
-}
-
-function absurd(x: never): never {
-  throw new Error(`unreachable: ${JSON.stringify(x)}`);
 }

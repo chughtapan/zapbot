@@ -85,7 +85,6 @@ export type BridgeProcessState =
 
 export type ShutdownReason =
   | { readonly _tag: "Signal"; readonly signal: "SIGINT" | "SIGTERM" }
-  | { readonly _tag: "BootProbeFailed"; readonly publicUrl: string }
   | { readonly _tag: "BootConfigInvalid"; readonly reason: string }
   | { readonly _tag: "Manual"; readonly reason: string };
 
@@ -114,8 +113,8 @@ export interface BridgeProcessLifecycle {
   readonly liveRuntime: () => BridgeRuntimeConfig | null;
 
   /**
-   * Trigger graceful shutdown from a non-signal source (boot probe
-   * failure, fatal config error). Idempotent. Resolves once `running.stop()`
+   * Trigger graceful shutdown from a non-signal source (fatal config
+   * error). Idempotent. Resolves once `running.stop()`
    * has finished and `process.exit` has been requested. Callers in
    * `Booting` may invoke this before any `RunningBridge` exists; the
    * lifecycle drops the exit through `deps.exit(1)`.
@@ -228,7 +227,6 @@ export function installBridgeProcessLifecycle(
     switch (reason._tag) {
       case "Signal":
         return 0;
-      case "BootProbeFailed":
       case "BootConfigInvalid":
       case "Manual":
         return 1;
