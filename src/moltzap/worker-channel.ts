@@ -74,7 +74,6 @@ import type {
 import type { WsClientLogger } from "@moltzap/client";
 import type { Result } from "../types.ts";
 import { err, ok } from "../types.ts";
-import { registerBridgeAgent } from "./bridge-identity.ts";
 import type { SessionRole } from "./session-role.ts";
 import { decodeSessionRole } from "./session-role.ts";
 
@@ -306,13 +305,11 @@ export function __resetWorkerChannelForTests(): void {
 
 // ── Worker credentials (bin glue) ───────────────────────────────────
 //
-// Two boot paths, chosen by which credentials the spawn env carries:
-//   1. `MOLTZAP_AGENT_KEY` (or legacy `MOLTZAP_API_KEY`) + `MOLTZAP_LOCAL_SENDER_ID`
-//      set — use them directly.
-//   2. `MOLTZAP_REGISTRATION_SECRET` + `MOLTZAP_SERVER_URL` set — the
-//      transitional path. The worker self-registers via
-//      `POST /api/v1/auth/register`. Slated for removal once the bridge
-//      mints per-worker creds end-to-end.
+// Workers now require pre-minted credentials from the bridge:
+//   - `MOLTZAP_AGENT_KEY` (or legacy `MOLTZAP_API_KEY`)
+//   - `MOLTZAP_LOCAL_SENDER_ID`
+//
+// The transitional self-register path has been removed (sbd#205).
 
 export interface WorkerCredentials {
   readonly agentKey: string;
@@ -320,56 +317,40 @@ export interface WorkerCredentials {
 }
 
 export type WorkerCredentialsResolveError =
-  | { readonly _tag: "WorkerCredentialsMissingServerUrl" }
-  | { readonly _tag: "WorkerCredentialsMissingSecrets" }
-  | { readonly _tag: "WorkerCredentialsRegisterFailed"; readonly cause: string };
+  | { readonly _tag: "WorkerCredentialsMissingAgentKey"; readonly reason: string }
+  | { readonly _tag: "WorkerCredentialsMissingSenderId"; readonly reason: string };
 
 /**
- * Resolve worker credentials from the spawn env. Returns immediately if
- * the bridge already minted the agent key (path 1); otherwise falls back
- * to the transitional self-register call against
- * `POST /api/v1/auth/register` (path 2).
+ * Resolve worker credentials from the spawn env. Requires both
+ * `MOLTZAP_AGENT_KEY` (or legacy `MOLTZAP_API_KEY`) and
+ * `MOLTZAP_LOCAL_SENDER_ID` to be set. These are pre-minted by the bridge
+ * before the worker process is spawned (architect rev 4 §2).
  *
- * Path 2 is the sbd#205 deletion target. Until then this function keeps
- * both paths reachable so the bin stays a thin shim.
+ * This is a fail-fast enforcement of the no-self-register invariant from
+ * zapbot#336 path b. Workers are channel-plugin peers, not MoltZapApp
+ * consumers, and must never call `apps/register` or `apps/create`.
  */
 export async function resolveWorkerCredentials(
   env: NodeJS.ProcessEnv,
 ): Promise<Result<WorkerCredentials, WorkerCredentialsResolveError>> {
-  const preMintedKey = trim(env.MOLTZAP_AGENT_KEY) ?? trim(env.MOLTZAP_API_KEY);
-  const preMintedSenderId = trim(env.MOLTZAP_LOCAL_SENDER_ID);
-  if (preMintedKey !== null && preMintedSenderId !== null) {
-    return ok({ agentKey: preMintedKey, senderId: preMintedSenderId });
-  }
-
-  const serverUrl = trim(env.MOLTZAP_SERVER_URL);
-  if (serverUrl === null) {
-    return err({ _tag: "WorkerCredentialsMissingServerUrl" });
-  }
-  const registrationSecret = trim(env.MOLTZAP_REGISTRATION_SECRET);
-  if (registrationSecret === null) {
-    return err({ _tag: "WorkerCredentialsMissingSecrets" });
-  }
-
-  const displayName =
-    trim(env.AO_SESSION_NAME) ??
-    trim(env.AO_SESSION) ??
-    `zb-${Date.now().toString(36)}`;
-  const registration = await registerBridgeAgent({
-    serverUrl,
-    registrationSecret,
-    displayName,
-  });
-  if (registration._tag === "Err") {
+  const agentKey = trim(env.MOLTZAP_AGENT_KEY) ?? trim(env.MOLTZAP_API_KEY);
+  if (agentKey === null) {
     return err({
-      _tag: "WorkerCredentialsRegisterFailed",
-      cause: registration.error._tag,
+      _tag: "WorkerCredentialsMissingAgentKey",
+      reason:
+        "MOLTZAP_AGENT_KEY (or legacy MOLTZAP_API_KEY) must be set — provisioned by the bridge per-spawn",
     });
   }
-  return ok({
-    agentKey: registration.value.agentKey,
-    senderId: registration.value.agentId as string,
-  });
+
+  const senderId = trim(env.MOLTZAP_LOCAL_SENDER_ID);
+  if (senderId === null) {
+    return err({
+      _tag: "WorkerCredentialsMissingSenderId",
+      reason: "MOLTZAP_LOCAL_SENDER_ID must be set — provisioned by the bridge per-spawn",
+    });
+  }
+
+  return ok({ agentKey, senderId });
 }
 
 /**
@@ -379,12 +360,10 @@ export async function resolveWorkerCredentials(
  */
 export function formatWorkerCredentialsError(error: WorkerCredentialsResolveError): string {
   switch (error._tag) {
-    case "WorkerCredentialsMissingServerUrl":
-      return "MOLTZAP_SERVER_URL is required";
-    case "WorkerCredentialsMissingSecrets":
-      return "either MOLTZAP_AGENT_KEY (+ MOLTZAP_LOCAL_SENDER_ID) or MOLTZAP_REGISTRATION_SECRET is required";
-    case "WorkerCredentialsRegisterFailed":
-      return `self-register: ${error.cause}`;
+    case "WorkerCredentialsMissingAgentKey":
+      return error.reason;
+    case "WorkerCredentialsMissingSenderId":
+      return error.reason;
     default: {
       const _exhaustive: never = error;
       return `unknown worker-credentials error: ${JSON.stringify(_exhaustive)}`;
