@@ -891,7 +891,6 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       if (current.moltzap._tag === "MoltzapRegistration") {
         const leaked = await drainBridgeSessions({ timeoutMs: 60_000 });
         if (leaked.length > 0) {
-          // eslint-disable-next-line no-console
           console.warn(
             `[bridge] SIGTERM drain leaked ${leaked.length} session(s) (moltzap#230): ${leaked.join(",")}`,
           );

@@ -57,6 +57,8 @@ function makeDeps(): {
   let t = 1_000_000;
   const retires: string[] = [];
   const deps: RosterManagerDeps = {
+    prepareRosterSession: async () => ok(undefined),
+    releaseRosterSession: async () => {},
     spawnSession: async ({ rosterId, member }) => {
       t += 1;
       const session = asAoSessionName(

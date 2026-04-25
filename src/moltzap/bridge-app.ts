@@ -63,6 +63,7 @@ import {
   MoltZapApp,
   SessionError,
 } from "@moltzap/app-sdk";
+import type { AppParticipantRejectedEvent } from "@moltzap/protocol";
 import type { ConversationKey } from "./conversation-keys.ts";
 import {
   loadBridgeIdentityEnv,
@@ -135,12 +136,29 @@ export type BridgeMessageHandlerError = {
 
 // ── Module-local singleton + session registry ───────────────────────
 
+/**
+ * Tracks an in-flight `apps/create` session whose admission has not yet
+ * completed. Used by `createBridgeSession` to wait for `app/sessionReady`
+ * (or a `participantRejected` for one of our invitees) before returning,
+ * closing the architect rev 4 §4.3 admission race that codex flagged
+ * (sbd#201 round-1, P1 #2): the SDK's `apps/create` returns synchronously
+ * after the server forks `admitAgentsAsync`, so without this wait callers
+ * can spawn workers whose admission is still pending and may even reject.
+ */
+interface PendingAdmission {
+  readonly invited: ReadonlySet<string>;
+  readonly resolve: () => void;
+  readonly reject: (error: BridgeSessionError) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
 interface BridgeSingleton {
   readonly app: MoltZapApp;
   readonly identity: BridgeIdentity;
   readonly handle: BridgeAppHandle;
   readonly registeredKeys: Set<ConversationKey>;
   readonly sessions: Set<string>;
+  readonly pendingAdmissions: Map<string, PendingAdmission>;
 }
 
 let __bridgeSingleton: BridgeSingleton | null = null;
@@ -283,6 +301,7 @@ function _doBoot(
 
     const registeredKeys = new Set<ConversationKey>();
     const sessions = new Set<string>();
+    const pendingAdmissions = new Map<string, PendingAdmission>();
 
     const handle: BridgeAppHandle = {
       agentId: identity.agentId,
@@ -298,6 +317,30 @@ function _doBoot(
       listActiveSessions: () => [...sessions],
     };
 
+    // Wire admission-wait routing BEFORE app.start() so handlers are live
+    // by the time the WS reconnects existing sessions or the bridge's seed
+    // session fires `app/sessionReady`. See PendingAdmission docstring.
+    app.onSessionReady((session) => {
+      const pending = pendingAdmissions.get(session.id);
+      if (pending === undefined) return;
+      clearTimeout(pending.timer);
+      pendingAdmissions.delete(session.id);
+      pending.resolve();
+    });
+    app.onParticipantRejected((event: AppParticipantRejectedEvent) => {
+      const pending = pendingAdmissions.get(event.sessionId);
+      if (pending === undefined) return;
+      if (!pending.invited.has(event.agentId)) return;
+      clearTimeout(pending.timer);
+      pendingAdmissions.delete(event.sessionId);
+      pending.reject({
+        _tag: "BridgeSessionAdmissionRejected",
+        sessionId: event.sessionId,
+        agentId: event.agentId,
+        reason: event.reason,
+      });
+    });
+
     // Start the app. The SDK's `start()` error channel is a union of
     // SDK error CLASS instances — preserve them verbatim (Principle 3).
     yield* app.start().pipe(
@@ -310,6 +353,7 @@ function _doBoot(
       handle,
       registeredKeys,
       sessions,
+      pendingAdmissions,
     };
     return handle;
   });
@@ -348,6 +392,14 @@ export function shutdownBridgeApp(): Effect.Effect<void, never> {
   return Effect.gen(function* () {
     const state = __bridgeSingleton;
     if (state === null) return;
+    // Cancel any in-flight admission waits before stop() races them; the
+    // pending fibers are awaiting the SDK's `app/sessionReady` event
+    // routing which is about to be torn down.
+    for (const [, pending] of state.pendingAdmissions) {
+      clearTimeout(pending.timer);
+      pending.reject({ _tag: "BridgeAppNotBooted" });
+    }
+    state.pendingAdmissions.clear();
     yield* state.app.stop();
     state.registeredKeys.clear();
     state.sessions.clear();
@@ -359,13 +411,45 @@ export function shutdownBridgeApp(): Effect.Effect<void, never> {
 
 export interface BridgeSessionRequest {
   readonly invitedAgentIds: readonly MoltzapSenderId[];
+  /**
+   * Maximum time to wait for `app/sessionReady` after `apps/create`
+   * returns. Defaults to {@link DEFAULT_ADMISSION_TIMEOUT_MS}. Architect
+   * rev 4 §4.3: per-roster `apps/create` is invoked with the union of
+   * worker senderIds; the server forks `admitAgentsAsync` and returns
+   * before admission completes (`vendor/moltzap/.../app-host.ts:735, 746`).
+   * Workers must not be spawned until admission resolves, otherwise the
+   * spawn races subscription/admission and may miss inbound messages.
+   *
+   * Ignored when `invitedAgentIds` is empty (no admission to wait for).
+   */
+  readonly admissionTimeoutMs?: number;
 }
+
+/**
+ * Default admission-wait budget used by `createBridgeSession`. Sized for
+ * `userService.validateUser` webhook latency × concurrent admissions on
+ * a per-roster cohort (typically ≤ 4 workers); the server admits in
+ * parallel with `concurrency: "unbounded"` (`app-host.ts:1427`), so the
+ * budget is dominated by the single slowest webhook RTT, not by N.
+ */
+export const DEFAULT_ADMISSION_TIMEOUT_MS = 30_000;
 
 export type BridgeSessionError =
   | { readonly _tag: "BridgeAppNotBooted" }
   | {
       readonly _tag: "BridgeSessionCreateFailed";
       readonly cause: SessionError;
+    }
+  | {
+      readonly _tag: "BridgeSessionAdmissionTimeout";
+      readonly sessionId: string;
+      readonly waitedMs: number;
+    }
+  | {
+      readonly _tag: "BridgeSessionAdmissionRejected";
+      readonly sessionId: string;
+      readonly agentId: string;
+      readonly reason: string;
     };
 
 export interface BridgeSessionHandle {
@@ -401,13 +485,46 @@ export function createBridgeSession(
         ),
       );
 
+    state.sessions.add(session.id);
+
+    // Wait for admission to complete (codex P1 #2 fix). When the server
+    // already considers the session active by the time apps/create
+    // resolved (it admits in parallel; small cohorts can complete in the
+    // same tick), getSession()?.isActive is already true and we
+    // short-circuit. Otherwise we register a pending entry and let
+    // `app.onSessionReady` / `onParticipantRejected` route the resolution.
+    if (invitedIds.length > 0) {
+      const cached = state.app.getSession(session.id);
+      if (cached === undefined || !cached.isActive) {
+        const timeoutMs =
+          request.admissionTimeoutMs ?? DEFAULT_ADMISSION_TIMEOUT_MS;
+        yield* awaitSessionAdmission(
+          state,
+          session.id,
+          invitedIds,
+          timeoutMs,
+        ).pipe(
+          // On admission failure, best-effort close the half-admitted
+          // session so we do not leak it to SIGTERM drain. We swallow the
+          // close error here; the admission error is the operator-actionable
+          // signal.
+          Effect.tapError(() =>
+            closeBridgeSession(session.id).pipe(Effect.ignore),
+          ),
+        );
+      }
+    }
+
     // Principle 2: the SDK hands back `Record<string, string>`; freeze
     // a snapshot of the keys we actually recognize so downstream callers
-    // cannot mutate the session's conversation table.
-    const frozen = Object.freeze({ ...session.conversations }) as Readonly<
-      Record<ConversationKey, string>
-    >;
-    state.sessions.add(session.id);
+    // cannot mutate the session's conversation table. Re-read after
+    // sessionReady so the conversations map reflects the active session
+    // (the SDK swaps the handle in `handleSessionReady`).
+    const activeSession =
+      state.app.getSession(session.id) ?? session;
+    const frozen = Object.freeze({
+      ...activeSession.conversations,
+    }) as Readonly<Record<ConversationKey, string>>;
 
     return {
       sessionId: session.id,
@@ -415,6 +532,40 @@ export function createBridgeSession(
       onMessage: (key, handler) =>
         state.handle.onBridgeMessage(key, handler),
     };
+  });
+}
+
+/**
+ * Wait for `app/sessionReady` on `sessionId`, or for a
+ * `participantRejected` event naming any of `invitedIds`, or for
+ * `timeoutMs` to elapse — whichever fires first. Resolves on success,
+ * fails with the matching `BridgeSessionError` tag on rejection or
+ * timeout. Pure helper: state mutation lives in the shared
+ * `pendingAdmissions` map and the handlers wired in `_doBoot`.
+ */
+function awaitSessionAdmission(
+  state: BridgeSingleton,
+  sessionId: string,
+  invitedIds: readonly string[],
+  timeoutMs: number,
+): Effect.Effect<void, BridgeSessionError> {
+  return Effect.async<void, BridgeSessionError>((resume) => {
+    const timer = setTimeout(() => {
+      state.pendingAdmissions.delete(sessionId);
+      resume(
+        Effect.fail<BridgeSessionError>({
+          _tag: "BridgeSessionAdmissionTimeout",
+          sessionId,
+          waitedMs: timeoutMs,
+        }),
+      );
+    }, timeoutMs);
+    state.pendingAdmissions.set(sessionId, {
+      invited: new Set(invitedIds),
+      resolve: () => resume(Effect.void),
+      reject: (error) => resume(Effect.fail(error)),
+      timer,
+    });
   });
 }
 
@@ -515,6 +666,10 @@ export async function drainBridgeSessions(input: {
 export function __resetBridgeAppForTests(): void {
   const state = __bridgeSingleton;
   if (state !== null) {
+    for (const [, pending] of state.pendingAdmissions) {
+      clearTimeout(pending.timer);
+    }
+    state.pendingAdmissions.clear();
     state.registeredKeys.clear();
     state.sessions.clear();
   }

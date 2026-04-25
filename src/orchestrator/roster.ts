@@ -103,6 +103,19 @@ export type RosterSpecDecodeError =
   | { readonly _tag: "RosterDuplicateLabel"; readonly label: string }
   | { readonly _tag: "RosterMemberRoleUnknown"; readonly raw: string };
 
+/**
+ * Architect rev 4 §4.3: ONE bridge session is created per roster (invited =
+ * union of all worker senderIds), BEFORE any worker is spawned. This error
+ * surfaces failures of that prepare phase so the roster manager can report
+ * them as a normal `MemberSpawnFailed` (with the first member as the
+ * stand-in role/label) without inventing a new caller-facing error tag —
+ * callers downstream of `spawnRoster` already handle MemberSpawnFailed.
+ */
+export type RosterSessionPrepareError = {
+  readonly _tag: "RosterSessionPrepareFailed";
+  readonly cause: string;
+};
+
 export type RosterSpawnError =
   | RosterSpecDecodeError
   | {
@@ -138,6 +151,24 @@ export type RosterRetireError =
 // ── Injection boundary ──────────────────────────────────────────────
 
 export interface RosterManagerDeps {
+  /**
+   * Architect rev 4 §4.3 prepare phase. Called ONCE per roster before any
+   * `spawnSession`. Implementations register all worker creds and create
+   * exactly one bridge session whose `invitedAgentIds` is the union of
+   * worker senderIds, then wait for admission to complete. Per-roster
+   * state (the bridgeSessionId, premised credentials by displayLabel)
+   * lives inside the implementation; `RosterManager` does not introspect
+   * it.
+   *
+   * Implementations that don't need a prepare phase (e.g. tests, the
+   * transitional `moltzapAuth: null` path) return `Ok(undefined)`.
+   */
+  readonly prepareRosterSession: (args: {
+    readonly rosterId: RosterId;
+    readonly members: readonly RosterMemberSpec[];
+    readonly issue: IssueNumber;
+    readonly projectName: ProjectName;
+  }) => Promise<Result<void, RosterSessionPrepareError>>;
   readonly spawnSession: (args: {
     readonly rosterId: RosterId;
     readonly member: RosterMemberSpec;
@@ -153,6 +184,17 @@ export interface RosterManagerDeps {
   readonly retireSession: (
     session: AoSessionName,
   ) => Promise<Result<void, Extract<RosterRetireError, { readonly _tag: "RetireReleaseFailed" }>>>;
+  /**
+   * Best-effort close of the per-roster bridge session and removal of any
+   * roster-scoped state held by the implementation. Called by `spawnRoster`
+   * after a failed-spawn rollback (so a half-prepared roster does not
+   * leak its bridge session) and by `retireRoster` after the last member
+   * is retired (so the bridge session lifetime tracks the roster's, per
+   * architect rev 4 §4.3). Failures are the implementation's to log; the
+   * roster manager surfaces no error channel here because retire/cleanup
+   * paths must remain best-effort.
+   */
+  readonly releaseRosterSession: (rosterId: RosterId) => Promise<void>;
   readonly clock: () => number;
 }
 
@@ -379,6 +421,44 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
   async function spawnRoster(
     spec: RosterSpec,
   ): Promise<Result<readonly RosterMember[], RosterSpawnError>> {
+    // Architect rev 4 §4.3 prepare phase: ONE bridge session per roster,
+    // invited-list = union of all worker senderIds. Codex stamina round-1
+    // P1 #1 caught the structural consequence of skipping this phase — per-
+    // spawn sessions create per-worker conversation IDs, so workers in the
+    // same roster cannot exchange messages on shared `coord-*` keys.
+    const prepared = await deps.prepareRosterSession({
+      rosterId: spec.rosterId,
+      members: spec.members,
+      issue: spec.issue,
+      projectName: spec.projectName,
+    });
+    if (prepared._tag === "Err") {
+      // Cause-the-string surfaces the typed prepare-failure tag for
+      // operator-visible distinction (registration failed vs admission
+      // timed out); private typed detail stays inside the dep impl.
+      const head = spec.members[0];
+      // Defensive: decoder rejects empty members, but the type permits a
+      // zero-length array — surface a stable error tag rather than throw.
+      if (head === undefined) {
+        return err({
+          _tag: "MemberSpawnFailed",
+          role: "implementer",
+          displayLabel: "<roster-prepare>",
+          cause: prepared.error.cause,
+        });
+      }
+      // Best-effort: even if prepare reported failure, the impl may have
+      // partially allocated state (e.g. registered workers before the
+      // bridge session create failed). Release ensures cleanup.
+      await deps.releaseRosterSession(spec.rosterId);
+      return err({
+        _tag: "MemberSpawnFailed",
+        role: head.role,
+        displayLabel: head.displayLabel,
+        cause: prepared.error.cause,
+      });
+    }
+
     const spawned: RosterMember[] = [];
 
     for (const memberSpec of spec.members) {
@@ -390,6 +470,10 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       });
       if (res._tag === "Err") {
         const cleanupErr = await rollback(spawned);
+        // Always release the per-roster bridge session after rollback;
+        // when no member spawned, the rollback retired nothing and the
+        // bridge session would leak otherwise (architect rev 4 §4.3).
+        await deps.releaseRosterSession(spec.rosterId);
         const errTag = res.error._tag;
         if (errTag === "ReservedMcpKeyCollision") {
           // Reserved-key collision is a typed error in its own right
@@ -550,6 +634,11 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       const res = await retireMember(rosterId, session, reason);
       if (res._tag === "Err") return err(res.error);
     }
+    // Architect rev 4 §4.3: bridge session lifetime tracks the roster's,
+    // not the per-worker session's. Close the bridge session AFTER every
+    // member is down so admission is revoked + the session's
+    // `apps/closeSession` call lands.
+    await deps.releaseRosterSession(rosterId);
     return ok(undefined);
   }
 
