@@ -29,7 +29,6 @@ import { readCanonicalConfig } from "./config/canonical.ts";
 import { resolveIngressPolicy } from "./config/ingress.ts";
 import type { IngressResolutionError } from "./config/ingress.ts";
 import { parseProjectConfig, readConfigFiles } from "./config/disk.ts";
-import { reloadBridgeRuntimeConfig } from "./config/reload.ts";
 import type {
   BridgeRuntimeConfig,
   ConfigDiskError,
@@ -84,6 +83,7 @@ import {
   handleInstallationTokenRequest,
   type InstallationTokenStatus,
 } from "./http/routes/installation-token.ts";
+import { installBridgeProcessLifecycle } from "./bridge-process.ts";
 
 const WRITE_PERMISSIONS = new Set(["write", "maintain", "admin"]);
 const log = createLogger("bridge");
@@ -1140,12 +1140,20 @@ export function formatIngressError(error: IngressResolutionError): string {
 }
 
 /**
- * Run the bridge process: load config, boot the HTTP server, install
- * SIGHUP reload + SIGINT/SIGTERM shutdown handlers. Returns a Promise
- * that never resolves under normal operation — the signal handlers
- * call `process.exit(0)` once `running.stop()` finishes.
+ * Run the bridge process: install signal handlers, load config, boot
+ * the HTTP server. Returns once `markReady` has handed ownership of
+ * `running` to the lifecycle. The lifecycle owns SIGHUP reload and
+ * SIGINT/SIGTERM shutdown; the HTTP server keeps the event loop alive
+ * until `running.stop()` resolves and `process.exit` is requested.
  *
- * On config-load or reachability failure, exits with code 1.
+ * On config-load or reachability failure, the lifecycle exits with code 1.
+ *
+ * Race fixes (sbd#215, see `bridge-process.ts` module header):
+ *   - Race 1: `installBridgeProcessLifecycle` is the FIRST line — signal
+ *     handlers exist throughout boot.
+ *   - Race 2: `liveRuntime` advances inside the lifecycle's SIGHUP path
+ *     ONLY after `commitReload` resolves Ok.
+ *   - Race 3: SIGHUP no-ops on `Booting`, `Reloading`, and `ShuttingDown`.
  *
  * Tests can stub out `startBridge` and `probeHealthz` via the optional
  * second arg; production callers (the bin) pass nothing.
@@ -1153,6 +1161,13 @@ export function formatIngressError(error: IngressResolutionError): string {
 export interface RunBridgeProcessOverrides {
   readonly start?: (config: BridgeConfig) => Promise<RunningBridge>;
   readonly probe?: (publicUrl: string) => Promise<boolean>;
+  /**
+   * Test-injectable lifecycle factory. Production callers omit this
+   * and the default `installBridgeProcessLifecycle` is used (which
+   * installs handlers against the real `process` and calls
+   * `process.exit` for shutdown).
+   */
+  readonly installLifecycle?: typeof installBridgeProcessLifecycle;
 }
 
 export async function runBridgeProcess(
@@ -1161,87 +1176,81 @@ export async function runBridgeProcess(
 ): Promise<void> {
   const start = overrides.start ?? startBridge;
   const probe = overrides.probe ?? probeHealthz;
+  const installLifecycle =
+    overrides.installLifecycle ?? installBridgeProcessLifecycle;
+
+  // Race-1 fix: install signal handlers BEFORE any boot I/O.
+  const lifecycle = installLifecycle({
+    env,
+    probe,
+    process,
+    exit: ((code: number) => process.exit(code)) as (code: number) => never,
+    logger: log,
+  });
 
   // Skip the reachability probe on initial load — the bridge isn't running yet
   // so /healthz isn't open. We boot first, then probe the live endpoint below.
   const initialInputs = await loadBridgeInputs(env, env.ZAPBOT_CONFIG, async () => true);
   if (initialInputs._tag === "Err") {
     console.error(`[bridge] ${initialInputs.error.reason}`);
-    process.exit(1);
+    await lifecycle.requestShutdown({
+      _tag: "BootConfigInvalid",
+      reason: initialInputs.error.reason,
+    });
+    return;
+  }
+
+  if (lifecycle.state()._tag === "ShuttingDown") {
+    await lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGTERM" });
+    return;
   }
 
   const initialConfig = buildBridgeConfig(env, initialInputs.value);
   if (initialConfig._tag === "Err") {
     console.error(`[bridge] ${initialConfig.error.reason}`);
-    process.exit(1);
+    await lifecycle.requestShutdown({
+      _tag: "BootConfigInvalid",
+      reason: initialConfig.error.reason,
+    });
+    return;
   }
 
-  let liveRuntime = initialInputs.value;
+  if (lifecycle.state()._tag === "ShuttingDown") {
+    await lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGTERM" });
+    return;
+  }
+
   const cfg = initialConfig.value;
   log.info(`Webhook bridge starting on port ${cfg.port}`);
   log.info(`Ingress mode: ${cfg.ingress.mode}`);
 
   const running = await start(cfg);
 
+  if (lifecycle.state()._tag === "ShuttingDown") {
+    // Signal arrived during start(). Hand `running` to the lifecycle so
+    // requestShutdown can stop it cleanly, then drive shutdown.
+    lifecycle.markReady(running, initialInputs.value);
+    await lifecycle.requestShutdown({ _tag: "Signal", signal: "SIGTERM" });
+    return;
+  }
+
   // Post-boot reachability probe — fires against the now-live /healthz endpoint.
   // If the probe fails, tear down the bridge cleanly before exiting.
   if (cfg.ingress.mode === "github-demo" && cfg.publicUrl !== null) {
     const reachable = await probe(cfg.publicUrl);
     if (!reachable) {
-      await running.stop();
       console.error(`[bridge] ZAPBOT_BRIDGE_URL is unreachable: ${cfg.publicUrl}`);
-      process.exit(1);
+      lifecycle.markReady(running, initialInputs.value);
+      await lifecycle.requestShutdown({
+        _tag: "BootProbeFailed",
+        publicUrl: cfg.publicUrl,
+      });
+      return;
     }
   }
 
   log.info(`Webhook bridge listening on ${cfg.ingress.mode === "github-demo" ? cfg.publicUrl : "local-only ingress"}`);
 
-  let reloadInFlight = false;
-  process.on("SIGHUP", () => {
-    if (reloadInFlight) {
-      log.warn("SIGHUP received while reload in flight; ignoring");
-      return;
-    }
-    reloadInFlight = true;
-    (async () => {
-      try {
-        const nextInputs = await loadBridgeInputs(env, env.ZAPBOT_CONFIG, probe);
-        if (nextInputs._tag === "Err") {
-          log.error(`Reload failed: ${nextInputs.error.reason}`);
-          return;
-        }
-
-        const reloaded = reloadBridgeRuntimeConfig(liveRuntime, nextInputs.value);
-        if (reloaded._tag === "Err") {
-          log.error(`Reload failed: ${formatConfigError(reloaded.error)}`);
-          return;
-        }
-
-        const nextConfig = buildBridgeConfig(env, reloaded.value.next);
-        if (nextConfig._tag === "Err") {
-          log.error(`Reload failed: ${nextConfig.error.reason}`);
-          return;
-        }
-
-        liveRuntime = reloaded.value.next;
-        await running.reload(nextConfig.value);
-        log.info(`Config reloaded (${nextConfig.value.repos.size} repos, secret rotated: ${reloaded.value.secretRotated})`);
-      } catch (err) {
-        log.error(`Reload failed: ${err instanceof Error ? err.message : err}`);
-      } finally {
-        reloadInFlight = false;
-      }
-    })();
-  });
-
-  let shuttingDown = false;
-  async function shutdown(): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    log.info("Shutting down...");
-    await running.stop();
-    process.exit(0);
-  }
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  // Hand off ownership: the lifecycle now drives reload + shutdown.
+  lifecycle.markReady(running, initialInputs.value);
 }

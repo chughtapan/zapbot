@@ -950,19 +950,38 @@ describe("systemd integration: team-init reload", () => {
   });
 });
 
-describe("SIGHUP handler: bridge registers signal handler", () => {
+describe("SIGHUP handler: lifecycle module owns signal handlers", () => {
   // sbd#202: SIGHUP wiring relocated from bin/webhook-bridge.ts into
-  // src/bridge.ts::runBridgeProcess (architect rev 4 §2 collapse — bin
-  // is now ≤30 LOC). The bin invokes runBridgeProcess; the runtime
-  // sequencer owns SIGHUP + reloadBridgeRuntimeConfig.
-  it("src/bridge.ts runBridgeProcess registers SIGHUP handler", () => {
+  // src/bridge.ts::runBridgeProcess.
+  // sbd#220 (sbd#215 impl): SIGHUP wiring relocated again from the inline
+  // blocks in runBridgeProcess into src/bridge-process.ts so the signal
+  // handlers can be installed BEFORE any boot I/O (race-1 fix). The bin
+  // still invokes runBridgeProcess; runBridgeProcess installs the
+  // lifecycle FIRST and then drives boot.
+  it("src/bridge-process.ts owns SIGHUP/SIGINT/SIGTERM and the reload state machine", () => {
+    const lifecycle = fs.readFileSync(
+      path.join(__dirname, "../src/bridge-process.ts"),
+      "utf-8"
+    );
+
+    expect(lifecycle).toContain('"SIGHUP"');
+    expect(lifecycle).toContain('"SIGINT"');
+    expect(lifecycle).toContain('"SIGTERM"');
+    expect(lifecycle).toContain("reloadBridgeRuntimeConfig");
+  });
+
+  it("src/bridge.ts invokes installBridgeProcessLifecycle as the first boot step", () => {
     const bridge = fs.readFileSync(
       path.join(__dirname, "../src/bridge.ts"),
       "utf-8"
     );
 
-    expect(bridge).toContain('process.on("SIGHUP"');
-    expect(bridge).toContain("reloadBridgeRuntimeConfig");
+    expect(bridge).toContain("installBridgeProcessLifecycle");
+    // Inline `process.on("SIGHUP", ...)` blocks must be gone from bridge.ts —
+    // race-1 invariant requires the handlers to live in the lifecycle module.
+    expect(bridge).not.toContain('process.on("SIGHUP"');
+    expect(bridge).not.toContain('process.on("SIGINT"');
+    expect(bridge).not.toContain('process.on("SIGTERM"');
   });
 
   it("bin/webhook-bridge.ts is the thin shim that invokes runBridgeProcess", () => {

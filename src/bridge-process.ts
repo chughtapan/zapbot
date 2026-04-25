@@ -1,9 +1,10 @@
 /**
  * bridge-process — boot/reload/shutdown lifecycle primitive for `runBridgeProcess`.
  *
- * STUBS ONLY (architect, sbd#215). Function bodies throw. Implementer
- * (`/safer:implement-staff` or `/safer:implement-senior`) fills the bodies
- * against the design doc on https://github.com/chughtapan/safer-by-default/issues/215.
+ * Architect plan (sbd#215 rev 2 + addendum):
+ *   - rev 1:    https://github.com/chughtapan/safer-by-default/issues/215#issuecomment-4318454290
+ *   - addendum: https://github.com/chughtapan/safer-by-default/issues/215#issuecomment-4318476863
+ *   - rev 2:    https://github.com/chughtapan/safer-by-default/issues/215#issuecomment-4318477234
  *
  * This module exists to fix three pre-existing races in `runBridgeProcess`
  * (preserved verbatim from the pre-collapse `bin/webhook-bridge.ts::main()`):
@@ -35,11 +36,24 @@
  * Confined to the lifecycle/signal/reload surface of `runBridgeProcess`.
  * `startBridge` (HTTP server, gateway register/deregister, MoltZap boot)
  * is unchanged.
+ *
+ * Atomicity boundary (rev 2 P1 #1): `commitReload` is transactional at the
+ * `running.reload` THROW boundary only. Per-repo gateway register/deregister
+ * failures returned via `Promise.allSettled` inside `running.reload` are
+ * pre-existing semantics and are NOT rolled back here. The §6.3 follow-up
+ * (gateway-layer transactionality) is a separate sub-issue (sbd#219).
+ *
+ * Boot pre-emption latency (rev 1 §6.1, default a): shutdown latency during
+ * `Booting` is bounded by the longest remaining boot await — the boot caller
+ * polls `state()` between awaits and bails to `requestShutdown` once a signal
+ * has flipped state to `ShuttingDown`.
  */
 
-import type { BridgeRuntimeConfig, ConfigReloadError } from "./config/types.ts";
+import { absurd, err, ok, type Result } from "./types.ts";
+import { buildBridgeConfig, loadBridgeInputs } from "./bridge.ts";
 import type { BridgeConfig, RunningBridge } from "./bridge.ts";
-import type { Result } from "./types.ts";
+import { reloadBridgeRuntimeConfig } from "./config/reload.ts";
+import type { BridgeRuntimeConfig, ConfigReloadError } from "./config/types.ts";
 
 // ── State ───────────────────────────────────────────────────────────
 
@@ -190,7 +204,278 @@ export interface BridgeProcessLifecycleDeps {
 export function installBridgeProcessLifecycle(
   deps: BridgeProcessLifecycleDeps,
 ): BridgeProcessLifecycle {
-  throw new Error("not implemented");
+  // Mutable lifecycle state. Closed over by the signal handlers and the
+  // returned handle; never escapes this function.
+  let state: BridgeProcessState = { _tag: "Booting" };
+  let running: RunningBridge | null = null;
+  let liveRuntimeRef: BridgeRuntimeConfig | null = null;
+
+  // Reload coordination. `reloadSettled` resolves once the in-flight
+  // SIGHUP-triggered reload has finished its commit-or-rollback work.
+  let reloadSettled: Promise<void> | null = null;
+
+  // Pending shutdown intent recorded during `Reloading`. After the reload
+  // settles, the finally block reads this and drives the transition.
+  // Signal beats Manual per rev 2 P1 #3 (signal-wins-over-§6.2).
+  let pendingShutdown: ShutdownReason | null = null;
+
+  // Idempotent shutdown promise. First call to `requestShutdown` (or the
+  // signal-driven internal equivalent) creates it; subsequent callers
+  // await the same promise.
+  let shutdownPromise: Promise<void> | null = null;
+
+  function exitCodeFor(reason: ShutdownReason): 0 | 1 {
+    switch (reason._tag) {
+      case "Signal":
+        return 0;
+      case "BootProbeFailed":
+      case "BootConfigInvalid":
+      case "Manual":
+        return 1;
+      default:
+        return absurd(reason);
+    }
+  }
+
+  async function performShutdown(reason: ShutdownReason): Promise<void> {
+    state = { _tag: "ShuttingDown", reason };
+    if (running !== null) {
+      try {
+        await running.stop();
+      } catch (e) {
+        deps.logger.error(
+          `running.stop() failed during shutdown: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+    deps.exit(exitCodeFor(reason));
+  }
+
+  function startShutdown(reason: ShutdownReason): Promise<void> {
+    if (shutdownPromise !== null) return shutdownPromise;
+    shutdownPromise = performShutdown(reason);
+    return shutdownPromise;
+  }
+
+  function describePrepareError(error: ReloadPrepareError): string {
+    switch (error._tag) {
+      case "ReloadInputsFailed":
+        return error.reason;
+      case "ReloadConfigInvalid":
+        return `config rejected: ${error.cause._tag}`;
+      case "ReloadBuildFailed":
+        return error.reason;
+      default:
+        return absurd(error);
+    }
+  }
+
+  function recordSignalIntent(signal: "SIGINT" | "SIGTERM"): void {
+    const reason: ShutdownReason = { _tag: "Signal", signal };
+    // Signal always wins over a previously-recorded Manual intent
+    // (rev 2 P1 #3: signal-wins-over-§6.2 even when ReloadRollbackFailed
+    // would otherwise drive force-shutdown).
+    if (pendingShutdown === null || pendingShutdown._tag !== "Signal") {
+      pendingShutdown = reason;
+    }
+  }
+
+  function onSighup(): void {
+    switch (state._tag) {
+      case "Booting":
+        // Race-3 fix per rev 2 P1 #2: no-op (no queue, no deferred dispatch).
+        deps.logger.warn("SIGHUP ignored during boot");
+        return;
+      case "Reloading":
+        // Existing `reloadInFlight` semantics preserved.
+        deps.logger.warn("SIGHUP received while reload in flight; ignoring");
+        return;
+      case "ShuttingDown":
+        // Race-3 fix: SIGHUP during shutdown does not race shutdown finalizers.
+        deps.logger.warn("SIGHUP ignored during shutdown");
+        return;
+      case "Ready":
+        // Fall through to the reload kickoff below.
+        break;
+      default:
+        absurd(state);
+    }
+
+    // Capture a snapshot of the previous runtime so that rollback (if it
+    // fires) has a consistent baseline.
+    const previousRuntime = liveRuntimeRef;
+    const liveRunning = running;
+    if (previousRuntime === null || liveRunning === null) {
+      // Defensive: Ready implies both are set (markReady wrote them).
+      // If we get here, the lifecycle invariant is broken — fail loud.
+      deps.logger.error(
+        "SIGHUP in Ready state but live runtime/running missing; aborting reload",
+      );
+      return;
+    }
+
+    state = { _tag: "Reloading" };
+
+    reloadSettled = (async () => {
+      try {
+        // Rebuild the previous BridgeConfig from the previous runtime.
+        // buildBridgeConfig is pure-fold over env + runtime; it can only
+        // fail if the Moltzap env env decode fails, which is identical to
+        // boot — env hasn't moved, so a failure here is anomalous.
+        const previousConfigResult = buildBridgeConfig(deps.env, previousRuntime);
+        if (previousConfigResult._tag === "Err") {
+          deps.logger.error(
+            `Reload aborted: cannot rebuild current config: ${previousConfigResult.error.reason}`,
+          );
+          return;
+        }
+
+        const planResult = await prepareReload(
+          deps.env,
+          previousRuntime,
+          deps.probe,
+        );
+        if (planResult._tag === "Err") {
+          deps.logger.error(`Reload failed: ${describePrepareError(planResult.error)}`);
+          return;
+        }
+
+        const committed = await commitReload(
+          liveRunning,
+          planResult.value,
+          previousRuntime,
+          previousConfigResult.value,
+        );
+        if (committed._tag === "Err") {
+          if (committed.error._tag === "ReloadCommitFailed") {
+            deps.logger.error(
+              `Reload failed: ${committed.error.cause}` +
+                (committed.error.rolledBack
+                  ? " (rolled back to previous config)"
+                  : ""),
+            );
+            return;
+          }
+          // ReloadRollbackFailed: §6.2 default is force-shutdown.
+          // Rev 2 P1 #3: if a SIGTERM is already pending, signal wins;
+          // pendingShutdown stays as Signal.
+          deps.logger.error(
+            `Reload rollback failed: original=${committed.error.originalCause}; ` +
+              `rollback=${committed.error.rollbackCause}`,
+          );
+          if (pendingShutdown === null) {
+            pendingShutdown = {
+              _tag: "Manual",
+              reason: "rollback failed",
+            };
+          }
+          return;
+        }
+
+        // Race-2 fix: liveRuntime advances ONLY after `commitReload` resolves Ok.
+        liveRuntimeRef = committed.value;
+        deps.logger.info(
+          `Config reloaded (${planResult.value.nextConfig.repos.size} repos, ` +
+            `secret rotated: ${planResult.value.secretRotated})`,
+        );
+      } catch (e) {
+        deps.logger.error(
+          `Reload failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      } finally {
+        // Settle the state. If a signal arrived during the reload, the
+        // pendingShutdown drives the transition (signal wins per rev 2).
+        // Otherwise, return to Ready unless a Manual shutdown was queued
+        // by a rollback failure.
+        if (pendingShutdown !== null) {
+          const reason = pendingShutdown;
+          pendingShutdown = null;
+          // Kick off shutdown asynchronously so we don't block the
+          // SIGHUP handler's microtask further. Errors are observable
+          // via the shutdownPromise.
+          void startShutdown(reason);
+        } else if (state._tag === "Reloading") {
+          state = { _tag: "Ready" };
+        }
+      }
+    })();
+  }
+
+  function onSignal(signal: "SIGINT" | "SIGTERM"): void {
+    const reason: ShutdownReason = { _tag: "Signal", signal };
+    switch (state._tag) {
+      case "Booting":
+        // Race-1 fix: handlers exist throughout boot. Flip state; the
+        // boot caller polls `state()` between awaits and calls
+        // `requestShutdown` once it observes the transition. Latency is
+        // bounded by the longest remaining boot await (rev 1 §6.1 "a").
+        deps.logger.info(`${signal} received during boot; pre-empting boot`);
+        state = { _tag: "ShuttingDown", reason };
+        return;
+      case "Ready":
+        deps.logger.info(`${signal} received; shutting down`);
+        void startShutdown(reason);
+        return;
+      case "Reloading":
+        // Rev 2 P1 #3 (a): do NOT abort the in-flight reload. Record the
+        // intent; the reload's finally block drives the transition.
+        deps.logger.info(
+          `${signal} received during reload; deferring shutdown until reload settles`,
+        );
+        recordSignalIntent(signal);
+        return;
+      case "ShuttingDown":
+        deps.logger.info(`${signal} ignored: already shutting down`);
+        return;
+      default:
+        absurd(state);
+    }
+  }
+
+  const sighupHandler = (): void => onSighup();
+  const sigintHandler = (): void => onSignal("SIGINT");
+  const sigtermHandler = (): void => onSignal("SIGTERM");
+
+  deps.process.on("SIGHUP", sighupHandler);
+  deps.process.on("SIGINT", sigintHandler);
+  deps.process.on("SIGTERM", sigtermHandler);
+
+  return {
+    state: () => state,
+    markReady: (r, runtime) => {
+      if (state._tag !== "Booting") return;
+      running = r;
+      liveRuntimeRef = runtime;
+      state = { _tag: "Ready" };
+    },
+    liveRuntime: () => liveRuntimeRef,
+    requestShutdown: async (reason) => {
+      // If a reload is mid-flight, let it settle first — tearing down a
+      // half-applied reload is exactly race 2.
+      if (state._tag === "Reloading") {
+        if (pendingShutdown === null || pendingShutdown._tag !== "Signal") {
+          pendingShutdown = reason;
+        }
+        // Wait for the reload to settle; the finally block will start
+        // the shutdown via pendingShutdown.
+        if (reloadSettled !== null) {
+          try {
+            await reloadSettled;
+          } catch {
+            /* settled with rejection; finally block already ran */
+          }
+        }
+        if (shutdownPromise !== null) await shutdownPromise;
+        return;
+      }
+      await startShutdown(reason);
+    },
+    dispose: () => {
+      deps.process.off("SIGHUP", sighupHandler);
+      deps.process.off("SIGINT", sigintHandler);
+      deps.process.off("SIGTERM", sigtermHandler);
+    },
+  };
 }
 
 /**
@@ -208,7 +493,26 @@ export async function prepareReload(
   currentRuntime: BridgeRuntimeConfig,
   probe: (publicUrl: string) => Promise<boolean>,
 ): Promise<Result<ReloadPlan, ReloadPrepareError>> {
-  throw new Error("not implemented");
+  const nextInputs = await loadBridgeInputs(env, env.ZAPBOT_CONFIG, probe);
+  if (nextInputs._tag === "Err") {
+    return err({ _tag: "ReloadInputsFailed", reason: nextInputs.error.reason });
+  }
+
+  const reloaded = reloadBridgeRuntimeConfig(currentRuntime, nextInputs.value);
+  if (reloaded._tag === "Err") {
+    return err({ _tag: "ReloadConfigInvalid", cause: reloaded.error });
+  }
+
+  const nextConfig = buildBridgeConfig(env, reloaded.value.next);
+  if (nextConfig._tag === "Err") {
+    return err({ _tag: "ReloadBuildFailed", reason: nextConfig.error.reason });
+  }
+
+  return ok({
+    nextRuntime: reloaded.value.next,
+    nextConfig: nextConfig.value,
+    secretRotated: reloaded.value.secretRotated,
+  });
 }
 
 /**
@@ -224,12 +528,41 @@ export async function prepareReload(
  * Race 2 from sbd#215 is resolved here: the `liveRuntime` mutation in
  * `runBridgeProcess` (formerly at `bridge.ts:1218`, before
  * `running.reload`) moves AFTER this function resolves Ok.
+ *
+ * Atomicity is at the throw boundary only (rev 2 P1 #1). Per-repo
+ * gateway register/deregister failures returned as `Err` via
+ * `Promise.allSettled` inside `running.reload` are NOT detected here;
+ * sbd#219 (§6.3 follow-up) addresses gateway-layer transactionality.
  */
 export async function commitReload(
   running: RunningBridge,
   plan: ReloadPlan,
-  previousRuntime: BridgeRuntimeConfig,
+  _previousRuntime: BridgeRuntimeConfig,
   previousConfig: BridgeConfig,
 ): Promise<Result<BridgeRuntimeConfig, ReloadCommitError>> {
-  throw new Error("not implemented");
+  try {
+    await running.reload(plan.nextConfig);
+  } catch (commitError) {
+    const originalCause =
+      commitError instanceof Error ? commitError.message : String(commitError);
+    try {
+      await running.reload(previousConfig);
+    } catch (rollbackError) {
+      const rollbackCause =
+        rollbackError instanceof Error
+          ? rollbackError.message
+          : String(rollbackError);
+      return err({
+        _tag: "ReloadRollbackFailed",
+        originalCause,
+        rollbackCause,
+      });
+    }
+    return err({
+      _tag: "ReloadCommitFailed",
+      cause: originalCause,
+      rolledBack: true,
+    });
+  }
+  return ok(plan.nextRuntime);
 }
