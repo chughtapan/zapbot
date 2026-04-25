@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { dispatch } from "../src/ao/dispatcher.ts";
 import { fromSenderIds } from "../src/moltzap/identity-allowlist.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
@@ -15,6 +15,7 @@ const originalPath = process.env.PATH;
 
 afterEach(() => {
   process.env.PATH = originalPath;
+  vi.restoreAllMocks();
 });
 
 describe("dispatch", () => {
@@ -39,6 +40,16 @@ exit 0
     );
     process.env.PATH = `${tempDir}:${originalPath ?? ""}`;
 
+    // rev 4 §8.1 path A: registration-backed only. Mock the auth/register
+    // endpoint so dispatch's provisioning call succeeds without a live
+    // MoltZap server.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ apiKey: "moltzap-key", agentId: "agent-spawned" }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
     const result = await dispatch({
       repo: asRepoFullName("acme/app"),
       issue: asIssueNumber(42),
@@ -46,9 +57,9 @@ exit 0
       configPath: captureBase,
       installationToken: "gh-installation-token" as never,
       moltzap: {
-        _tag: "MoltzapStatic",
+        _tag: "MoltzapRegistration",
         serverUrl: "wss://moltzap.example/ws",
-        apiKey: "moltzap-key",
+        registrationSecret: "reg-secret",
         allowlistCsv: "agent-a",
         allowlist: fromSenderIds([asMoltzapSenderId("agent-a")]),
       },
