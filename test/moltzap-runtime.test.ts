@@ -132,9 +132,10 @@ describe("moltzap runtime / buildMoltzapProcessEnv", () => {
     });
     expect(result._tag).toBe("Ok");
     if (result._tag !== "Ok" || result.value._tag !== "MoltzapRegistration") return;
+    // sbd#216: MOLTZAP_REGISTRATION_SECRET is NOT forwarded to ao sessions;
+    // workers receive pre-minted credentials (API key) via buildMoltzapSpawnEnv.
     expect(buildMoltzapProcessEnv(result.value)).toEqual({
       MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      MOLTZAP_REGISTRATION_SECRET: "reg-secret",
     });
   });
 });
