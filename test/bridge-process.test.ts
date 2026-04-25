@@ -151,6 +151,11 @@ describe("bridge-process: buildBridgeConfig", () => {
 describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
   let tempHome: string;
   let originalEnv: NodeJS.ProcessEnv;
+  let preexistingListeners: {
+    SIGHUP: ((...args: unknown[]) => void)[];
+    SIGINT: ((...args: unknown[]) => void)[];
+    SIGTERM: ((...args: unknown[]) => void)[];
+  };
 
   beforeEach(() => {
     tempHome = mkdtempSync(join(tmpdir(), "zapbot-run-bridge-"));
@@ -160,15 +165,26 @@ describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
       JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
     );
     originalEnv = { ...process.env };
+    // Snapshot existing signal listeners (e.g. Vitest's own) so afterEach
+    // only strips listeners installed by the test, not the harness's.
+    preexistingListeners = {
+      SIGHUP: [...process.listeners("SIGHUP")] as never,
+      SIGINT: [...process.listeners("SIGINT")] as never,
+      SIGTERM: [...process.listeners("SIGTERM")] as never,
+    };
   });
 
   afterEach(() => {
     rmSync(tempHome, { recursive: true, force: true });
-    // Strip any signal listeners runBridgeProcess installed.
-    process.removeAllListeners("SIGHUP");
-    process.removeAllListeners("SIGINT");
-    process.removeAllListeners("SIGTERM");
-    // Restore env in case any test mutated it.
+    // Strip only listeners installed by runBridgeProcess; preserve the
+    // pre-existing listener set so Vitest's own SIGINT handler survives.
+    for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) {
+      for (const listener of process.listeners(signal)) {
+        if (!preexistingListeners[signal].includes(listener as never)) {
+          process.off(signal, listener as never);
+        }
+      }
+    }
     for (const k of Object.keys(process.env)) delete process.env[k];
     Object.assign(process.env, originalEnv);
   });
@@ -202,12 +218,93 @@ describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
 
     expect(started).not.toBeNull();
     expect(started?.ingress.mode).toBe("local-only");
-    // Signal handlers were installed.
-    expect(process.listenerCount("SIGHUP")).toBeGreaterThan(0);
-    expect(process.listenerCount("SIGINT")).toBeGreaterThan(0);
-    expect(process.listenerCount("SIGTERM")).toBeGreaterThan(0);
+    // Newly installed listeners — counted against the pre-existing
+    // baseline so we are not just observing harness handlers.
+    expect(process.listenerCount("SIGHUP")).toBe(preexistingListeners.SIGHUP.length + 1);
+    expect(process.listenerCount("SIGINT")).toBe(preexistingListeners.SIGINT.length + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(preexistingListeners.SIGTERM.length + 1);
     // Lifecycle hooks not yet exercised — just installed.
     expect(stopped).toBe(false);
     expect(reloaded).toBe(false);
+  });
+
+  it("SIGHUP triggers a config reload that calls running.reload with the next config", async () => {
+    let reloadCount = 0;
+    let lastReloadConfig: BridgeConfig | null = null;
+    const fakeRunning: RunningBridge = {
+      stop: async () => {
+        /* no-op */
+      },
+      reload: async (next) => {
+        reloadCount += 1;
+        lastReloadConfig = next;
+      },
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      HOME: tempHome,
+      ZAPBOT_BOT_USERNAME: "test-bot",
+    };
+
+    await runBridgeProcess(env, {
+      start: async () => fakeRunning,
+      probe: async () => true,
+    });
+
+    // Capture the SIGHUP handler that runBridgeProcess just installed.
+    const handlers = process.listeners("SIGHUP");
+    const ourHandler = handlers[handlers.length - 1] as (() => void) | undefined;
+    expect(ourHandler).toBeDefined();
+
+    // Fire the handler synchronously; it kicks off an IIFE.
+    ourHandler!();
+    // Wait for the async reload work to settle.
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(reloadCount).toBe(1);
+    expect(lastReloadConfig).not.toBeNull();
+    expect(lastReloadConfig?.ingress.mode).toBe("local-only");
+  });
+
+  it("SIGHUP coalesces concurrent reloads (reloadInFlight gate)", async () => {
+    let reloadCount = 0;
+    let releaseReload!: () => void;
+    const reloadGate = new Promise<void>((r) => {
+      releaseReload = r;
+    });
+    const fakeRunning: RunningBridge = {
+      stop: async () => {
+        /* no-op */
+      },
+      reload: async () => {
+        reloadCount += 1;
+        // Block the first reload until the test releases it.
+        if (reloadCount === 1) await reloadGate;
+      },
+    };
+
+    const env: NodeJS.ProcessEnv = {
+      HOME: tempHome,
+      ZAPBOT_BOT_USERNAME: "test-bot",
+    };
+
+    await runBridgeProcess(env, {
+      start: async () => fakeRunning,
+      probe: async () => true,
+    });
+
+    const handlers = process.listeners("SIGHUP");
+    const ourHandler = handlers[handlers.length - 1] as (() => void) | undefined;
+
+    // Fire twice rapidly. The second should be coalesced under the
+    // reloadInFlight gate.
+    ourHandler!();
+    ourHandler!();
+    // Let the queued microtasks run, then release the first reload.
+    await new Promise((r) => setTimeout(r, 20));
+    releaseReload();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(reloadCount).toBe(1);
   });
 });
