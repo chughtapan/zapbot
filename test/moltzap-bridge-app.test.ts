@@ -286,3 +286,66 @@ describe("bridge-app: shutdown-vs-boot ordering (Fix 2 — sbd#204)", () => {
     expect(currentBridgeApp()).toBeNull();
   });
 });
+
+describe("bridge-app: boot interruption error tagging (sbd#207)", () => {
+  // Regression for: when a boot fiber is interrupted, coalesced callers
+  // should receive BridgeAppBootInterrupted, not BridgeAppEnvInvalid.
+  // The tag disambiguates boot concurrency issues from env decode failures.
+
+  it("interrupted boot propagates BridgeAppBootInterrupted to coalesced callers", async () => {
+    // Mock fetch to block indefinitely; keeps boot suspended so we can interrupt.
+    let signalFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((res) => {
+      signalFetchStarted = res;
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      signalFetchStarted();
+      // Block indefinitely until interrupted.
+      await new Promise<void>(() => {});
+      return new Response("ok", { status: 200 });
+    });
+
+    const config = {
+      serverUrl: "https://moltzap.example",
+      env: { ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "secret" },
+    };
+
+    // Fork a boot and track the result of a coalesced caller.
+    let coalescedResult: Awaited<ReturnType<typeof Effect.runPromise>> | null =
+      null;
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        // Start the first boot fiber.
+        const bootFiber = yield* Effect.fork(bootBridgeApp(config));
+
+        // Wait until fetch is in-flight (sentinel is assigned).
+        yield* Effect.promise(() => fetchStarted);
+
+        // Start a coalesced boot in a separate fiber.
+        const coalescedFiber = yield* Effect.fork(
+          bootBridgeApp(config).pipe(Effect.either),
+        );
+
+        // Yield to let coalesced fiber coalesce on __bootInFlight.
+        yield* Effect.sleep("10 millis");
+
+        // Interrupt the primary boot. Effect.ensuring clears sentinel and
+        // rejects the in-flight promise with BridgeAppBootInterrupted.
+        yield* Fiber.interrupt(bootFiber);
+
+        // Coalesced fiber should now resolve with the boot error.
+        coalescedResult = yield* Fiber.join(coalescedFiber);
+      }),
+    );
+
+    // Verify the coalesced caller got BridgeAppBootInterrupted.
+    expect(coalescedResult).not.toBeNull();
+    expect(coalescedResult?._tag).toBe("Left");
+    if (coalescedResult?._tag === "Left") {
+      expect(coalescedResult.left._tag).toBe("BridgeAppBootInterrupted");
+      expect(coalescedResult.left.reason).toContain("interrupted");
+    }
+  });
+});

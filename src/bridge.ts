@@ -930,6 +930,8 @@ function formatBridgeBootError(e: BridgeAppBootError): string {
       return `BridgeAppConnectFailed: ${e.cause.message}`;
     case "BridgeAppSessionFailed":
       return `BridgeAppSessionFailed: ${e.cause.message}`;
+    case "BridgeAppBootInterrupted":
+      return `Bridge boot interrupted: ${e.reason}. Retry will start fresh.`;
     default:
       return absurd(e);
   }
