@@ -951,14 +951,30 @@ describe("systemd integration: team-init reload", () => {
 });
 
 describe("SIGHUP handler: bridge registers signal handler", () => {
-  it("webhook-bridge.ts registers SIGHUP handler", () => {
+  // sbd#202: SIGHUP wiring relocated from bin/webhook-bridge.ts into
+  // src/bridge.ts::runBridgeProcess (architect rev 4 §2 collapse — bin
+  // is now ≤30 LOC). The bin invokes runBridgeProcess; the runtime
+  // sequencer owns SIGHUP + reloadBridgeRuntimeConfig.
+  it("src/bridge.ts runBridgeProcess registers SIGHUP handler", () => {
     const bridge = fs.readFileSync(
-      path.join(__dirname, "../bin/webhook-bridge.ts"),
+      path.join(__dirname, "../src/bridge.ts"),
       "utf-8"
     );
 
     expect(bridge).toContain('process.on("SIGHUP"');
     expect(bridge).toContain("reloadBridgeRuntimeConfig");
+  });
+
+  it("bin/webhook-bridge.ts is the thin shim that invokes runBridgeProcess", () => {
+    const bin = fs.readFileSync(
+      path.join(__dirname, "../bin/webhook-bridge.ts"),
+      "utf-8"
+    );
+    expect(bin).toContain("runBridgeProcess");
+    // The bin is the architect-rev-4 ≤30 LOC glue. Lock that ceiling
+    // here so accidental regrowth is caught at PR time.
+    const lineCount = bin.split("\n").filter((l) => l.length > 0).length;
+    expect(lineCount).toBeLessThanOrEqual(30);
   });
 });
 

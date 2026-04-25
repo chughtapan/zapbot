@@ -11,13 +11,30 @@
  * plannotator, workflow/agent HTTP APIs, progress poller, cleanup sweep).
  */
 
+import { readFileSync } from "node:fs";
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
 import { getIssue } from "./github-state.ts";
 import {
   buildMoltzapProcessEnv,
+  loadMoltzapRuntimeConfig,
   type MoltzapRuntimeConfig,
 } from "./moltzap/runtime.ts";
+import {
+  deriveConfigSourcePaths,
+  loadBridgeRuntimeConfig,
+} from "./config/load.ts";
+import { resolveRuntimeEnv } from "./config/env.ts";
+import { readCanonicalConfig } from "./config/canonical.ts";
+import { resolveIngressPolicy } from "./config/ingress.ts";
+import type { IngressResolutionError } from "./config/ingress.ts";
+import { parseProjectConfig, readConfigFiles } from "./config/disk.ts";
+import { reloadBridgeRuntimeConfig } from "./config/reload.ts";
+import type {
+  BridgeRuntimeConfig,
+  ConfigDiskError,
+  ConfigReloadError,
+} from "./config/types.ts";
 import type { IngressPolicy } from "./config/ingress.ts";
 import {
   createAoCliControlHost,
@@ -943,4 +960,280 @@ function resolveSecret(repo: RepoFullName, cfg: BridgeConfig): string | null {
   const perRepo = process.env[route.webhookSecretEnvVar];
   if (perRepo) return perRepo;
   return cfg.webhookSecret;
+}
+
+// ── Bridge process orchestrator ─────────────────────────────────────
+//
+// Runtime sequencer for the bridge entrypoint: config load, Moltzap
+// decode, post-boot reachability probe, SIGHUP reload, signal-driven
+// shutdown. Lives here (not in the bin) so the surface is reachable
+// by tests without a process fork.
+
+const nodeDiskReader = {
+  readText(path: string): Result<string, ConfigDiskError> {
+    try {
+      return ok(readFileSync(path, "utf-8"));
+    } catch (cause) {
+      return err({
+        _tag: "ConfigFileUnreadable",
+        path,
+        cause: String(cause),
+      });
+    }
+  },
+};
+
+/**
+ * HTTP probe against the bridge's `/healthz` endpoint. Used post-boot
+ * to confirm `ZAPBOT_BRIDGE_URL` is reachable from the public internet
+ * before declaring the bridge ready.
+ */
+export async function probeHealthz(publicUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${publicUrl.replace(/\/+$/u, "")}/healthz`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load bridge config from disk + env. The probe is injectable so the
+ * initial load (before the server is up) can stub it out — the live
+ * `/healthz` probe runs separately in `runBridgeProcess` after the
+ * server is listening.
+ */
+export async function loadBridgeInputs(
+  env: NodeJS.ProcessEnv,
+  configPath: string | undefined,
+  isPublicUrlReachable: (publicUrl: string) => Promise<boolean> = probeHealthz,
+): Promise<Result<BridgeRuntimeConfig, { readonly reason: string }>> {
+  const sourcePaths = deriveConfigSourcePaths(configPath, env);
+
+  const canonical = readCanonicalConfig(sourcePaths.canonicalConfigPath, nodeDiskReader);
+  if (canonical._tag === "Err") {
+    return err({ reason: formatConfigError(canonical.error) });
+  }
+
+  const rawFiles = readConfigFiles(sourcePaths, nodeDiskReader);
+  if (rawFiles._tag === "Err") {
+    return err({ reason: formatConfigError(rawFiles.error) });
+  }
+
+  const runtimeEnv = resolveRuntimeEnv(env, canonical.value);
+  if (runtimeEnv._tag === "Err") {
+    return err({ reason: formatConfigError(runtimeEnv.error) });
+  }
+
+  const ingressMode = runtimeEnv.value.gatewayUrl === null ? "local-only" : "github-demo";
+  const ingress = await resolveIngressPolicy({
+    mode: ingressMode,
+    gatewayUrl: runtimeEnv.value.gatewayUrl ?? "",
+    publicUrl: runtimeEnv.value.publicUrl,
+    isPublicUrlReachable,
+  });
+  if (ingress._tag === "Err") {
+    return err({ reason: formatIngressError(ingress.error) });
+  }
+
+  const projectDocument = rawFiles.value.projectConfigText === null || sourcePaths.projectConfigPath === null
+    ? ok(null)
+    : parseProjectConfig(sourcePaths.projectConfigPath, rawFiles.value.projectConfigText);
+  if (projectDocument._tag === "Err") {
+    return err({ reason: formatConfigError(projectDocument.error) });
+  }
+
+  const runtime = loadBridgeRuntimeConfig(runtimeEnv.value, projectDocument.value, ingress.value);
+  if (runtime._tag === "Err") {
+    return err({ reason: formatConfigError(runtime.error) });
+  }
+
+  return ok(runtime.value);
+}
+
+/**
+ * Build the boot-ready `BridgeConfig` from a resolved `BridgeRuntimeConfig`.
+ * Folds in the Moltzap runtime decode (env-sourced) and projects routes.
+ */
+export function buildBridgeConfig(
+  env: NodeJS.ProcessEnv,
+  runtime: BridgeRuntimeConfig,
+): Result<BridgeConfig, { readonly reason: string }> {
+  const moltzap = loadMoltzapRuntimeConfig(env);
+  if (moltzap._tag === "Err") {
+    return err({ reason: moltzap.error.reason });
+  }
+
+  return ok({
+    port: runtime.port,
+    ingress: runtime.ingress,
+    publicUrl: runtime.publicUrl,
+    gatewayUrl: runtime.gatewayUrl,
+    gatewaySecret: runtime.gatewaySecret,
+    botUsername: runtime.botUsername,
+    aoConfigPath: runtime.aoConfigPath ?? "",
+    apiKey: runtime.apiKey,
+    webhookSecret: runtime.webhookSecret,
+    moltzap: moltzap.value,
+    repos: buildRepos(runtime),
+  });
+}
+
+function buildRepos(runtime: BridgeRuntimeConfig): ReadonlyMap<RepoFullName, RepoRoute> {
+  const result = new Map<RepoFullName, RepoRoute>();
+  for (const [repoFullName, entry] of runtime.routes) {
+    result.set(asRepoFullName(repoFullName), {
+      projectName: entry.projectName,
+      webhookSecretEnvVar: entry.webhookSecretEnvVar,
+      defaultBranch: entry.defaultBranch,
+    });
+  }
+  return result;
+}
+
+export function formatConfigError(error: ConfigReloadError): string {
+  switch (error._tag) {
+    case "InvalidPort":
+      return `Invalid ZAPBOT_PORT value: ${error.raw}`;
+    case "SecretCollision":
+      return `${error.left} must not equal ${error.right}.`;
+    case "ConfigFileUnreadable":
+      return `Cannot read config file ${error.path}: ${error.cause}`;
+    case "ConfigFileInvalid":
+      return `Invalid config file ${error.path}: ${error.cause}`;
+    case "CanonicalConfigMissing":
+      return `Canonical config not found at ${error.path}. Run zapbot-team-init to create it.`;
+    case "CanonicalConfigInvalid":
+      return `Invalid canonical config at ${error.path}: ${error.cause}`;
+    case "DeprecatedSecretBinding":
+      return `Project ${error.projectName} uses deprecated webhook secret env var ${error.secretEnvVar}.`;
+    case "ReloadRejected":
+      return error.reason;
+    default:
+      return absurd(error);
+  }
+}
+
+export function formatIngressError(error: IngressResolutionError): string {
+  switch (error._tag) {
+    case "InvalidIngressMode":
+      return `Unsupported ingress mode: ${error.mode}`;
+    case "MissingPublicBridgeUrl":
+      return "ZAPBOT_BRIDGE_URL is required in GitHub demo mode.";
+    case "UnreachablePublicBridgeUrl":
+      return `ZAPBOT_BRIDGE_URL is unreachable: ${error.publicUrl}`;
+    case "DemoModeRequiresGateway":
+      return "ZAPBOT_GATEWAY_URL is required in GitHub demo mode.";
+    default:
+      return absurd(error);
+  }
+}
+
+/**
+ * Run the bridge process: load config, boot the HTTP server, install
+ * SIGHUP reload + SIGINT/SIGTERM shutdown handlers. Returns a Promise
+ * that never resolves under normal operation — the signal handlers
+ * call `process.exit(0)` once `running.stop()` finishes.
+ *
+ * On config-load or reachability failure, exits with code 1.
+ *
+ * Tests can stub out `startBridge` and `probeHealthz` via the optional
+ * second arg; production callers (the bin) pass nothing.
+ */
+export interface RunBridgeProcessOverrides {
+  readonly start?: (config: BridgeConfig) => Promise<RunningBridge>;
+  readonly probe?: (publicUrl: string) => Promise<boolean>;
+}
+
+export async function runBridgeProcess(
+  env: NodeJS.ProcessEnv = process.env,
+  overrides: RunBridgeProcessOverrides = {},
+): Promise<void> {
+  const start = overrides.start ?? startBridge;
+  const probe = overrides.probe ?? probeHealthz;
+
+  // Skip the reachability probe on initial load — the bridge isn't running yet
+  // so /healthz isn't open. We boot first, then probe the live endpoint below.
+  const initialInputs = await loadBridgeInputs(env, env.ZAPBOT_CONFIG, async () => true);
+  if (initialInputs._tag === "Err") {
+    console.error(`[bridge] ${initialInputs.error.reason}`);
+    process.exit(1);
+  }
+
+  const initialConfig = buildBridgeConfig(env, initialInputs.value);
+  if (initialConfig._tag === "Err") {
+    console.error(`[bridge] ${initialConfig.error.reason}`);
+    process.exit(1);
+  }
+
+  let liveRuntime = initialInputs.value;
+  const cfg = initialConfig.value;
+  log.info(`Webhook bridge starting on port ${cfg.port}`);
+  log.info(`Ingress mode: ${cfg.ingress.mode}`);
+
+  const running = await start(cfg);
+
+  // Post-boot reachability probe — fires against the now-live /healthz endpoint.
+  // If the probe fails, tear down the bridge cleanly before exiting.
+  if (cfg.ingress.mode === "github-demo" && cfg.publicUrl !== null) {
+    const reachable = await probe(cfg.publicUrl);
+    if (!reachable) {
+      await running.stop();
+      console.error(`[bridge] ZAPBOT_BRIDGE_URL is unreachable: ${cfg.publicUrl}`);
+      process.exit(1);
+    }
+  }
+
+  log.info(`Webhook bridge listening on ${cfg.ingress.mode === "github-demo" ? cfg.publicUrl : "local-only ingress"}`);
+
+  let reloadInFlight = false;
+  process.on("SIGHUP", () => {
+    if (reloadInFlight) {
+      log.warn("SIGHUP received while reload in flight; ignoring");
+      return;
+    }
+    reloadInFlight = true;
+    (async () => {
+      try {
+        const nextInputs = await loadBridgeInputs(env, env.ZAPBOT_CONFIG, probe);
+        if (nextInputs._tag === "Err") {
+          log.error(`Reload failed: ${nextInputs.error.reason}`);
+          return;
+        }
+
+        const reloaded = reloadBridgeRuntimeConfig(liveRuntime, nextInputs.value);
+        if (reloaded._tag === "Err") {
+          log.error(`Reload failed: ${formatConfigError(reloaded.error)}`);
+          return;
+        }
+
+        const nextConfig = buildBridgeConfig(env, reloaded.value.next);
+        if (nextConfig._tag === "Err") {
+          log.error(`Reload failed: ${nextConfig.error.reason}`);
+          return;
+        }
+
+        liveRuntime = reloaded.value.next;
+        await running.reload(nextConfig.value);
+        log.info(`Config reloaded (${nextConfig.value.repos.size} repos, secret rotated: ${reloaded.value.secretRotated})`);
+      } catch (err) {
+        log.error(`Reload failed: ${err instanceof Error ? err.message : err}`);
+      } finally {
+        reloadInFlight = false;
+      }
+    })();
+  });
+
+  let shuttingDown = false;
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info("Shutting down...");
+    await running.stop();
+    process.exit(0);
+  }
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
