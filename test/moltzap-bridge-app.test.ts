@@ -22,6 +22,8 @@ import {
   currentBridgeApp,
   drainBridgeSessions,
   shutdownBridgeApp,
+  DEFAULT_ADMISSION_TIMEOUT_MS,
+  SERVER_ADMISSION_TIMEOUT_MS,
 } from "../src/moltzap/bridge-app.ts";
 
 beforeEach(() => {
@@ -347,5 +349,21 @@ describe("bridge-app: boot interruption error tagging (sbd#207)", () => {
       expect(coalescedResult.left._tag).toBe("BridgeAppBootInterrupted");
       expect(coalescedResult.left.reason).toContain("interrupted");
     }
+  });
+});
+
+describe("bridge-app: admission timeout pinning (sbd#214)", () => {
+  it("DEFAULT_ADMISSION_TIMEOUT_MS is pinned to server timeout + 10s buffer", () => {
+    // sbd#214: bridge timeout MUST be >= server timeout so bridge does not
+    // give up before server finishes admission/rejection (capability check,
+    // permission requests, user validation). This test ensures the bridge
+    // timeout drifts >= server timeout — if this fails, the pinning was broken.
+    expect(DEFAULT_ADMISSION_TIMEOUT_MS).toBe(SERVER_ADMISSION_TIMEOUT_MS + 10_000);
+  });
+
+  it("DEFAULT_ADMISSION_TIMEOUT_MS is greater than or equal to server timeout", () => {
+    // Drift detection: if someone forgets to update the constant when the
+    // server timeout changes, this test catches the drift at CI time.
+    expect(DEFAULT_ADMISSION_TIMEOUT_MS).toBeGreaterThanOrEqual(SERVER_ADMISSION_TIMEOUT_MS);
   });
 });

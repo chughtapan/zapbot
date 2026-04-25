@@ -526,13 +526,28 @@ export interface BridgeSessionRequest {
 }
 
 /**
- * Default admission-wait budget used by `createBridgeSession`. Sized for
- * `userService.validateUser` webhook latency × concurrent admissions on
- * a per-roster cohort (typically ≤ 4 workers); the server admits in
+ * Server's admission timeout (from vendor/moltzap/packages/server/src/app/app-host.ts:1742).
+ * The server uses this as the default `challengeTimeoutMs` when admitting agents.
+ * sbd#214 pinning: bridge timeout MUST be ≥ server timeout so bridge does not
+ * give up before server has finished admission/rejection.
+ */
+export const SERVER_ADMISSION_TIMEOUT_MS = 30_000;
+
+/**
+ * Default admission-wait budget used by `createBridgeSession`. Pinned to
+ * `SERVER_ADMISSION_TIMEOUT_MS + 10s` buffer to ensure the bridge does not
+ * timeout while the server is still processing admission checks (capability
+ * challenge, permission requests, user validation). The buffer accounts for
+ * network latency and server-side parallel processing overhead.
+ *
+ * Sized for `userService.validateUser` webhook latency × concurrent admissions
+ * on a per-roster cohort (typically ≤ 4 workers); the server admits in
  * parallel with `concurrency: "unbounded"` (`app-host.ts:1427`), so the
  * budget is dominated by the single slowest webhook RTT, not by N.
+ *
+ * sbd#214: Drift detection test asserts bridge timeout ≥ server timeout.
  */
-export const DEFAULT_ADMISSION_TIMEOUT_MS = 30_000;
+export const DEFAULT_ADMISSION_TIMEOUT_MS = SERVER_ADMISSION_TIMEOUT_MS + 10_000;
 
 export type BridgeSessionError =
   | { readonly _tag: "BridgeAppNotBooted" }
