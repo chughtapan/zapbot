@@ -68,7 +68,9 @@ export ZAPBOT_WEBHOOK_SECRET ZAPBOT_API_KEY
 BRIDGE_PORT="${ZAPBOT_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
 AO_LOG_FILE="/tmp/zapbot-ao.log"
-AO_CONFIG_FILE="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX.yaml")"
+AO_CONFIG_FILE_RAW="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX")"
+AO_CONFIG_FILE="${AO_CONFIG_FILE_RAW}.yaml"
+mv "$AO_CONFIG_FILE_RAW" "$AO_CONFIG_FILE"
 
 validate_bridge_url() {
   local configured_url
@@ -119,7 +121,10 @@ const [sourcePath, targetPath, desiredPort, pluginPath, projectDir] = process.ar
 const sourceText = fs.readFileSync(sourcePath, "utf8");
 const parsed = YAML.parse(sourceText) ?? {};
 const sourceDir = path.dirname(sourcePath);
-const normalizedProjectDir = path.resolve(projectDir);
+const realOrResolve = (p) => {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+};
+const normalizedProjectDir = realOrResolve(projectDir);
 
 if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
   throw new Error(`Invalid AO config at ${sourcePath}`);
@@ -157,7 +162,7 @@ if (projects !== null && typeof projects === "object" && !Array.isArray(projects
       typeof project === "object" &&
       !Array.isArray(project) &&
       typeof project.path === "string" &&
-      path.resolve(sourceDir, project.path) === normalizedProjectDir
+      realOrResolve(path.resolve(sourceDir, project.path)) === normalizedProjectDir
     ) {
       project.agent = "claude-moltzap";
     }
