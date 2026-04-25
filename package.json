@@ -1,6 +1,6 @@
 {
   "name": "zapbot",
-  "version": "0.3.0",
+  "version": "0.5.2",
   "description": "Thin GitHub webhook bridge that dispatches direct ao sessions, with optional MoltZap session provisioning",
   "main": "dist/index.js",
   "scripts": {
@@ -23,6 +23,7 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@aoagents/ao-plugin-agent-claude-code": "^0.3.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@moltzap/app-sdk": "file:./vendor/moltzap/packages/app-sdk",
     "@moltzap/claude-code-channel": "file:./vendor/moltzap/packages/claude-code-channel",
