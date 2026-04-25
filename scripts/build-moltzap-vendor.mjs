@@ -34,6 +34,12 @@ const REQUIRED = [
   "claude-code-channel",
 ];
 
+// Package-name filters — path filters ("./packages/foo") are interpreted
+// relative to the pnpm-workspace root, which sometimes resolves to zero
+// matches on CI ("None of the selected packages has a 'build' script").
+// Package names always match.
+const FILTER_BY_NAME = REQUIRED.map((pkg) => `@moltzap/${pkg}`);
+
 function allBuilt() {
   for (const pkg of REQUIRED) {
     const entry = join(vendorRoot, "packages", pkg, "dist", "index.js");
@@ -81,8 +87,8 @@ const pnpmArgs = [
 ];
 run("pnpm", pnpmArgs, vendorRoot);
 
-const buildFilters = REQUIRED.flatMap((pkg) => ["--filter", `./packages/${pkg}`]);
-run("pnpm", [...buildFilters, "-r", "build"], vendorRoot);
+const buildFilters = FILTER_BY_NAME.flatMap((name) => ["--filter", name]);
+run("pnpm", [...buildFilters, "run", "build"], vendorRoot);
 
 if (!allBuilt()) {
   console.error(
