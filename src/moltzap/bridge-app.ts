@@ -319,20 +319,14 @@ function _doBoot(
 
     // Wire admission-wait routing BEFORE app.start() so handlers are live
     // by the time the WS reconnects existing sessions or the bridge's seed
-    // session fires `app/sessionReady`. See PendingAdmission docstring.
+    // session fires `app/sessionReady`. The `resolve` / `reject` closures
+    // own their own timer + map cleanup — see `awaitSessionAdmission`.
     app.onSessionReady((session) => {
-      const pending = pendingAdmissions.get(session.id);
-      if (pending === undefined) return;
-      clearTimeout(pending.timer);
-      pendingAdmissions.delete(session.id);
-      pending.resolve();
+      pendingAdmissions.get(session.id)?.resolve();
     });
     app.onParticipantRejected((event: AppParticipantRejectedEvent) => {
       const pending = pendingAdmissions.get(event.sessionId);
-      if (pending === undefined) return;
-      if (!pending.invited.has(event.agentId)) return;
-      clearTimeout(pending.timer);
-      pendingAdmissions.delete(event.sessionId);
+      if (pending === undefined || !pending.invited.has(event.agentId)) return;
       pending.reject({
         _tag: "BridgeSessionAdmissionRejected",
         sessionId: event.sessionId,
@@ -394,12 +388,11 @@ export function shutdownBridgeApp(): Effect.Effect<void, never> {
     if (state === null) return;
     // Cancel any in-flight admission waits before stop() races them; the
     // pending fibers are awaiting the SDK's `app/sessionReady` event
-    // routing which is about to be torn down.
-    for (const [, pending] of state.pendingAdmissions) {
-      clearTimeout(pending.timer);
+    // routing which is about to be torn down. `reject` self-cleans the
+    // timer + map entry, so this loop snapshots the values before iterating.
+    for (const pending of [...state.pendingAdmissions.values()]) {
       pending.reject({ _tag: "BridgeAppNotBooted" });
     }
-    state.pendingAdmissions.clear();
     yield* state.app.stop();
     state.registeredKeys.clear();
     state.sessions.clear();
@@ -487,32 +480,27 @@ export function createBridgeSession(
 
     state.sessions.add(session.id);
 
-    // Wait for admission to complete (codex P1 #2 fix). When the server
-    // already considers the session active by the time apps/create
-    // resolved (it admits in parallel; small cohorts can complete in the
-    // same tick), getSession()?.isActive is already true and we
-    // short-circuit. Otherwise we register a pending entry and let
-    // `app.onSessionReady` / `onParticipantRejected` route the resolution.
+    // Wait for admission to complete: SDK `apps/create` returns before the
+    // server fork at `app-host.ts:735` finishes, so callers must not act
+    // on the session until `app/sessionReady` (or a `participantRejected`
+    // for one of our invitees, or a timeout) lands.
     if (invitedIds.length > 0) {
-      const cached = state.app.getSession(session.id);
-      if (cached === undefined || !cached.isActive) {
-        const timeoutMs =
-          request.admissionTimeoutMs ?? DEFAULT_ADMISSION_TIMEOUT_MS;
-        yield* awaitSessionAdmission(
-          state,
-          session.id,
-          invitedIds,
-          timeoutMs,
-        ).pipe(
-          // On admission failure, best-effort close the half-admitted
-          // session so we do not leak it to SIGTERM drain. We swallow the
-          // close error here; the admission error is the operator-actionable
-          // signal.
-          Effect.tapError(() =>
-            closeBridgeSession(session.id).pipe(Effect.ignore),
-          ),
-        );
-      }
+      const timeoutMs =
+        request.admissionTimeoutMs ?? DEFAULT_ADMISSION_TIMEOUT_MS;
+      yield* awaitSessionAdmission(
+        state,
+        session.id,
+        invitedIds,
+        timeoutMs,
+      ).pipe(
+        // On admission failure, best-effort close the half-admitted
+        // session so we do not leak it to SIGTERM drain. The close error
+        // is swallowed; the admission error is the operator-actionable
+        // signal.
+        Effect.tapError(() =>
+          closeBridgeSession(session.id).pipe(Effect.ignore),
+        ),
+      );
     }
 
     // Principle 2: the SDK hands back `Record<string, string>`; freeze
@@ -542,6 +530,16 @@ export function createBridgeSession(
  * fails with the matching `BridgeSessionError` tag on rejection or
  * timeout. Pure helper: state mutation lives in the shared
  * `pendingAdmissions` map and the handlers wired in `_doBoot`.
+ *
+ * Race correctness: `apps/create` admission can fan in fast enough that
+ * `app/sessionReady` arrives between the SDK's `createSession` resolving
+ * and us registering the pending entry. The post-registration
+ * `getSession()?.isActive` check below catches that case (the SDK has
+ * already swapped in the active handle inside `handleSessionReady`).
+ *
+ * Interrupt safety: returning a cleanup Effect from `Effect.async` makes
+ * the timer + pending entry release on caller cancellation; otherwise a
+ * dropped fiber would leak an entry until `timeoutMs` elapsed.
  */
 function awaitSessionAdmission(
   state: BridgeSingleton,
@@ -562,9 +560,38 @@ function awaitSessionAdmission(
     }, timeoutMs);
     state.pendingAdmissions.set(sessionId, {
       invited: new Set(invitedIds),
-      resolve: () => resume(Effect.void),
-      reject: (error) => resume(Effect.fail(error)),
+      resolve: () => {
+        clearTimeout(timer);
+        state.pendingAdmissions.delete(sessionId);
+        resume(Effect.void);
+      },
+      reject: (error) => {
+        clearTimeout(timer);
+        state.pendingAdmissions.delete(sessionId);
+        resume(Effect.fail(error));
+      },
       timer,
+    });
+    // Re-check after registration: catches the case where sessionReady
+    // fired (and was dropped by the handler because the entry didn't yet
+    // exist) in the microtask between createSession returning and this
+    // function running. JS single-threading guarantees no further events
+    // dispatch between this check and the resume completing.
+    const cached = state.app.getSession(sessionId);
+    if (cached !== undefined && cached.isActive) {
+      const pending = state.pendingAdmissions.get(sessionId);
+      if (pending !== undefined) {
+        clearTimeout(pending.timer);
+        state.pendingAdmissions.delete(sessionId);
+        resume(Effect.void);
+      }
+    }
+    // Cleanup on fiber interrupt: clear the timer and drop the entry so
+    // the resume callback held by the entry isn't called against a dead
+    // fiber once we no longer care about the answer.
+    return Effect.sync(() => {
+      clearTimeout(timer);
+      state.pendingAdmissions.delete(sessionId);
     });
   });
 }

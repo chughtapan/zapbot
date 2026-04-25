@@ -669,10 +669,11 @@ function resolveSelfRegisteredSenderId(
  * Per-roster state held inside the deps closure. Architect rev 4 §4.3
  * model: ONE bridge session per roster, invited = union of all worker
  * senderIds. The session lifetime tracks the roster's, not the per-
- * worker session's; `retireSession` decrements `activeWorkers` but does
- * NOT close the bridge session. `releaseRosterSession` closes the bridge
- * session and removes this entry — invoked by the roster manager after
- * a failed-spawn rollback or after the last member is retired.
+ * worker session's; `retireSession` releases the worker process and
+ * drops the `rosterIdBySession` entry, but does NOT close the bridge
+ * session. `releaseRosterSession` closes the bridge session and removes
+ * this entry — invoked by the roster manager after a failed-spawn
+ * rollback or after the last member is retired.
  */
 interface RosterContext {
   readonly bridgeSessionId: string | null;
@@ -680,7 +681,6 @@ interface RosterContext {
     string,
     { readonly agentKey: string; readonly senderId: MoltzapSenderId }
   >;
-  readonly activeWorkers: Set<string>;
 }
 
 export function createAoCliRosterManagerDeps(
@@ -688,6 +688,10 @@ export function createAoCliRosterManagerDeps(
   rosterOptions: AoCliRosterManagerOptions,
 ): RosterManagerDeps {
   const rosterContexts = new Map<RosterId, RosterContext>();
+  // Inverted index: session → owning roster. Maintained in lockstep with
+  // worker spawn/retire so `retireSession` finds its roster in O(1) and
+  // `releaseRoster` can defensively drain leftover entries (e.g. after
+  // partial-rollback paths) without an extra structure.
   const rosterIdBySession = new Map<string, RosterId>();
 
   /**
@@ -710,27 +714,34 @@ export function createAoCliRosterManagerDeps(
       rosterContexts.set(rosterId, {
         bridgeSessionId: null,
         premintedByLabel: new Map(),
-        activeWorkers: new Set(),
       });
       return ok(undefined);
     }
 
-    // Register every worker first so the union of senderIds is available
-    // before the single createBridgeSession call.
+    // Register every worker before the single createBridgeSession call.
+    // Workers are independent → run in parallel; first-failure-wins via
+    // Promise.all (rejects-on-first-reject). Earlier successful
+    // registrations on a failure path become server-side dead agents,
+    // which is the same shape as the prior per-spawn implementation.
+    const registrations = await Promise.all(
+      members.map(async (member) => {
+        const displayName = `${rosterId as string}-${member.displayLabel}`.slice(
+          0,
+          32,
+        );
+        const registration = await registerBridgeAgent({
+          serverUrl: auth.serverUrl,
+          registrationSecret: auth.registrationSecret,
+          displayName,
+        });
+        return { member, registration };
+      }),
+    );
     const premintedByLabel = new Map<
       string,
       { readonly agentKey: string; readonly senderId: MoltzapSenderId }
     >();
-    for (const member of members) {
-      const displayName = `${rosterId as string}-${member.displayLabel}`.slice(
-        0,
-        32,
-      );
-      const registration = await registerBridgeAgent({
-        serverUrl: auth.serverUrl,
-        registrationSecret: auth.registrationSecret,
-        displayName,
-      });
+    for (const { member, registration } of registrations) {
       if (registration._tag === "Err") {
         return err({
           _tag: "RegistrationFailed",
@@ -757,7 +768,6 @@ export function createAoCliRosterManagerDeps(
     rosterContexts.set(rosterId, {
       bridgeSessionId: sessionResult.right.sessionId,
       premintedByLabel,
-      activeWorkers: new Set(),
     });
     return ok(undefined);
   }
@@ -767,7 +777,7 @@ export function createAoCliRosterManagerDeps(
     if (ctx === undefined) return;
     // Close FIRST, then delete the context entry on success. If close
     // fails, leave the context intact so a SIGTERM drain (or a follow-up
-    // releaseRosterSession call) can retry — codex stamina round-1 P1 #3.
+    // releaseRosterSession call) can retry.
     if (ctx.bridgeSessionId !== null && ctx.bridgeSessionId !== "") {
       const closeResult = await Effect.runPromise(
         closeBridgeSession(ctx.bridgeSessionId).pipe(Effect.either),
@@ -776,16 +786,14 @@ export function createAoCliRosterManagerDeps(
         console.warn(
           `[roster] releaseRosterSession: closeBridgeSession failed for roster ${rosterId as string} (${closeResult.left._tag}); will retry on SIGTERM drain.`,
         );
-        // Leave rosterContexts entry intact so retry can find the
-        // bridgeSessionId.
         return;
       }
     }
-    // Drop session→roster mappings for any workers that retireSession
-    // already cleared (sanity sweep — should be empty when called after
-    // full retireRoster, but be defensive after partial-rollback paths).
-    for (const session of ctx.activeWorkers) {
-      rosterIdBySession.delete(session);
+    // Defensive sweep: drop any session→roster entries still pointing at
+    // this rosterId. retireSession normally clears them, but partial
+    // rollbacks can leave dirty entries when ao kill failed mid-cleanup.
+    for (const [session, owner] of [...rosterIdBySession]) {
+      if (owner === rosterId) rosterIdBySession.delete(session);
     }
     rosterContexts.delete(rosterId);
   }
@@ -895,7 +903,6 @@ export function createAoCliRosterManagerDeps(
         preminted !== null
           ? preminted.senderId
           : resolveSelfRegisteredSenderId(stdout, rosterId, member.displayLabel, sessionName);
-      ctx.activeWorkers.add(sessionName as string);
       rosterIdBySession.set(sessionName as string, rosterId);
       const rosterMember: RosterMember = {
         rosterId,
@@ -909,20 +916,12 @@ export function createAoCliRosterManagerDeps(
     },
     retireSession: async (session) => {
       // Per-roster session model: retireSession only takes the worker
-      // process down (`ao kill`) and decrements the per-roster
-      // activeWorkers refcount. The bridge session itself lives until
-      // `releaseRosterSession` is invoked by the roster manager — that's
-      // the architect rev 4 §4.3 lifetime contract, and the place where
-      // codex stamina round-1 P1 #3 (close-before-delete-on-success
-      // ordering) is enforced.
-      const rosterId = rosterIdBySession.get(session as string);
-      if (rosterId !== undefined) {
-        const ctx = rosterContexts.get(rosterId);
-        if (ctx !== undefined) {
-          ctx.activeWorkers.delete(session as string);
-        }
-        rosterIdBySession.delete(session as string);
-      }
+      // process down (`ao kill`) and drops the session→roster mapping.
+      // The bridge session itself lives until `releaseRosterSession` is
+      // invoked by the roster manager — architect rev 4 §4.3 lifetime
+      // contract — which is also where the close-before-delete-on-success
+      // ordering is enforced.
+      rosterIdBySession.delete(session as string);
       const killResult = await runAoCommand(options, [
         "kill",
         session as string,
