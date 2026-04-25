@@ -71,6 +71,29 @@ describe("worker-channel: env decode", () => {
     expect(result.error.raw).toBe("lemur");
   });
 
+  it("loadWorkerChannelEnv maps legacy AO_CALLER_TYPE='agent' to implementer (resume-path compat)", () => {
+    const result = loadWorkerChannelEnv({
+      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      MOLTZAP_AGENT_KEY: "key",
+      AO_CALLER_TYPE: "agent",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok") return;
+    expect(result.value.role).toBe("implementer");
+  });
+
+  it("loadWorkerChannelEnv honors MOLTZAP_WORKER_ROLE over AO_CALLER_TYPE", () => {
+    const result = loadWorkerChannelEnv({
+      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      MOLTZAP_AGENT_KEY: "key",
+      AO_CALLER_TYPE: "agent",
+      MOLTZAP_WORKER_ROLE: "reviewer",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok") return;
+    expect(result.value.role).toBe("reviewer");
+  });
+
   it("loadWorkerChannelEnv carries MOLTZAP_BRIDGE_AGENT_ID when present", () => {
     const result = loadWorkerChannelEnv({
       MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",

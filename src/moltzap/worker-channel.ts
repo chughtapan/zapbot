@@ -140,7 +140,17 @@ export function loadWorkerChannelEnv(
     });
   }
 
-  const rawRole = trim(env.AO_CALLER_TYPE) ?? "";
+  // AO_CALLER_TYPE emits "orchestrator" for the bridge and the legacy
+  // "agent" sentinel for generic worker launches (bin/ao-spawn-with-moltzap.ts
+  // resume path). An explicit MOLTZAP_WORKER_ROLE overrides; otherwise
+  // "agent" maps to "implementer" — a safe default for log tagging since
+  // the channel-plugin itself does not branch on role (rev 4 §5.5 — role
+  // is a publisher-intent label, not a server-enforced filter).
+  const explicitRole = trim(env.MOLTZAP_WORKER_ROLE);
+  const rawAoCaller = trim(env.AO_CALLER_TYPE) ?? "";
+  const rawRole =
+    explicitRole ??
+    (rawAoCaller === "agent" ? "implementer" : rawAoCaller);
   const decoded = decodeSessionRole(rawRole);
   if (decoded._tag === "Err") {
     return err({
