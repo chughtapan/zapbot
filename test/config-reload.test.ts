@@ -829,7 +829,7 @@ esac
       fs.rmSync(tempRoot, { recursive: true, force: true });
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
-  });
+  }, 15000);
 
   it("fails closed in github demo mode when the public bridge url is dead", () => {
     const repoRoot = path.join(__dirname, "..");

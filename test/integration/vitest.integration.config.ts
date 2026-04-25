@@ -1,21 +1,27 @@
 /**
  * test/integration/vitest.integration.config — integration-suite vitest config.
  *
- * Anchors: sbd#170 SPEC rev 2, §5 "CI integration fixture (post-Spike B,
- * operator-binding constraints)"; Spike B verdict (sbd#182): vitest
- * `globalSetup` + `standalone.js` subprocess + PGlite + 32-byte base64
- * `ENCRYPTION_MASTER_SECRET` + SIGTERM teardown.
+ * Anchors: sbd#170 SPEC rev 2, §5 CI fixture bullet; Spike B verdict (sbd#182);
+ * sbd#203 Phase 1.
  *
- * Architect stage — body throws. Implementation reads `globalSetup` +
- * `globalTeardown` from the files in this directory and sets `testTimeout`
- * high enough to amortize the 12–15 s cold boot budget spike B measured.
+ * globalSetup spawns the MoltZap standalone server once per suite (~12–15 s
+ * cold boot). testTimeout is set to 30 s per test to accommodate the
+ * server's async admission pipeline (admitAgentsAsync daemon fiber).
+ * fileParallelism is false: all test files share one server process and one
+ * PGlite DB; parallel file workers could produce interleaved agent names and
+ * race on the shared DB.
+ *
+ * Run with: bunx vitest run --config test/integration/vitest.integration.config.ts
  */
 
-// Stub exists so implement-* can fill in. vitest will import the default
-// export at runtime; the architect-stage body is a typed throw so an
-// accidental test invocation fails loudly instead of silently picking up
-// the unit-test config.
+import { defineConfig } from "vitest/config";
 
-export default (function stub(): never {
-  throw new Error("not implemented");
-})();
+export default defineConfig({
+  test: {
+    include: ["test/integration/**/*.integration.test.ts"],
+    globalSetup: ["test/integration/globalSetup.ts"],
+    testTimeout: 30_000,
+    hookTimeout: 35_000,
+    fileParallelism: false,
+  },
+});
