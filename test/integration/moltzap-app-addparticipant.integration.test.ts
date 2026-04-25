@@ -126,17 +126,12 @@ describe("moltzap app-sdk integration — late-joiner conversation admission", (
           ),
       );
 
-      // The RPC must succeed (Right) or fail with a typed RPC error.
-      // Failure is acceptable here if the helper agent is not the conversation
-      // owner; what matters is the RPC is reachable (no 5xx / connection error).
-      if (addResult._tag === "Left") {
-        // Allow permission-level RPC failures (not a transport/crash failure).
-        const err = addResult.left;
-        expect(typeof err).not.toBe("undefined");
-      } else {
-        // Success case: participant was added.
-        expect(addResult.right).toBeDefined();
-      }
+      // Dev-mode server (test-open secret) grants open access to all connected
+      // agents; conversations/addParticipant must succeed without a permission
+      // error. This is the concrete Spike A outcome: the primitive works E2E.
+      expect(addResult._tag).toBe("Right");
+      if (addResult._tag !== "Right") return;
+      expect(addResult.right).toBeDefined();
     } finally {
       await Effect.runPromise(helperClient.close());
     }

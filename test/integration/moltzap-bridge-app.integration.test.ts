@@ -137,7 +137,7 @@ describe("bridge-app integration: start-error-tag classification against live se
     __resetBridgeAppForTests();
   });
 
-  it("bootBridgeApp returns BridgeAppRegistrationFailed when registration secret is rejected (403)", async () => {
+  it("bootBridgeApp returns BridgeAppEnvInvalid when registration secret is absent from env", async () => {
     // Server has no YAML registration secret configured. This test triggers
     // HTTP-level registration failure by disabling MOLTZAP_DEV_MODE context
     // and using an empty env so loadBridgeIdentityEnv returns a missing-secret
@@ -171,12 +171,9 @@ describe("bridge-app integration: start-error-tag classification against live se
     expect(result._tag).toBe("Left");
     if (result._tag !== "Left") return;
     // Registration itself will fail (ECONNREFUSED) → BridgeAppRegistrationFailed.
-    // Both BridgeAppRegistrationFailed and BridgeAppConnectFailed are valid:
-    // registration occurs before WS connect, so ECONNREFUSED on the HTTP side
-    // gives BridgeAppRegistrationFailed.
-    expect(["BridgeAppRegistrationFailed", "BridgeAppConnectFailed"]).toContain(
-      result.left._tag,
-    );
+    // Registration occurs before WS connect, so ECONNREFUSED on the HTTP side
+    // surfaces as BridgeAppRegistrationFailed before any WS connect is attempted.
+    expect(result.left._tag).toBe("BridgeAppRegistrationFailed");
   });
 });
 
