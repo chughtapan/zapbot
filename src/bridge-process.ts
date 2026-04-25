@@ -113,8 +113,8 @@ export interface BridgeProcessLifecycle {
   readonly liveRuntime: () => BridgeRuntimeConfig | null;
 
   /**
-   * Trigger graceful shutdown from a non-signal source (boot probe
-   * failure, fatal config error). Idempotent. Resolves once `running.stop()`
+   * Trigger graceful shutdown from a non-signal source (fatal config
+   * error). Idempotent. Resolves once `running.stop()`
    * has finished and `process.exit` has been requested. Callers in
    * `Booting` may invoke this before any `RunningBridge` exists; the
    * lifecycle drops the exit through `deps.exit(1)`.

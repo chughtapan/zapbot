@@ -1142,7 +1142,7 @@ export function formatIngressError(error: IngressResolutionError): string {
  * SIGINT/SIGTERM shutdown; the HTTP server keeps the event loop alive
  * until `running.stop()` resolves and `process.exit` is requested.
  *
- * On config-load or reachability failure, the lifecycle exits with code 1.
+ * On config-load failure, the lifecycle exits with code 1.
  *
  * Race fixes (sbd#215, see `bridge-process.ts` module header):
  *   - Race 1: `installBridgeProcessLifecycle` is the FIRST line — signal
