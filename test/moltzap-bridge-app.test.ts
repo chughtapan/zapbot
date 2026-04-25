@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import {
   __resetBridgeAppForTests,
   bootBridgeApp,
@@ -170,5 +170,119 @@ describe("bridge-app: concurrent boot coalesces — singleton race guard (P1 #3 
     // Second attempt should start a fresh boot (not coalesce onto the cleared sentinel).
     await Effect.runPromise(bootBridgeApp(config).pipe(Effect.either));
     expect(fetchCount).toBe(2); // sentinel was cleared → new fetch
+  });
+});
+
+describe("bridge-app: sentinel cleanup under fiber interruption (Fix 1 — sbd#204)", () => {
+  // Regression for: a boot fiber interrupted between sentinel-assign and the
+  // success/failure clear leaves __bootInFlight permanently non-null, causing
+  // all subsequent bootBridgeApp callers to deadlock awaiting a Promise that
+  // will never resolve. Fix: Effect.ensuring in bootBridgeApp always clears
+  // __bootInFlight, even on interruption.
+
+  it("interrupted boot clears sentinel — subsequent boot starts fresh and does not deadlock", async () => {
+    // A Promise that the mock fetch awaits; we hold it open to keep the boot
+    // fiber suspended in the registration step so we can interrupt it.
+    let signalFetchStarted!: () => void;
+    const fetchStarted = new Promise<void>((res) => {
+      signalFetchStarted = res;
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      signalFetchStarted();
+      // Block indefinitely until the fiber is interrupted.
+      await new Promise<void>(() => {}); // never resolves
+      // Unreachable; TypeScript needs a return.
+      return new Response("ok", { status: 200 });
+    });
+
+    const config = {
+      serverUrl: "https://moltzap.example",
+      env: { ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "secret" },
+    };
+
+    // Fork the boot, wait until it is in-flight, then interrupt.
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const bootFiber = yield* Effect.fork(bootBridgeApp(config));
+        // Wait until fetch has been called (sentinel is assigned, boot is async).
+        yield* Effect.promise(() => fetchStarted);
+        // Interrupt. Effect.ensuring in bootBridgeApp clears __bootInFlight.
+        yield* Fiber.interrupt(bootFiber);
+      }),
+    );
+
+    // After interrupt: sentinel should be null. Re-mock fetch to return 403.
+    let freshFetchCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      freshFetchCount++;
+      return new Response("forbidden", { status: 403 });
+    });
+
+    // Fresh boot must NOT deadlock — it should start a new registration call.
+    const result = await Effect.runPromise(
+      bootBridgeApp(config).pipe(Effect.either),
+    );
+
+    expect(freshFetchCount).toBe(1); // new fetch call confirms sentinel was cleared
+    expect(result._tag).toBe("Left");
+    if (result._tag === "Left") {
+      expect(result.left._tag).toBe("BridgeAppRegistrationFailed");
+    }
+  });
+});
+
+describe("bridge-app: shutdown-vs-boot ordering (Fix 2 — sbd#204)", () => {
+  // Regression for: shutdownBridgeApp called while a boot is in-flight
+  // would no-op immediately (singleton still null), then the boot would
+  // complete and leave a ghost MoltZapApp that nothing tears down.
+  // Fix: shutdownBridgeApp awaits __bootInFlight before inspecting the
+  // singleton (option a — see function docstring).
+
+  it("shutdownBridgeApp waits for in-flight boot to settle before tearing down", async () => {
+    let allowBootToComplete!: () => void;
+    const bootCanComplete = new Promise<void>((res) => {
+      allowBootToComplete = res;
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      await bootCanComplete;
+      return new Response("forbidden", { status: 403 });
+    });
+
+    const config = {
+      serverUrl: "https://moltzap.example",
+      env: { ZAPBOT_MOLTZAP_REGISTRATION_SECRET: "secret" },
+    };
+
+    // Start boot; do not await yet.
+    const bootPromise = Effect.runPromise(
+      bootBridgeApp(config).pipe(Effect.either),
+    );
+
+    // Yield one tick so boot has time to assign the sentinel.
+    await new Promise<void>((res) => setTimeout(res, 0));
+
+    // Start shutdown while boot is in-flight.
+    // With Fix 2: shutdown awaits __bootInFlight, so it must block here.
+    let shutdownSettled = false;
+    const shutdownPromise = Effect.runPromise(shutdownBridgeApp()).then(() => {
+      shutdownSettled = true;
+    });
+
+    // Yield another tick; without Fix 2, shutdown would have resolved already.
+    await new Promise<void>((res) => setTimeout(res, 0));
+    expect(shutdownSettled).toBe(false); // shutdown is still waiting for boot
+
+    // Unblock the boot (registration returns 403; __bridgeSingleton stays null).
+    allowBootToComplete();
+
+    await bootPromise;
+    await shutdownPromise;
+
+    // Both settled; no ghost singleton.
+    expect(shutdownSettled).toBe(true);
+    expect(bridgeAgentId()).toBeNull();
+    expect(currentBridgeApp()).toBeNull();
   });
 });

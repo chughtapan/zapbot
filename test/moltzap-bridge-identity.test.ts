@@ -10,6 +10,7 @@ import {
   asBridgeAgentId,
   bridgeAgentIdAsSenderId,
   loadBridgeIdentityEnv,
+  normalizeServerUrl,
   registerBridgeAgent,
 } from "../src/moltzap/bridge-identity.ts";
 
@@ -180,5 +181,37 @@ describe("bridge-identity: branded type", () => {
     const sender = bridgeAgentIdAsSenderId(id);
     // Both projections share the same underlying string.
     expect(sender as unknown as string).toBe("bridge-xyz");
+  });
+});
+
+describe("bridge-identity: normalizeServerUrl (Fix 3 — sbd#204)", () => {
+  // The vendor ws-client appends "/ws" unconditionally. A URL already ending
+  // in "/ws" produces "/ws/ws". Both forms must normalize to the same base.
+
+  it("bare ws URL is unchanged", () => {
+    expect(normalizeServerUrl("ws://host:3000")).toBe("ws://host:3000");
+  });
+
+  it("URL with trailing /ws is stripped to bare URL", () => {
+    expect(normalizeServerUrl("ws://host:3000/ws")).toBe("ws://host:3000");
+  });
+
+  it("URL with trailing /ws/ (slash after ws) is stripped to bare URL", () => {
+    expect(normalizeServerUrl("ws://host:3000/ws/")).toBe("ws://host:3000");
+  });
+
+  it("URL with trailing / is stripped", () => {
+    expect(normalizeServerUrl("ws://host:3000/")).toBe("ws://host:3000");
+  });
+
+  it("http and https schemes are also normalized", () => {
+    expect(normalizeServerUrl("https://host:3000/ws")).toBe("https://host:3000");
+    expect(normalizeServerUrl("http://host:3000/")).toBe("http://host:3000");
+  });
+
+  it("both ws://host:port and ws://host:port/ws produce the same normalized URL", () => {
+    const base = normalizeServerUrl("ws://host:3000");
+    const withWs = normalizeServerUrl("ws://host:3000/ws");
+    expect(base).toBe(withWs);
   });
 });

@@ -66,6 +66,7 @@ import {
 import type { ConversationKey } from "./conversation-keys.ts";
 import {
   loadBridgeIdentityEnv,
+  normalizeServerUrl,
   registerBridgeAgent,
   type BridgeAgentId,
   type BridgeIdentity,
@@ -182,11 +183,24 @@ function classifyStartError(
  *
  * Race-free: `__bootInFlight` is assigned synchronously (no yield* before it)
  * so the second concurrent caller always sees the sentinel and coalesces.
+ *
+ * **Fix 1 — sentinel cleanup under interruption (sbd#204).**
+ * Sentinel clear is wrapped in `Effect.ensuring` so a fiber interrupted
+ * between sentinel-assign and the success/failure clear still clears
+ * `__bootInFlight`. Without this, an interrupted boot fiber leaves the
+ * sentinel permanently non-null and all future callers deadlock awaiting
+ * a Promise that will never resolve.
+ * Codex delta-review concern (a), PR #338 post-cleanup.
  */
 export function bootBridgeApp(
   config: BridgeAppBootConfig,
 ): Effect.Effect<BridgeAppHandle, BridgeAppBootError> {
-  return Effect.gen(function* () {
+  // Resolver/rejecter captured at function scope so the Effect.ensuring
+  // finalizer can close over them regardless of where the fiber stops.
+  let resolveInFlight: ((h: BridgeAppHandle) => void) | null = null;
+  let rejectInFlight: ((e: BridgeAppBootError) => void) | null = null;
+
+  const core = Effect.gen(function* () {
     // Already booted: reject immediately.
     if (__bridgeSingleton !== null) {
       return yield* Effect.fail<BridgeAppBootError>({
@@ -195,8 +209,8 @@ export function bootBridgeApp(
     }
 
     // Boot in progress: coalesce — await the same in-flight result.
-    // If the in-flight boot fails, the rejection reason is the BridgeAppBootError
-    // from the first caller, so the second caller surfaces the same error tag.
+    // If the in-flight boot fails (or is interrupted), the rejection reason
+    // surfaces via the catch below.
     if (__bootInFlight !== null) {
       return yield* Effect.tryPromise({
         try: () => __bootInFlight!,
@@ -207,8 +221,6 @@ export function bootBridgeApp(
     // First caller: assign the sentinel SYNCHRONOUSLY before the first yield*.
     // JS is single-threaded — no other fiber can enter between the null-check
     // above and this assignment, closing the TOCTOU window.
-    let resolveInFlight!: (h: BridgeAppHandle) => void;
-    let rejectInFlight!: (e: BridgeAppBootError) => void;
     __bootInFlight = new Promise<BridgeAppHandle>((res, rej) => {
       resolveInFlight = res;
       rejectInFlight = rej;
@@ -224,16 +236,40 @@ export function bootBridgeApp(
     if (bootResult._tag === "Left") {
       // Clear sentinel so a retry starts a fresh boot.
       __bootInFlight = null;
-      rejectInFlight(bootResult.left);
+      rejectInFlight!(bootResult.left);
+      resolveInFlight = null;
+      rejectInFlight = null;
       return yield* Effect.fail(bootResult.left);
     }
 
     // Success: __bridgeSingleton set inside _doBoot.
     // Clear sentinel then resolve so concurrent waiters get the same handle.
     __bootInFlight = null;
-    resolveInFlight(bootResult.right);
+    resolveInFlight!(bootResult.right);
+    resolveInFlight = null;
+    rejectInFlight = null;
     return bootResult.right;
   });
+
+  // Ensuring finalizer: fires after success, failure, AND fiber interruption.
+  // On the success/failure paths __bootInFlight is already null (cleared above),
+  // so this is a no-op. On interruption it may still be set; clear it and reject
+  // the in-flight promise so any coalescing callers are unblocked.
+  return core.pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (__bootInFlight !== null) {
+          __bootInFlight = null;
+          rejectInFlight?.({
+            _tag: "BridgeAppEnvInvalid",
+            reason: "boot fiber interrupted before completing",
+          });
+          resolveInFlight = null;
+          rejectInFlight = null;
+        }
+      }),
+    ),
+  );
 }
 
 /**
@@ -248,6 +284,15 @@ function _doBoot(
     const env = config.env ?? process.env;
     const logger = config.logger ?? defaultLogger();
 
+    // Fix 3 (sbd#204): normalize the server URL before any use. The vendor
+    // ws-client appends "/ws" unconditionally; a URL already ending in "/ws"
+    // produces "/ws/ws" at connect time. Strip trailing "/ws" and "/" here
+    // so both `ws://host:port` and `ws://host:port/ws` reach the SDK as
+    // `ws://host:port`. normalizeServerUrl is in bridge-identity.ts (the
+    // boundary-decode module) and is also applied inside toHttpBaseUrl for
+    // the HTTP registration endpoint.
+    const serverUrl = normalizeServerUrl(config.serverUrl);
+
     const envResult = loadBridgeIdentityEnv(env);
     if (envResult._tag === "Err") {
       return yield* Effect.fail<BridgeAppBootError>({
@@ -260,7 +305,7 @@ function _doBoot(
 
     const registration = yield* Effect.promise(() =>
       registerBridgeAgent({
-        serverUrl: config.serverUrl,
+        serverUrl,
         registrationSecret: envResult.value.registrationSecret,
         displayName: envResult.value.displayName,
       }),
@@ -275,7 +320,7 @@ function _doBoot(
 
     const manifest = buildUnionManifest(appIdentity);
     const app = new MoltZapApp({
-      serverUrl: config.serverUrl,
+      serverUrl,
       agentKey: identity.agentKey,
       manifest,
       logger,
@@ -343,9 +388,33 @@ export function bridgeAgentId(): BridgeAgentId | null {
  * BEFORE `shutdownBridgeApp`. If the process exits via Effect defect or
  * hard-kill before the drain runs, the drain budget is bypassed and the
  * leak class falls back to moltzap#230's accepted shape.
+ *
+ * **Fix 2 — shutdown-vs-boot ordering (sbd#204, option a).**
+ * If a boot is in-flight when `shutdownBridgeApp` is called, it awaits
+ * the boot to settle (success or failure) before tearing down the
+ * resulting singleton. Without this, `shutdownBridgeApp` would no-op
+ * (singleton is still null), the boot would complete and install a live
+ * `MoltZapApp`, and nothing would ever stop it — a ghost singleton.
+ *
+ * Option (b) — cancelling the boot fiber — was considered and rejected:
+ * `bootBridgeApp` is an Effect whose fiber is owned by the caller;
+ * `shutdownBridgeApp` holds no fiber handle and cannot interrupt it
+ * without API surface that is not in the plan. Option (a) is safe,
+ * composes correctly with Fix 1 (`Effect.ensuring` guarantees
+ * `__bootInFlight` is always settled before clearing, so this await
+ * cannot deadlock), and requires zero new public surface.
+ * Codex delta-review concern (a), PR #338 post-cleanup.
  */
 export function shutdownBridgeApp(): Effect.Effect<void, never> {
   return Effect.gen(function* () {
+    // Await any in-flight boot so we do not miss a singleton that is still
+    // being constructed. The Promise settles on both success and failure
+    // (reject path is caught via the no-op second argument).
+    const inFlight = __bootInFlight;
+    if (inFlight !== null) {
+      yield* Effect.promise(() => inFlight.then(() => {}, () => {}));
+    }
+
     const state = __bridgeSingleton;
     if (state === null) return;
     yield* state.app.stop();
