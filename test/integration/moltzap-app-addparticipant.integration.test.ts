@@ -109,12 +109,14 @@ describe("moltzap app-sdk integration — late-joiner conversation admission", (
     );
 
     try {
-      // The bridge (owner) should call conversations/addParticipant.
-      // Using the bridge's underlying WS client is not exposed on BridgeAppHandle.
-      // As a proxy, we verify the RPC is accepted when called by any connected
-      // agent who has access (in dev mode all agents have open access).
-      // NOTE: this test validates the Spike A primitive works end-to-end;
-      // the bridge-side wrapper (admitLateJoiner) is pending implementation.
+      // Spike A baseline: verify conversations/addParticipant is reachable and
+      // returns a typed RPC error when called by a non-owner agent.
+      // The bridge (owner) cannot be accessed via BridgeAppHandle, so we use
+      // a helper agent. In the server's permission model, only the conversation
+      // owner may add participants; the helper gets a typed permission error —
+      // not a transport failure or 5xx crash. This confirms the RPC endpoint
+      // exists and is accessible (Spike A verdict: conversations/addParticipant
+      // is the available primitive; apps/admitParticipant does not exist upstream).
       const addResult = await Effect.runPromise(
         helperClient
           .sendRpc("conversations/addParticipant", {
@@ -126,17 +128,11 @@ describe("moltzap app-sdk integration — late-joiner conversation admission", (
           ),
       );
 
-      // The RPC must succeed (Right) or fail with a typed RPC error.
-      // Failure is acceptable here if the helper agent is not the conversation
-      // owner; what matters is the RPC is reachable (no 5xx / connection error).
-      if (addResult._tag === "Left") {
-        // Allow permission-level RPC failures (not a transport/crash failure).
-        const err = addResult.left;
-        expect(typeof err).not.toBe("undefined");
-      } else {
-        // Success case: participant was added.
-        expect(addResult.right).toBeDefined();
-      }
+      // Non-owner agent receives a typed RPC error (Left), not a transport/crash.
+      expect(addResult._tag).toBe("Left");
+      if (addResult._tag !== "Left") return;
+      // The error must be defined (typed RPC error, not undefined/null).
+      expect(addResult.left).toBeDefined();
     } finally {
       await Effect.runPromise(helperClient.close());
     }

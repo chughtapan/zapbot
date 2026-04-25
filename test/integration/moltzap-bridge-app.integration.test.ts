@@ -137,11 +137,11 @@ describe("bridge-app integration: start-error-tag classification against live se
     __resetBridgeAppForTests();
   });
 
-  it("bootBridgeApp returns BridgeAppRegistrationFailed when registration secret is rejected (403)", async () => {
+  it("bootBridgeApp returns BridgeAppEnvInvalid when registration secret is missing from env", async () => {
     // Server has no YAML registration secret configured. This test triggers
-    // HTTP-level registration failure by disabling MOLTZAP_DEV_MODE context
-    // and using an empty env so loadBridgeIdentityEnv returns a missing-secret
-    // error, which surfaces as BridgeAppEnvInvalid.
+    // env-level validation failure: loadBridgeIdentityEnv rejects before
+    // reaching the network when ZAPBOT_MOLTZAP_REGISTRATION_SECRET is absent,
+    // which surfaces as BridgeAppEnvInvalid (not BridgeAppRegistrationFailed).
     const result = await Effect.runPromise(
       bootBridgeApp({
         serverUrl: HTTP_BASE,
@@ -157,10 +157,10 @@ describe("bridge-app integration: start-error-tag classification against live se
     expect(result.left._tag).toBe("BridgeAppEnvInvalid");
   });
 
-  it("bootBridgeApp returns BridgeAppConnectFailed when server URL is unreachable (transport error classified as AuthError)", async () => {
-    // Use a port that is not listening. The WS connect fails with a transport
-    // error which the SDK wraps in AuthError → classifyStartError maps it to
-    // BridgeAppConnectFailed.
+  it("bootBridgeApp returns BridgeAppRegistrationFailed when server URL is unreachable", async () => {
+    // Use a port that is not listening. Registration (HTTP POST) is attempted
+    // before the WS connect, so ECONNREFUSED surfaces on the HTTP side first →
+    // BridgeAppRegistrationFailed (not BridgeAppConnectFailed).
     const result = await Effect.runPromise(
       bootBridgeApp({
         serverUrl: "http://localhost:19999",
@@ -170,13 +170,7 @@ describe("bridge-app integration: start-error-tag classification against live se
 
     expect(result._tag).toBe("Left");
     if (result._tag !== "Left") return;
-    // Registration itself will fail (ECONNREFUSED) → BridgeAppRegistrationFailed.
-    // Both BridgeAppRegistrationFailed and BridgeAppConnectFailed are valid:
-    // registration occurs before WS connect, so ECONNREFUSED on the HTTP side
-    // gives BridgeAppRegistrationFailed.
-    expect(["BridgeAppRegistrationFailed", "BridgeAppConnectFailed"]).toContain(
-      result.left._tag,
-    );
+    expect(result.left._tag).toBe("BridgeAppRegistrationFailed");
   });
 });
 

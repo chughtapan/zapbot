@@ -24,7 +24,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it, inject } from "vitest";
-import { Effect, Duration } from "effect";
+import { Effect } from "effect";
 import {
   __resetBridgeAppForTests,
   bootBridgeApp,

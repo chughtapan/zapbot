@@ -488,7 +488,10 @@ export function shutdownBridgeApp(): Effect.Effect<void, never> {
     // (reject path is caught via the no-op second argument).
     const inFlight = __bootInFlight;
     if (inFlight !== null) {
-      yield* Effect.promise(() => inFlight.then(() => {}, () => {}));
+      yield* Effect.tryPromise({
+        try: () => inFlight,
+        catch: () => undefined,
+      }).pipe(Effect.ignore);
     }
 
     const state = __bridgeSingleton;
