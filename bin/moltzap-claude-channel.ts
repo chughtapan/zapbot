@@ -7,10 +7,9 @@
  * resolution, AO resume metadata, debug logging) lives in
  * `src/moltzap/worker-channel.ts`.
  *
- * The transitional self-register path (sbd#205 deletion target) is
- * still reachable through `resolveWorkerCredentials`. Once sbd#205
- * lands, this bin can collapse to env decode + bootWorkerChannel +
- * signal handlers (architect rev 4 ≤50 LOC end state).
+ * Workers receive pre-minted credentials from the bridge via spawn env
+ * (`MOLTZAP_AGENT_KEY` + `MOLTZAP_LOCAL_SENDER_ID`); the self-register
+ * path was removed in PR #343 (sbd#205).
  */
 
 import process from "node:process";

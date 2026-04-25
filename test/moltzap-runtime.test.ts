@@ -134,7 +134,6 @@ describe("moltzap runtime / buildMoltzapProcessEnv", () => {
     if (result._tag !== "Ok" || result.value._tag !== "MoltzapRegistration") return;
     expect(buildMoltzapProcessEnv(result.value)).toEqual({
       MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
-      MOLTZAP_REGISTRATION_SECRET: "reg-secret",
     });
   });
 });

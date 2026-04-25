@@ -194,6 +194,10 @@ function sleep(ms: number): Promise<void> {
  * Best-effort: kill any process listening on `port` before we spawn our own.
  * Uses `fuser -k PORT/tcp`; silently swallows errors (fuser absent, no
  * process, permission denied). Waits up to 800 ms for the port to be released.
+ *
+ * Port-scoped (not PID-scoped): we only know the port at global-setup time,
+ * not the PID of any prior test-server instance. PID-scoping would require
+ * persisting the child PID across vitest worker boundaries; that is deferred.
  */
 async function killPortIfOccupied(port: number): Promise<void> {
   try {
