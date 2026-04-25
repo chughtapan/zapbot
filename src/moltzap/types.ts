@@ -29,7 +29,3 @@ export function asMoltzapSenderId(s: string): MoltzapSenderId {
   return s as MoltzapSenderId;
 }
 
-/** Exhaustiveness helper (mirrors `src/types.ts`). */
-export function absurd(x: never): never {
-  throw new Error(`unreachable: ${JSON.stringify(x)}`);
-}
