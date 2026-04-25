@@ -115,6 +115,10 @@ export type BridgeAppBootError =
       // one union; keyed by the original tag for operator parity.
       readonly _tag: "BridgeAppEnvInvalid";
       readonly reason: string;
+    }
+  | {
+      readonly _tag: "BridgeAppBootInterrupted";
+      readonly reason: string;
     };
 
 // ── Public handle ───────────────────────────────────────────────────
@@ -261,7 +265,7 @@ export function bootBridgeApp(
         if (__bootInFlight !== null) {
           __bootInFlight = null;
           rejectInFlight?.({
-            _tag: "BridgeAppEnvInvalid",
+            _tag: "BridgeAppBootInterrupted",
             reason: "boot fiber interrupted before completing",
           });
           resolveInFlight = null;
