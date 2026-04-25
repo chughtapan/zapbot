@@ -90,7 +90,6 @@ Supported modes:
 |---|---|
 | `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for each spawned worker; this takes precedence over a static API key if both are set |
 | `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_API_KEY` | pass through a pre-provisioned MoltZap agent key to the runtime |
-| `ZAPBOT_MOLTZAP_ALLOWED_SENDERS` | optional comma-separated sender allowlist forwarded to the session runtime |
 
 If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap.
 
@@ -163,7 +162,6 @@ GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
 # ZAPBOT_MOLTZAP_SERVER_URL=wss://moltzap.example
 # ZAPBOT_MOLTZAP_API_KEY=...
 # ZAPBOT_MOLTZAP_REGISTRATION_SECRET=...
-# ZAPBOT_MOLTZAP_ALLOWED_SENDERS=agent-a,agent-b
 ```
 
 `start.sh` automatically points `ZAPBOT_CONFIG` at `./agent-orchestrator.yaml`,

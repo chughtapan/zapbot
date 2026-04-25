@@ -23,6 +23,7 @@ import {
 import { __resetBridgeAppForTests } from "../src/moltzap/bridge-app.ts";
 import { asMoltzapSenderId } from "../src/moltzap/types.ts";
 import {
+  asAoSessionName,
   asIssueNumber,
   asProjectName,
 } from "../src/types.ts";
@@ -155,6 +156,32 @@ describe("createAoCliRosterManagerDeps — spawn-time createBridgeSession wiring
     expect(result.error._tag).toBe("ReservedMcpKeyCollision");
     // Registration must NOT have fired — reserved-key check is the first
     // gate.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("createAoCliRosterManagerDeps — bridge session lifecycle", () => {
+  it("retireSession of an unknown session does not call closeBridgeSession (only ao kill)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const deps = createAoCliRosterManagerDeps(
+      {
+        configPath: null,
+        env: { PATH: "/nonexistent" },
+        timeoutMs: 1_000,
+      },
+      {
+        orchestratorSenderId: asMoltzapSenderId("orch-1"),
+        moltzapAuth: null,
+      },
+    );
+
+    // Session was never spawned through this dep, so the internal
+    // sessionId map has no entry. retireSession should run only `ao kill`
+    // (which fails because PATH is bogus) and never touch the bridge.
+    const result = await deps.retireSession(asAoSessionName("ghost"));
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("RetireReleaseFailed");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

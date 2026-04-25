@@ -660,6 +660,11 @@ export function createAoCliRosterManagerDeps(
   options: AoCliOptions,
   rosterOptions: AoCliRosterManagerOptions,
 ): RosterManagerDeps {
+  // Per-spawn bridge sessionIds keyed by AO session name. Populated when
+  // `mintWorkerCreds` returns a non-null result; consulted in
+  // `retireSession` so retire/rollback closes the bridge session via
+  // `apps/closeSession` rather than leaking it to SIGTERM drain.
+  const bridgeSessionsBySession = new Map<string, string>();
   return {
     spawnSession: async ({ rosterId, member, issue, projectName }) => {
       // Sentinel-marked reserved-key collision: if the caller passed a
@@ -759,6 +764,9 @@ export function createAoCliRosterManagerDeps(
         preMinted !== null
           ? preMinted.senderId
           : resolveSelfRegisteredSenderId(stdout, rosterId, member.displayLabel, sessionName);
+      if (preMinted !== null) {
+        bridgeSessionsBySession.set(sessionName as string, preMinted.sessionId);
+      }
       const rosterMember: RosterMember = {
         rosterId,
         session: sessionName,
@@ -770,6 +778,27 @@ export function createAoCliRosterManagerDeps(
       return ok(rosterMember);
     },
     retireSession: async (session) => {
+      // Close the bridge session FIRST so admission is revoked even if
+      // `ao kill` later fails — otherwise the worker remains admitted on
+      // the bridge's manifest conversations until SIGTERM drain. Bridge
+      // close is best-effort: if it fails we still try `ao kill` and
+      // surface only the kill error to the manager (the bridge close
+      // failure is logged below). The session is dropped from the local
+      // tracking map either way; on retry the map miss makes close a
+      // no-op, which is safe.
+      const bridgeSessionId = bridgeSessionsBySession.get(session as string);
+      if (bridgeSessionId !== undefined) {
+        bridgeSessionsBySession.delete(session as string);
+        const closeResult = await Effect.runPromise(
+          closeBridgeSession(bridgeSessionId).pipe(Effect.either),
+        );
+        if (closeResult._tag === "Left") {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[roster] closeBridgeSession failed for ${bridgeSessionId} (${closeResult.left._tag}); session will leak until SIGTERM drain.`,
+          );
+        }
+      }
       const killResult = await runAoCommand(options, [
         "kill",
         session as string,
