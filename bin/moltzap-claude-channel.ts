@@ -29,6 +29,10 @@ const log = (...args: unknown[]): void => console.error("[moltzap-channel]", ...
 const debug = createWorkerDebugLogger(process.env);
 debug("boot");
 
+process.on("unhandledRejection", (err) => {
+  log("Unhandled rejection (non-fatal):", err instanceof Error ? err.message : err);
+});
+
 const credsResult = await resolveWorkerCredentials(process.env);
 if (credsResult._tag === "Err") fatal(formatWorkerCredentialsError(credsResult.error));
 const creds = credsResult.value;
