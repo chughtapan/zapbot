@@ -601,10 +601,10 @@ function findLinkedPullRequest(
  * Cross-repo guard for durable mirroring. GitHub issue events surface
  * cross-references from any repository the viewer can see; the mirror
  * path posts to `anchorRepo`, so a cross-repo PR number would either
- * mirror to the WRONG repo or hit a 404. When `repository_url` is
- * present, require it to match `anchorRepo`. When absent (legacy or
- * partial fixtures), trust same-repo to preserve backward compatibility
- * with callers that did not surface the field.
+ * mirror to the WRONG repo or hit a 404. Real GitHub events always
+ * carry `repository_url` on cross-referenced sources; an absent field
+ * means a malformed/spoofed/proxied event and the conservative answer
+ * is "do not mirror." Tests must construct fixtures with the field set.
  */
 function isSameRepoSource(
   source: IssueEventSource | null | undefined,
@@ -615,7 +615,7 @@ function isSameRepoSource(
   }
   const repoUrl = source.pull_request?.repository_url ?? source.issue?.repository_url ?? null;
   if (repoUrl === null || repoUrl === undefined) {
-    return true;
+    return false;
   }
   return repoUrl.endsWith(`/repos/${anchorRepo as unknown as string}`);
 }

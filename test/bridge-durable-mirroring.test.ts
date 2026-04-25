@@ -220,7 +220,13 @@ describe("handleClassifiedWebhook durable mirroring", () => {
           {
             event: "cross-referenced",
             created_at: "2026-04-20T10:00:00Z",
-            source: { type: "pull_request", pull_request: { number: 17 } },
+            source: {
+              type: "pull_request",
+              pull_request: {
+                number: 17,
+                repository_url: "https://api.github.com/repos/acme/app",
+              },
+            },
           },
           ...Array.from({ length: 99 }, (_, index) => ({
             event: "labeled",
@@ -234,7 +240,13 @@ describe("handleClassifiedWebhook durable mirroring", () => {
           {
             event: "cross-referenced",
             created_at: "2026-04-20T11:00:00Z",
-            source: { type: "pull_request", pull_request: { number: 23 } },
+            source: {
+              type: "pull_request",
+              pull_request: {
+                number: 23,
+                repository_url: "https://api.github.com/repos/acme/app",
+              },
+            },
           },
         ]);
       }
