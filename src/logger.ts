@@ -12,12 +12,7 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 };
 
 const LOG_DIR = path.join(os.homedir(), ".zapbot", "logs");
-
-function ensureLogDir(): void {
-  if (!fs.existsSync(LOG_DIR)) {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-  }
-}
+fs.mkdirSync(LOG_DIR, { recursive: true });
 
 function getLogFilePath(): string {
   const date = new Date().toISOString().slice(0, 10);
@@ -50,13 +45,10 @@ class Logger {
     const timestamp = new Date().toISOString();
     const line = `${timestamp} ${level.toUpperCase().padEnd(5)} [${this.component}] ${message}${formatKv(kv)}`;
 
-    // Write to stdout
     const stream = level === "error" ? process.stderr : process.stdout;
     stream.write(line + "\n");
 
-    // Append to log file (async, non-blocking)
     try {
-      ensureLogDir();
       fs.appendFile(getLogFilePath(), line + "\n", (err) => {
         if (err) process.stderr.write(`[log write failed: ${err.message}]\n`);
       });

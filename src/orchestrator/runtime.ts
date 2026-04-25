@@ -10,7 +10,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -452,12 +452,10 @@ export function createAoCliControlHost(options: AoCliOptions): AoControlHost {
       }
       return ok(undefined);
     } finally {
-      if (existsSync(tempFile)) {
-        try {
-          unlinkSync(tempFile);
-        } catch {
-          // best effort cleanup
-        }
+      try {
+        unlinkSync(tempFile);
+      } catch {
+        // best effort cleanup
       }
     }
   }
