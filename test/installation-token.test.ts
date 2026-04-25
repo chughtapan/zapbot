@@ -3,7 +3,7 @@ import {
   handleInstallationTokenRequest,
   verifyBearer,
   type InstallationTokenDeps,
-} from "../v2/http/routes/installation-token.js";
+} from "../src/http/routes/installation-token.js";
 
 const API_KEY = "test-zapbot-api-key-abcdef0123456789";
 const FAKE_EXPIRES_AT = "2026-04-18T01:00:00Z";

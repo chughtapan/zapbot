@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -58,7 +58,7 @@ exit 1
 
     const config = readFileSync(configPath, "utf8");
     expect(config).toContain("repo: owner/example-repo");
-    expect(config).toContain(`path: ${projectDir}`);
+    expect(config).toContain(`path: ${realpathSync(projectDir)}`);
 
     const configJson = JSON.parse(readFileSync(configJsonPath, "utf8")) as Record<string, unknown>;
     expect(typeof configJson.webhookSecret).toBe("string");

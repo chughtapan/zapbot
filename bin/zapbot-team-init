@@ -47,7 +47,7 @@ if [ -z "$GITHUB_USER" ]; then
 fi
 
 REPO_NAME=$(basename "$ZAPBOT_REPO")
-PROJECT_DIR=$(pwd)
+PROJECT_DIR=$(pwd -P)
 
 LABELS=(
   "zapbot-plan:0E8A16:Plan published via zapbot"
