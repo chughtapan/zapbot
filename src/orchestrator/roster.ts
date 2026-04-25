@@ -659,7 +659,6 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
     const firstFailure = results.find(
       (r): r is PromiseRejectedResult => r.status === "rejected",
     );
-    if (firstFailure) return err(firstFailure.reason);
     const firstErr = results
       .filter(
         (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof retireMember>>> =>
@@ -667,12 +666,17 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
       )
       .map((r) => r.value)
       .find((v) => v._tag === "Err");
-    if (firstErr?._tag === "Err") return err(firstErr.error);
+    const retireError = firstFailure
+      ? err(firstFailure.reason as RosterTrackError | RosterRetireError)
+      : firstErr
+        ? err(firstErr.error)
+        : null;
     // Architect rev 4 §4.3: bridge session lifetime tracks the roster's,
-    // not the per-worker session's. Close the bridge session AFTER every
-    // member is down so admission is revoked + the session's
-    // `apps/closeSession` call lands.
+    // not the per-worker session's. Release ALWAYS (success or partial
+    // failure) so the roster bridge session does not leak when a member
+    // retirement fails mid-flight.
     await deps.releaseRosterSession(rosterId);
+    if (retireError) return retireError;
     return ok(undefined);
   }
 

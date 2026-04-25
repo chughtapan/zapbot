@@ -308,7 +308,7 @@ describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
     expect(reloadCount).toBe(1);
   });
 
-  it("probe returning false is non-fatal in github-demo mode — bridge starts normally", async () => {
+  it("probe returning false is non-fatal in github-demo mode — bridge starts and logs a warning", async () => {
     // runBridgeProcess passes async () => true as isPublicUrlReachable during
     // initial config load (bridge not live yet). The post-boot probe is the
     // separate `overrides.probe` below, which simulates a hairpin-NAT host.
@@ -325,15 +325,29 @@ describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
       ZAPBOT_BRIDGE_URL: "http://bridge.example.com",
     };
 
-    // Should resolve without throwing — probe=false is a warning, not a fatal.
-    await runBridgeProcess(env, {
-      start: async () => {
-        started = true;
-        return fakeRunning;
-      },
-      probe: async () => false,
-    });
+    const captured: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const spy = (chunk: string | Uint8Array, ...args: unknown[]) => {
+      if (typeof chunk === "string") captured.push(chunk);
+      return (originalWrite as (...a: unknown[]) => boolean)(chunk, ...args);
+    };
+    process.stdout.write = spy as typeof process.stdout.write;
+
+    try {
+      await runBridgeProcess(env, {
+        start: async () => {
+          started = true;
+          return fakeRunning;
+        },
+        probe: async () => false,
+      });
+    } finally {
+      process.stdout.write = originalWrite;
+    }
 
     expect(started).toBe(true);
+    const allOutput = captured.join("");
+    expect(allOutput).toContain("boot_probe_unreachable");
+    expect(allOutput).toContain("http://bridge.example.com");
   });
 });

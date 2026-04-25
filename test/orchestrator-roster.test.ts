@@ -397,13 +397,17 @@ describe("roster.retireRoster", () => {
     await mgr.spawnRoster(specFromValid());
     const res = await mgr.retireRoster(ID, { _tag: "TaskComplete" });
     expect(res._tag).toBe("Err");
-    // The failed session was still attempted.
+    if (res._tag !== "Err") return;
+    expect(res.error._tag).toBe("RetireReleaseFailed");
+    // The failed session was still attempted (parallel allSettled runs all before error propagates).
     expect(events.retires).toContain(spawned0 as string);
+    // Bridge session released even on partial failure (no session leak).
+    expect(events.releases).toEqual([ID as string]);
   });
 
   it("surfaces the thrown reason when a retireSession dep rejects (firstFailure branch)", async () => {
     const boom = new Error("simulated retireSession rejection");
-    const { deps } = makeDeps();
+    const { deps, events } = makeDeps();
     const throwingDeps = {
       ...deps,
       retireSession: async () => {
@@ -417,6 +421,8 @@ describe("roster.retireRoster", () => {
     expect(res._tag).toBe("Err");
     if (res._tag !== "Err") return;
     expect(res.error).toBe(boom);
+    // Bridge session released even when dep throws (no session leak).
+    expect(events.releases).toEqual([ID as string]);
   });
 });
 
