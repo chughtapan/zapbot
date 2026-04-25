@@ -8,10 +8,16 @@
  * workers are channel-plugin peers, not MoltZapApp consumers.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { loadWorkerChannelEnv } from "../src/moltzap/worker-channel.ts";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  formatWorkerCredentialsError,
+  loadWorkerChannelEnv,
+  resolveWorkerCredentials,
+  writeWorkerMetadata,
+} from "../src/moltzap/worker-channel.ts";
 
 describe("worker-channel: env decode", () => {
   it("loadWorkerChannelEnv requires MOLTZAP_SERVER_URL", () => {
@@ -138,5 +144,143 @@ describe("worker-channel: zapbot#336 — workers never register or create (grep-
     expect(
       /^import[\s\S]*?from\s*["']@moltzap\/app-sdk["']/m.test(text),
     ).toBe(false);
+  });
+});
+
+// sbd#202: bin glue helpers relocated from `bin/moltzap-claude-channel.ts`.
+// The bin keeps env decode + bootWorkerChannel + signal handlers; these
+// helpers carry the credential resolution + AO resume metadata write.
+// The transitional self-register path (path 2) is kept until sbd#205
+// removes worker self-register end-to-end.
+describe("worker-channel: resolveWorkerCredentials", () => {
+  it("path 1 — uses pre-minted MOLTZAP_AGENT_KEY + MOLTZAP_LOCAL_SENDER_ID directly", async () => {
+    const result = await resolveWorkerCredentials({
+      MOLTZAP_AGENT_KEY: "key-from-bridge",
+      MOLTZAP_LOCAL_SENDER_ID: "sender-123",
+      // Server URL + registration secret would normally trigger path 2,
+      // but path 1 wins when both pre-minted creds are present.
+      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+      MOLTZAP_REGISTRATION_SECRET: "should-not-be-used",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok") return;
+    expect(result.value).toEqual({
+      agentKey: "key-from-bridge",
+      senderId: "sender-123",
+    });
+  });
+
+  it("path 1 — accepts legacy MOLTZAP_API_KEY as agent key", async () => {
+    const result = await resolveWorkerCredentials({
+      MOLTZAP_API_KEY: "legacy-key",
+      MOLTZAP_LOCAL_SENDER_ID: "sender-legacy",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok") return;
+    expect(result.value.agentKey).toBe("legacy-key");
+  });
+
+  it("rejects when no creds are present and no registration path is wired", async () => {
+    const result = await resolveWorkerCredentials({});
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("WorkerCredentialsMissingServerUrl");
+  });
+
+  it("rejects when MOLTZAP_SERVER_URL is set but neither pre-minted creds nor registration secret is provided", async () => {
+    const result = await resolveWorkerCredentials({
+      MOLTZAP_SERVER_URL: "wss://moltzap.example/ws",
+    });
+    expect(result._tag).toBe("Err");
+    if (result._tag !== "Err") return;
+    expect(result.error._tag).toBe("WorkerCredentialsMissingSecrets");
+  });
+});
+
+describe("worker-channel: formatWorkerCredentialsError", () => {
+  it("formats every error tag (exhaustiveness check)", () => {
+    expect(
+      formatWorkerCredentialsError({ _tag: "WorkerCredentialsMissingServerUrl" }),
+    ).toContain("MOLTZAP_SERVER_URL");
+    expect(
+      formatWorkerCredentialsError({ _tag: "WorkerCredentialsMissingSecrets" }),
+    ).toContain("MOLTZAP_AGENT_KEY");
+    expect(
+      formatWorkerCredentialsError({
+        _tag: "WorkerCredentialsRegisterFailed",
+        cause: "BridgeRegistrationHttpFailed",
+      }),
+    ).toContain("BridgeRegistrationHttpFailed");
+  });
+});
+
+describe("worker-channel: writeWorkerMetadata", () => {
+  let tempDir: string;
+  let sessionFile: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "zapbot-worker-meta-"));
+    sessionFile = join(tempDir, "session-1");
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("appends new keys to the AO metadata file", () => {
+    writeFileSync(sessionFile, "ao_pid=12345\nao_started_at=2026-04-25\n", "utf8");
+    writeWorkerMetadata(
+      { AO_DATA_DIR: tempDir, AO_SESSION: "session-1" },
+      { agentKey: "key-abc", senderId: "sender-xyz" },
+      "wss://moltzap.example/ws",
+    );
+    const content = readFileSync(sessionFile, "utf8");
+    expect(content).toContain("moltzap_sender_id=sender-xyz");
+    expect(content).toContain("moltzap_api_key=key-abc");
+    expect(content).toContain("moltzap_server_url=wss://moltzap.example/ws");
+    // Existing keys preserved.
+    expect(content).toContain("ao_pid=12345");
+  });
+
+  it("replaces existing moltzap keys without duplicating", () => {
+    writeFileSync(
+      sessionFile,
+      "ao_pid=12345\nmoltzap_api_key=old-key\nmoltzap_sender_id=old-sender\n",
+      "utf8",
+    );
+    writeWorkerMetadata(
+      { AO_DATA_DIR: tempDir, AO_SESSION: "session-1" },
+      { agentKey: "new-key", senderId: "new-sender" },
+      "wss://moltzap.example/ws",
+    );
+    const content = readFileSync(sessionFile, "utf8");
+    const apiKeyOccurrences = content.split("\n").filter((l) => l.startsWith("moltzap_api_key=")).length;
+    expect(apiKeyOccurrences).toBe(1);
+    expect(content).toContain("moltzap_api_key=new-key");
+    expect(content).toContain("moltzap_sender_id=new-sender");
+    expect(content).not.toContain("old-key");
+  });
+
+  it("no-ops when AO_DATA_DIR is absent (ad-hoc local runs)", () => {
+    // No throw, no file written.
+    expect(() =>
+      writeWorkerMetadata(
+        { AO_SESSION: "session-1" },
+        { agentKey: "k", senderId: "s" },
+        "wss://moltzap.example/ws",
+      ),
+    ).not.toThrow();
+  });
+
+  it("no-ops when the metadata file does not exist", () => {
+    // sessionFile not created — readFileSync throws inside the helper,
+    // the helper catches and returns early. No write happens.
+    expect(() =>
+      writeWorkerMetadata(
+        { AO_DATA_DIR: tempDir, AO_SESSION: "missing" },
+        { agentKey: "k", senderId: "s" },
+        "wss://moltzap.example/ws",
+      ),
+    ).not.toThrow();
   });
 });
