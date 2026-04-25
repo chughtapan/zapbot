@@ -650,11 +650,24 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
   ): Promise<Result<void, RosterTrackError | RosterRetireError>> {
     const rec = rosters.get(rosterId);
     if (!rec) return err({ _tag: "RosterNotFound", rosterId });
-    for (const [session, status] of [...rec.statuses.entries()]) {
-      if (status._tag === "Retired") continue;
-      const res = await retireMember(rosterId, session, reason);
-      if (res._tag === "Err") return err(res.error);
-    }
+    const liveEntries = [...rec.statuses.entries()].filter(
+      ([, status]) => status._tag !== "Retired",
+    );
+    const results = await Promise.allSettled(
+      liveEntries.map(([session]) => retireMember(rosterId, session, reason)),
+    );
+    const firstFailure = results.find(
+      (r): r is PromiseRejectedResult => r.status === "rejected",
+    );
+    if (firstFailure) return err(firstFailure.reason);
+    const firstErr = results
+      .filter(
+        (r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof retireMember>>> =>
+          r.status === "fulfilled",
+      )
+      .map((r) => r.value)
+      .find((v) => v._tag === "Err");
+    if (firstErr?._tag === "Err") return err(firstErr.error);
     // Architect rev 4 §4.3: bridge session lifetime tracks the roster's,
     // not the per-worker session's. Close the bridge session AFTER every
     // member is down so admission is revoked + the session's
