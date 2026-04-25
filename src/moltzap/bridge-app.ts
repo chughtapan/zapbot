@@ -63,7 +63,9 @@ import {
   MoltZapApp,
   SessionError,
 } from "@moltzap/app-sdk";
-import type { AppParticipantRejectedEvent } from "@moltzap/protocol";
+import type {
+  AppParticipantAdmittedEvent,
+} from "@moltzap/protocol";
 import type { ConversationKey } from "./conversation-keys.ts";
 import {
   loadBridgeIdentityEnv,
@@ -138,15 +140,32 @@ export type BridgeMessageHandlerError = {
 
 /**
  * Tracks an in-flight `apps/create` session whose admission has not yet
- * completed. Used by `createBridgeSession` to wait for `app/sessionReady`
- * (or a `participantRejected` for one of our invitees) before returning,
- * closing the architect rev 4 §4.3 admission race that codex flagged
- * (sbd#201 round-1, P1 #2): the SDK's `apps/create` returns synchronously
- * after the server forks `admitAgentsAsync`, so without this wait callers
- * can spawn workers whose admission is still pending and may even reject.
+ * completed. Used by `createBridgeSession` to wait until every invited
+ * agent has emitted `app/participantAdmitted` (architect rev 4 §4.3
+ * admission contract).
+ *
+ * Server semantics that drive the design (`vendor/moltzap/.../app-host.ts`):
+ *   - `apps/create` returns synchronously after the server forks
+ *     `admitAgentsAsync`, so workers cannot be spawned at create-time —
+ *     admission may still be pending or reject.
+ *   - `app/participantAdmitted` is broadcast to BOTH the admitted agent
+ *     and the session initiator.
+ *   - `app/participantRejected` is broadcast ONLY to the rejected agent
+ *     (NOT to the initiator). The bridge therefore cannot observe
+ *     rejections directly.
+ *   - `app/sessionReady` fires for the initiator once status flips to
+ *     `active`, which happens whenever ANY admission succeeded — so
+ *     `sessionReady` alone does not prove every invitee was admitted.
+ *
+ * Resolution rule: collect `participantAdmitted` for each invited
+ * agentId; resolve when `admitted.size === invited.size`, or when
+ * `sessionReady` fires AND `admitted.size === invited.size`. If
+ * `sessionReady` fires with `admitted.size < invited.size`, treat as a
+ * partial-admission failure (some invitees were silently rejected).
  */
 interface PendingAdmission {
   readonly invited: ReadonlySet<string>;
+  readonly admitted: Set<string>;
   readonly resolve: () => void;
   readonly reject: (error: BridgeSessionError) => void;
   readonly timer: ReturnType<typeof setTimeout>;
@@ -321,17 +340,32 @@ function _doBoot(
     // by the time the WS reconnects existing sessions or the bridge's seed
     // session fires `app/sessionReady`. The `resolve` / `reject` closures
     // own their own timer + map cleanup — see `awaitSessionAdmission`.
-    app.onSessionReady((session) => {
-      pendingAdmissions.get(session.id)?.resolve();
-    });
-    app.onParticipantRejected((event: AppParticipantRejectedEvent) => {
+    app.onParticipantAdmitted((event: AppParticipantAdmittedEvent) => {
       const pending = pendingAdmissions.get(event.sessionId);
       if (pending === undefined || !pending.invited.has(event.agentId)) return;
+      pending.admitted.add(event.agentId);
+      if (pending.admitted.size === pending.invited.size) pending.resolve();
+    });
+    app.onSessionReady((session) => {
+      const pending = pendingAdmissions.get(session.id);
+      if (pending === undefined) return;
+      if (pending.admitted.size === pending.invited.size) {
+        pending.resolve();
+        return;
+      }
+      // `sessionReady` fires once at least one invitee was admitted, so
+      // a size mismatch here means the server silently rejected some
+      // invitees (server emits `participantRejected` only to the rejected
+      // agent, not to us). Surface the partial admission rather than
+      // proceeding to spawn workers that lack conversation access.
+      const missing = [...pending.invited].filter(
+        (id) => !pending.admitted.has(id),
+      );
       pending.reject({
         _tag: "BridgeSessionAdmissionRejected",
-        sessionId: event.sessionId,
-        agentId: event.agentId,
-        reason: event.reason,
+        sessionId: session.id,
+        agentId: missing[0] ?? "<unknown>",
+        reason: `partial admission: ${missing.length} of ${pending.invited.size} invitees not admitted (${missing.join(",")})`,
       });
     });
 
@@ -481,9 +515,9 @@ export function createBridgeSession(
     state.sessions.add(session.id);
 
     // Wait for admission to complete: SDK `apps/create` returns before the
-    // server fork at `app-host.ts:735` finishes, so callers must not act
-    // on the session until `app/sessionReady` (or a `participantRejected`
-    // for one of our invitees, or a timeout) lands.
+    // server fork finishes, so callers must not act on the session until
+    // every invitee has emitted `participantAdmitted` (or a partial
+    // admission is detected via `sessionReady`, or the timeout fires).
     if (invitedIds.length > 0) {
       const timeoutMs =
         request.admissionTimeoutMs ?? DEFAULT_ADMISSION_TIMEOUT_MS;
@@ -560,6 +594,7 @@ function awaitSessionAdmission(
     }, timeoutMs);
     state.pendingAdmissions.set(sessionId, {
       invited: new Set(invitedIds),
+      admitted: new Set(),
       resolve: () => {
         clearTimeout(timer);
         state.pendingAdmissions.delete(sessionId);
@@ -572,20 +607,6 @@ function awaitSessionAdmission(
       },
       timer,
     });
-    // Re-check after registration: catches the case where sessionReady
-    // fired (and was dropped by the handler because the entry didn't yet
-    // exist) in the microtask between createSession returning and this
-    // function running. JS single-threading guarantees no further events
-    // dispatch between this check and the resume completing.
-    const cached = state.app.getSession(sessionId);
-    if (cached !== undefined && cached.isActive) {
-      const pending = state.pendingAdmissions.get(sessionId);
-      if (pending !== undefined) {
-        clearTimeout(pending.timer);
-        state.pendingAdmissions.delete(sessionId);
-        resume(Effect.void);
-      }
-    }
     // Cleanup on fiber interrupt: clear the timer and drop the entry so
     // the resume callback held by the entry isn't called against a dead
     // fiber once we no longer care about the answer.

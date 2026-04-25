@@ -421,11 +421,31 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
   async function spawnRoster(
     spec: RosterSpec,
   ): Promise<Result<readonly RosterMember[], RosterSpawnError>> {
+    // Validate reserved labels BEFORE the prepare phase. The reserved-key
+    // guard (Invariant 4) used to live inside `spawnSession`, but with
+    // `prepareRosterSession` registering MoltZap workers + creating a
+    // bridge session in front of `spawnSession`, an invalid label would
+    // mint server-side credentials before the guard rejected it.
+    for (const memberSpec of spec.members) {
+      if (
+        memberSpec.displayLabel === "moltzap" ||
+        memberSpec.displayLabel.startsWith("moltzap-reserved-")
+      ) {
+        return err({
+          _tag: "ReservedMcpKeyCollision",
+          key: "moltzap",
+          member: {
+            role: memberSpec.role,
+            displayLabel: memberSpec.displayLabel,
+          },
+        });
+      }
+    }
+
     // Architect rev 4 §4.3 prepare phase: ONE bridge session per roster,
-    // invited-list = union of all worker senderIds. Codex stamina round-1
-    // P1 #1 caught the structural consequence of skipping this phase — per-
-    // spawn sessions create per-worker conversation IDs, so workers in the
-    // same roster cannot exchange messages on shared `coord-*` keys.
+    // invited-list = union of all worker senderIds. Per-spawn sessions
+    // would create per-worker conversation IDs, so workers in the same
+    // roster could not exchange messages on shared `coord-*` keys.
     const prepared = await deps.prepareRosterSession({
       rosterId: spec.rosterId,
       members: spec.members,

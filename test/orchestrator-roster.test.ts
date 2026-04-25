@@ -259,6 +259,47 @@ describe("roster.spawnRoster", () => {
     if (res.error._tag !== "ReservedMcpKeyCollision") return;
     expect(res.error.key).toBe("moltzap");
   });
+
+  it("rejects reserved 'moltzap' displayLabel BEFORE prepareRosterSession runs", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spec = specFromValid();
+    const reservedSpec: RosterSpec = {
+      ...spec,
+      members: [
+        ...spec.members.slice(0, 1),
+        { role: "implementer", displayLabel: "moltzap" },
+        ...spec.members.slice(2),
+      ],
+    };
+    const res = await mgr.spawnRoster(reservedSpec);
+    expect(res._tag).toBe("Err");
+    if (res._tag !== "Err") return;
+    expect(res.error._tag).toBe("ReservedMcpKeyCollision");
+    // Prepare must NOT have run — no MoltZap worker creds were minted
+    // server-side for an invalid label.
+    expect(events.prepares).toEqual([]);
+    expect(events.spawns).toEqual([]);
+    expect(events.releases).toEqual([]);
+  });
+
+  it("rejects 'moltzap-reserved-*' displayLabel BEFORE prepareRosterSession runs", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    const spec = specFromValid();
+    const reservedSpec: RosterSpec = {
+      ...spec,
+      members: [
+        { role: "architect", displayLabel: "moltzap-reserved-x" },
+        ...spec.members.slice(1),
+      ],
+    };
+    const res = await mgr.spawnRoster(reservedSpec);
+    expect(res._tag).toBe("Err");
+    if (res._tag !== "Err") return;
+    expect(res.error._tag).toBe("ReservedMcpKeyCollision");
+    expect(events.prepares).toEqual([]);
+  });
 });
 
 describe("roster.retireMember (idempotent)", () => {
