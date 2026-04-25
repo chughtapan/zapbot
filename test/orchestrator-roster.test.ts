@@ -424,6 +424,49 @@ describe("roster.retireRoster", () => {
     // Bridge session released even when dep throws (no session leak).
     expect(events.releases).toEqual([ID as string]);
   });
+
+  it("ok when all members are already Retired — liveEntries is empty, release still fires (CP-16)", async () => {
+    const { deps, events } = makeDeps();
+    const mgr = createRosterManager(deps);
+    await mgr.spawnRoster(specFromValid());
+    // Retire every member individually first.
+    const spawned = await mgr.spawnRoster(specFromValid());
+    if (spawned._tag !== "Ok") throw new Error("setup failure");
+    for (const member of spawned.value) {
+      await mgr.retireMember(ID, member.session, { _tag: "ExplicitRetire" });
+    }
+    events.releases.length = 0; // reset release counter
+    const res = await mgr.retireRoster(ID, { _tag: "TaskComplete" });
+    expect(res._tag).toBe("Ok");
+    // Release fires even when no members were live.
+    expect(events.releases).toEqual([ID as string]);
+  });
+
+  it("firstFailure takes precedence over firstErr when both are present (CP-20)", async () => {
+    // Construct a roster where session[0] throws (rejection) and session[1]
+    // returns Err. firstFailure must win: the ternary checks firstFailure first.
+    const { deps, events } = makeDeps();
+    const boom = new Error("rejection wins");
+    let callCount = 0;
+    const mixedDeps = {
+      ...deps,
+      retireSession: async (session: Parameters<typeof deps.retireSession>[0]) => {
+        const i = callCount++;
+        if (i === 0) throw boom;
+        // Second call returns a typed Err.
+        return err({ _tag: "RetireReleaseFailed" as const, cause: "second session" });
+      },
+    };
+    const mgr = createRosterManager(mixedDeps);
+    await mgr.spawnRoster(specFromValid());
+    const res = await mgr.retireRoster(ID, { _tag: "TaskComplete" });
+    expect(res._tag).toBe("Err");
+    if (res._tag !== "Err") return;
+    // The rejection's reason must be the error, not the typed Err from session[1].
+    expect(res.error).toBe(boom);
+    // Release still fires.
+    expect(events.releases).toEqual([ID as string]);
+  });
 });
 
 describe("roster.resolveRetiredRecipientRoute", () => {
