@@ -5,6 +5,7 @@
     "": {
       "name": "zapbot",
       "dependencies": {
+        "@aoagents/ao-plugin-agent-claude-code": "^0.3.0",
         "@modelcontextprotocol/sdk": "1.29.0",
         "@moltzap/app-sdk": "file:./vendor/moltzap/packages/app-sdk",
         "@moltzap/claude-code-channel": "file:./vendor/moltzap/packages/claude-code-channel",
@@ -34,6 +35,10 @@
     "@moltzap/server-core": "file:./vendor/moltzap/packages/server",
   },
   "packages": {
+    "@aoagents/ao-core": ["@aoagents/ao-core@0.3.0", "", { "dependencies": { "yaml": "^2.7.0", "zod": "^3.24.0" } }, "sha512-MODIRiLv8LnwCT/H4D7SMl1WxG68M4ZlYZbkvMo5A+IhkFGHvxOW0PROcn4jBQ0nWCKlj14732vlaZNId3JyjA=="],
+
+    "@aoagents/ao-plugin-agent-claude-code": ["@aoagents/ao-plugin-agent-claude-code@0.3.0", "", { "dependencies": { "@aoagents/ao-core": "0.3.0" } }, "sha512-sEP2QNZbGwtROqOTR2q7w8eieUG87OGi2Qze4JPxcWWjZ9rxw2KWcDPBU+HacUjD3sTQFrNld3CsYTJ/qIAsjw=="],
+
     "@balena/dockerignore": ["@balena/dockerignore@1.0.2", "", {}, "sha512-wMue2Sy4GAVTk6Ic4tJVcnfdau+gx2EnG7S+uAEe+TWJFqE4YoWN4/H8MSLj4eYJKxGg26lZwboEniNiNwZQ6Q=="],
 
     "@effect/cli": ["@effect/cli@0.73.2", "", { "dependencies": { "ini": "^4.1.3", "toml": "^3.0.0", "yaml": "^2.5.0" }, "peerDependencies": { "@effect/platform": "^0.94.3", "@effect/printer": "^0.47.0", "@effect/printer-ansi": "^0.47.0", "effect": "^3.19.16" } }, "sha512-K8IJo81+qa1LU8dhxcDU4QO/bIjL/dPd3zUOSCpLiuUNz8Y3/T+WNs3GqIXEhMfCFMSlRZERN0YgmtRlEZUREA=="],
@@ -1065,6 +1070,8 @@
     "zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
+
+    "@aoagents/ao-core/zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
 
     "@eslint-community/eslint-utils/eslint-visitor-keys": ["eslint-visitor-keys@3.4.3", "", {}, "sha512-wpc+LXeiyiisxPlEkUzU6svyS1frIO3Mgxj1fdy7Pm8Ygzguax2N3Fa/D/ag1WqbOprdI+uY6wMUl8/a2G+iag=="],
 

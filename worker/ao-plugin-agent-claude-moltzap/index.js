@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import * as builtinModule from "@aoagents/ao-plugin-agent-claude-code";
 
-const builtinModule = await import(pathToFileURL(resolveBuiltinClaudePluginPath()).href);
 const builtin = builtinModule.create();
 const launchWrapperPath = fileURLToPath(new URL("./launch-claude-moltzap.py", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -87,33 +87,6 @@ export function create() {
 
 export function detect() {
   return typeof builtinModule.detect === "function" ? builtinModule.detect() : true;
-}
-
-function resolveBuiltinClaudePluginPath() {
-  const bunInstall = process.env.BUN_INSTALL;
-  const explicit = process.env.AO_BUILTIN_CLAUDE_PLUGIN_PATH;
-  const candidates = [
-    explicit ?? null,
-    bunInstall
-      ? join(
-          bunInstall,
-          "install/global/node_modules/@aoagents/ao-plugin-agent-claude-code/dist/index.js",
-        )
-      : null,
-    join(
-      homedir(),
-      ".bun/install/global/node_modules/@aoagents/ao-plugin-agent-claude-code/dist/index.js",
-    ),
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  throw new Error(
-    "Could not resolve the global @aoagents/ao-plugin-agent-claude-code install. Set BUN_INSTALL or AO_BUILTIN_CLAUDE_PLUGIN_PATH if your AO install lives elsewhere.",
-  );
 }
 
 /**

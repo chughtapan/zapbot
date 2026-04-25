@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { errorResponse } from "../v2/http/error-response.js";
+import { errorResponse } from "../src/http/error-response.js";
 
 describe("errorResponse", () => {
   it("returns correct status code", async () => {

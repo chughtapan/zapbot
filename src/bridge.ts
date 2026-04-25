@@ -760,10 +760,6 @@ export async function defaultMintToken(): Promise<Result<InstallationToken, Disp
   }
 }
 
-/**
- * Boot the HTTP server, register every configured repo with the gateway,
- * start heartbeats, install SIGHUP → reload. Returns a handle for stop/reload.
- */
 export async function startBridge(config: BridgeConfig): Promise<RunningBridge> {
   let current = config;
   let stopHeartbeat: (() => void) | null = null;

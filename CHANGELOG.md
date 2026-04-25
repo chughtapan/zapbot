@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.2 (2026-04-25)
+
+Remove dead v2 code, fix macOS test failures, and simplify the moltzap plugin.
+
+### Changed
+
+- **`@aoagents/ao-plugin-agent-claude-code` is now a regular dependency** — installed via `bun install` rather than requiring a global AO toolchain. The moltzap plugin uses a static ESM import instead of a 35-line runtime path resolver.
+- **Canonical path comparison in `start.sh`** — the embedded Node block now uses `fs.realpathSync` (with `path.resolve` fallback) when matching a project path against the orchestrator config, so symlinked project roots (macOS `/var` → `/private/var`) resolve correctly.
+- **`bin/zapbot-team-init` writes canonical paths** — uses `pwd -P` to guarantee the physical path is stored in `agent-orchestrator.yaml`, matching what `start.sh` produces at runtime.
+- **Logger directory created at module load** — `~/.zapbot/logs` is now created once when the module initialises instead of on every log call.
+
+### Fixed
+
+- **macOS BSD `mktemp` crash** — `start.sh` called `mktemp` with a suffix inside the template (`zapbot-ao-config.XXXXXX.yaml`), which BSD mktemp does not support. The fix creates the temp file without a suffix, then renames it to add `.yaml`.
+- **11 moltzap-mcp-config-decode tests** that failed because the builtin claude plugin required a global bun install. The package is now a regular dep.
+- **1 config-reload test** that failed due to symlinked temp dirs on macOS — fixed by the `realpathSync` path comparison.
+- **1 team-init test** that compared the wrong path form — fixed by asserting against `realpathSync(projectDir)`.
+- **Removed TOCTOU `existsSync` guard** before `unlinkSync` in `src/orchestrator/runtime.ts` — the surrounding try-catch already handles the not-found case.
+
+### Removed
+
+- **`v2/` dead code** — 14 files that were excluded from `tsconfig.json` and had zero live importers. Five v2-prefixed test files that duplicated src tests are also gone.
+
 ## 0.5.1 (2026-04-19)
 
 Finish the ao-native bridge path and make MoltZap session provisioning real.
