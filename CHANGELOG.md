@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.4 (2026-04-25)
+
+Stop durable comments from mirroring to the wrong repository.
+
+### Fixed
+
+- **Cross-repo PR cross-references no longer mirror to the anchor repo.** When a GitHub issue is referenced from a PR in a different repository, the durable comment mirror path now correctly skips that link. Previously it would post the mirror comment to the original issue's repo using the cross-repo PR's number, which either hit a 404 or (worse) commented on an unrelated issue. The mirror code now compares `event.source.{issue,pull_request}.repository_url` against the anchor repo and only mirrors same-repo PRs. Fail-closed when `repository_url` is absent.
+
 ## 0.5.3 (2026-04-25)
 
 Tighten reliability: parallelize roster shutdown, use constant-time HMAC, make boot probe non-fatal, and harden a few small spots flagged in pre-landing review.

@@ -168,8 +168,14 @@ type BridgeHotPathError =
   | ForwardControlError;
 type IssueEventSource = {
   readonly type?: string | null;
-  readonly pull_request?: { readonly number?: number | null } | null;
-  readonly issue?: { readonly number?: number | null } | null;
+  readonly pull_request?: {
+    readonly number?: number | null;
+    readonly repository_url?: string | null;
+  } | null;
+  readonly issue?: {
+    readonly number?: number | null;
+    readonly repository_url?: string | null;
+  } | null;
 };
 type IssueEventSnapshot = {
   readonly event?: string | null;
@@ -355,7 +361,7 @@ async function getLinkedPullRequest(
       break;
     }
   }
-  return ok(findLinkedPullRequest(events));
+  return ok(findLinkedPullRequest(events, repo));
 }
 
 async function getGitHubApiToken(): Promise<string | null> {
@@ -507,7 +513,7 @@ function decodeIssueEventSource(
 function decodeIssueNumberSource(
   value: unknown,
   fieldName: "issue" | "pull_request",
-): Result<{ readonly number?: number | null } | null, GithubStateError> {
+): Result<{ readonly number?: number | null; readonly repository_url?: string | null } | null, GithubStateError> {
   if (value === undefined || value === null) {
     return ok(null);
   }
@@ -522,7 +528,14 @@ function decodeIssueNumberSource(
   if (number._tag === "Err") {
     return number;
   }
-  return ok({ number: number.value });
+  const repositoryUrl = decodeOptionalString(
+    value.repository_url,
+    `issue event source ${fieldName} had invalid repository_url`,
+  );
+  if (repositoryUrl._tag === "Err") {
+    return repositoryUrl;
+  }
+  return ok({ number: number.value, repository_url: repositoryUrl.value });
 }
 
 function decodeOptionalString(
@@ -555,11 +568,17 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
-function findLinkedPullRequest(events: ReadonlyArray<IssueEventSnapshot>): IssueNumber | null {
+function findLinkedPullRequest(
+  events: ReadonlyArray<IssueEventSnapshot>,
+  anchorRepo: RepoFullName,
+): IssueNumber | null {
   let latestAt = Number.NEGATIVE_INFINITY;
   let linkedPullRequest: IssueNumber | null = null;
   for (const event of events) {
     if (event.event !== "cross-referenced") {
+      continue;
+    }
+    if (!isSameRepoSource(event.source, anchorRepo)) {
       continue;
     }
     const pullRequestNumber = extractPullRequestNumber(event.source);
@@ -576,6 +595,29 @@ function findLinkedPullRequest(events: ReadonlyArray<IssueEventSnapshot>): Issue
     }
   }
   return linkedPullRequest;
+}
+
+/**
+ * Cross-repo guard for durable mirroring. GitHub issue events surface
+ * cross-references from any repository the viewer can see; the mirror
+ * path posts to `anchorRepo`, so a cross-repo PR number would either
+ * mirror to the WRONG repo or hit a 404. Real GitHub events always
+ * carry `repository_url` on cross-referenced sources; an absent field
+ * means a malformed/spoofed/proxied event and the conservative answer
+ * is "do not mirror." Tests must construct fixtures with the field set.
+ */
+function isSameRepoSource(
+  source: IssueEventSource | null | undefined,
+  anchorRepo: RepoFullName,
+): boolean {
+  if (source === null || source === undefined) {
+    return false;
+  }
+  const repoUrl = source.pull_request?.repository_url ?? source.issue?.repository_url ?? null;
+  if (repoUrl === null || repoUrl === undefined) {
+    return false;
+  }
+  return repoUrl.endsWith(`/repos/${anchorRepo as unknown as string}`);
 }
 
 function extractPullRequestNumber(source: IssueEventSource | null | undefined): IssueNumber | null {

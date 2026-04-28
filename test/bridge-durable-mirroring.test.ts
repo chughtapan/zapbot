@@ -145,6 +145,71 @@ describe("handleClassifiedWebhook durable mirroring", () => {
     process.env.ZAPBOT_GITHUB_TOKEN = originalToken;
   });
 
+  it("does not mirror to a cross-repo linked pull request (skips when repository_url differs)", async () => {
+    process.env.ZAPBOT_GITHUB_TOKEN = "test-token";
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/issues/42/events?per_page=100&page=1")) {
+        return Response.json([
+          {
+            event: "cross-referenced",
+            created_at: "2026-04-20T10:00:00Z",
+            source: {
+              type: "pull_request",
+              issue: {
+                number: 99,
+                repository_url: "https://api.github.com/repos/other-org/other-repo",
+              },
+            },
+          },
+        ]);
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const { gh, calls } = makeGh();
+    const out = await handleClassifiedWebhook(asMention("status"), makeCtx(gh));
+
+    expect(out).toEqual({
+      _tag: "Ok",
+      value: { kind: "replied", command: "status" },
+    });
+    expect(fetchSpy).toHaveBeenCalled();
+    // Cross-repo cross-reference is filtered out: only the original issue post happens, no mirror.
+    expect(calls.postComment.map((call) => call.repo as unknown as string)).toEqual(["acme/app"]);
+    expect(calls.postComment.map((call) => call.issue as unknown as number)).toEqual([42]);
+  });
+
+  it("mirrors when repository_url is present and matches anchor repo", async () => {
+    process.env.ZAPBOT_GITHUB_TOKEN = "test-token";
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("/issues/42/events?per_page=100&page=1")) {
+        return Response.json([
+          {
+            event: "cross-referenced",
+            created_at: "2026-04-20T10:00:00Z",
+            source: {
+              type: "pull_request",
+              issue: {
+                number: 50,
+                repository_url: "https://api.github.com/repos/acme/app",
+              },
+            },
+          },
+        ]);
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+
+    const { gh, calls } = makeGh();
+    await handleClassifiedWebhook(asMention("status"), makeCtx(gh));
+
+    expect(calls.postComment.map((call) => call.issue as unknown as number)).toEqual([42, 50]);
+  });
+
   it("mirrors the status summary to the latest linked pull request", async () => {
     process.env.ZAPBOT_GITHUB_TOKEN = "test-token";
 
@@ -155,7 +220,13 @@ describe("handleClassifiedWebhook durable mirroring", () => {
           {
             event: "cross-referenced",
             created_at: "2026-04-20T10:00:00Z",
-            source: { type: "pull_request", pull_request: { number: 17 } },
+            source: {
+              type: "pull_request",
+              pull_request: {
+                number: 17,
+                repository_url: "https://api.github.com/repos/acme/app",
+              },
+            },
           },
           ...Array.from({ length: 99 }, (_, index) => ({
             event: "labeled",
@@ -169,7 +240,13 @@ describe("handleClassifiedWebhook durable mirroring", () => {
           {
             event: "cross-referenced",
             created_at: "2026-04-20T11:00:00Z",
-            source: { type: "pull_request", pull_request: { number: 23 } },
+            source: {
+              type: "pull_request",
+              pull_request: {
+                number: 23,
+                repository_url: "https://api.github.com/repos/acme/app",
+              },
+            },
           },
         ]);
       }
