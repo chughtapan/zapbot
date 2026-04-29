@@ -1,13 +1,14 @@
 {
   "name": "zapbot",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "Thin GitHub webhook bridge that dispatches direct ao sessions, with optional MoltZap session provisioning",
   "main": "dist/index.js",
   "scripts": {
     "test": "vitest run",
     "lint": "eslint 'src/**/*.ts' 'gateway/src/**/*.ts' 'bin/**/*.ts'",
     "bridge": "bun run bin/webhook-bridge.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "postinstall": "bun bin/zapbot-doctor.ts fix-workspace ."
   },
   "keywords": [],
   "author": "",

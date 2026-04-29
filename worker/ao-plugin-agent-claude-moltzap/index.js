@@ -8,7 +8,49 @@ import * as builtinModule from "@aoagents/ao-plugin-agent-claude-code";
 
 const builtin = builtinModule.create();
 const launchWrapperPath = fileURLToPath(new URL("./launch-claude-moltzap.py", import.meta.url));
+const doctorPath = fileURLToPath(new URL("../../bin/zapbot-doctor.ts", import.meta.url));
 const execFileAsync = promisify(execFile);
+
+/**
+ * Contract A entry point for orchestrator workspaces. Invoked by
+ * setupWorkspaceHooks before claude launches in a worktree, and by
+ * getRestoreCommand when an existing session re-attaches.
+ *
+ * Stamp-skip makes this fast on the common path. Real provisioning
+ * (submodule init + dist build + bun install) happens once per worktree;
+ * subsequent calls are a cheap symlink scan.
+ *
+ * On failure, throws an Error with the doctor's user-actionable message
+ * so the failure surfaces in /tmp/zapbot-ao.log instead of letting claude
+ * silently launch into a broken workspace.
+ */
+async function runDoctorFixWorkspace(workspacePath) {
+  if (typeof workspacePath !== "string" || workspacePath.length === 0) {
+    return; // nothing to provision; let downstream code surface its own error
+  }
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "bun",
+      [doctorPath, "fix-workspace", workspacePath],
+      { maxBuffer: 32 * 1024 * 1024 },
+    );
+    const output = (stdout || "").trim();
+    if (output.length > 0) {
+      console.log(output);
+    }
+    if (stderr && stderr.trim().length > 0) {
+      console.warn(stderr.trim());
+    }
+  } catch (cause) {
+    const stderr = cause && cause.stderr ? String(cause.stderr).trim() : "";
+    const stdout = cause && cause.stdout ? String(cause.stdout).trim() : "";
+    const message =
+      stderr.length > 0 ? stderr : stdout.length > 0 ? stdout : String(cause);
+    throw new Error(
+      `failed to provision workspace at ${workspacePath}\n${message}`,
+    );
+  }
+}
 const MOLTZAP_ENV_FALLBACKS = Object.freeze({
   MOLTZAP_SERVER_URL: "ZAPBOT_MOLTZAP_SERVER_URL",
   MOLTZAP_API_KEY: "ZAPBOT_MOLTZAP_API_KEY",
@@ -53,6 +95,10 @@ export function create() {
       if (typeof builtin.setupWorkspaceHooks === "function") {
         await builtin.setupWorkspaceHooks(workspacePath, config);
       }
+      // Contract A: provision the worktree's deps before claude launches.
+      // Without this, the moltzap MCP server (bin/moltzap-claude-channel.ts)
+      // ENOENTs on `effect` because the worktree has no node_modules.
+      await runDoctorFixWorkspace(workspacePath);
       ensureChannelMcpConfig(workspacePath);
     },
     async postLaunchSetup(session) {
@@ -72,6 +118,10 @@ export function create() {
         return null;
       }
       if (session?.workspacePath) {
+        // Restore path: re-provision in case the worktree was created before
+        // the doctor existed, or the stamp drifted (submodule SHA changed).
+        // Stamp-skip makes this fast on the common path.
+        await runDoctorFixWorkspace(session.workspacePath);
         ensureChannelMcpConfig(session.workspacePath);
       }
       return wrapClaudeCommand(baseCommand);
