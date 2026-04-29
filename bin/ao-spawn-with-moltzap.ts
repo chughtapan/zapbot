@@ -228,6 +228,13 @@ async function restartWorkerWithResume(options: {
 }): Promise<void> {
   await runCommand("tmux", ["kill-session", "-t", options.tmuxName], true);
 
+  // Resume path bypasses ao's plugin chain (no setupWorkspaceHooks call),
+  // so the doctor must be invoked explicitly here. Without it, a resumed
+  // worker on a worktree that drifted (submodule SHA changed, effect
+  // version bumped) would launch into a broken workspace and the moltzap
+  // MCP server would ENOENT on `effect`. Stamp-skip keeps the warm path fast.
+  await provisionWorkerWorkspace(options.worktree);
+
   const wrapperPath = fileURLToPath(
     new URL(
       "../worker/ao-plugin-agent-claude-moltzap/launch-claude-moltzap.py",
@@ -371,6 +378,27 @@ function resolveMetadataValue(
     return readMetadata(sessionName).get(key) ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Contract A entry point for worker workspaces on the resume path.
+ *
+ * The first-spawn path goes through `ao spawn` -> claude-moltzap plugin's
+ * `setupWorkspaceHooks` (which already invokes the doctor). The resume
+ * path here calls `tmux new-session` directly, bypassing the plugin
+ * chain — so without this hook a resumed worker can launch into a
+ * worktree whose deps have drifted out from under it. Stamp-skip in the
+ * doctor makes the warm-restart path effectively free.
+ */
+async function provisionWorkerWorkspace(worktree: string): Promise<void> {
+  const doctorPath = fileURLToPath(new URL("./zapbot-doctor.ts", import.meta.url));
+  try {
+    await runCommand("bun", [doctorPath, "fix-workspace", worktree]);
+  } catch (cause) {
+    fatal(
+      `failed to provision worker workspace at ${worktree}: ${stringifyCause(cause)}`,
+    );
   }
 }
 

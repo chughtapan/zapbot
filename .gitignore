@@ -1,5 +1,8 @@
 node_modules/
 dist/
+.zapbot-bootstrap-stamp
+.zapbot-doctor-stamp
+package-lock.json
 *.db
 *.db-journal
 .zapbot/

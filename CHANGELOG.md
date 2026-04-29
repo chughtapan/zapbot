@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 (2026-04-29)
+
+`./start.sh` now works on a clean clone, on a machine that previously crashed mid-spawn, and after `bun install` runs without explicit bootstrap. Introduces `bin/zapbot-doctor` as the canonical entry point for workspace provisioning.
+
+What you can now do:
+
+- Run `bun install` on a fresh clone and have everything just work, no manual `bash scripts/bootstrap-moltzap.sh` step. The doctor runs as a postinstall hook, idempotent, stamp-skipped on warm runs.
+- Run `bun bin/zapbot-doctor.ts check` to audit any zapbot workspace (main checkout, orchestrator worktree, worker worktree) without mutating it. Exits 0 = clean, 1 = issues found with each named.
+- Spawn an `ao` orchestrator session and have its worktree provisioned automatically. The moltzap MCP server resolves `effect` correctly. The "no MCP server configured with that name" cold-start failure is gone.
+- Spawn a worker session with `bin/ao-spawn-with-moltzap.ts` and have its worktree provisioned the same way. Resume path covered too.
+
+What got fixed under the hood:
+
+- `scripts/bootstrap-moltzap.sh` now accepts an explicit `TARGET_ROOT` argument so the same script can provision the main checkout, an orchestrator worktree, or a worker worktree. Writes a stamp file (`.zapbot-bootstrap-stamp`) so re-runs are no-ops on the warm path. Restores vendored `package.json` files from git before rebuild so `pnpm build` finds the build scripts after a previous run stripped them.
+- `worker/ao-plugin-agent-claude-moltzap`'s `setupWorkspaceHooks` and `getRestoreCommand` now invoke the doctor before claude launches in a worktree, closing the cold-start dep gap.
+- The doctor scans every symlink under `node_modules/@moltzap/<pkg>/node_modules/`, not just `effect`. Reaps any broken nested pnpm-style links automatically. Permanent regression test guards against the dangling-symlink failure mode hit twice during the 2026-04-29 fragility session.
+- 14 new unit tests + 2 integration tests.
+
+Out of scope (tracked in #305 PR2): launch-state reconciliation (orphan worktree reaper + dead-PID state-dir cleanup) lands separately.
+
 ## 0.5.4 (2026-04-25)
 
 Stop durable comments from mirroring to the wrong repository.
