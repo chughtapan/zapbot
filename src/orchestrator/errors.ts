@@ -65,6 +65,12 @@ export type OrchestratorError =
       readonly projectSlug: string;
       readonly path: string;
       readonly cause: string;
+    }
+  | {
+      readonly _tag: "BootConfigInvalid";
+      readonly source: "config.json" | "projects.json" | "moltzap-paths";
+      readonly path: string;
+      readonly reason: string;
     };
 
 /**
@@ -158,6 +164,13 @@ export function describeOrchestratorError(error: OrchestratorError): string {
         `  cause:    ${error.cause}`,
         `  diagnose: ls -la ${error.path}`,
         `  fix:      check filesystem permissions on the parent directory`,
+      ].join("\n");
+    case "BootConfigInvalid":
+      return [
+        `BootConfigInvalid: ${error.source}`,
+        `  cause:    ${error.reason}`,
+        `  diagnose: cat ${error.path}`,
+        `  fix:      repair ${error.source} and restart the orchestrator`,
       ].join("\n");
     default:
       return absurd(error);

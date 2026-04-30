@@ -160,7 +160,7 @@ export function describeRequestWorkerSpawnTool(): RequestWorkerSpawnToolDescript
   return {
     name: "request_worker_spawn",
     description:
-      "Spawn a Claude Code worker session in an isolated worktree. Use when the work is parallelizable, takes >5 min, or needs its own GitHub-side artifact (PR / issue comment) to land.",
+      "Spawn a Claude Code worker session in an isolated worktree. Use when the work is parallelizable, takes >5 min, or needs its own GitHub-side artifact (PR / issue comment) to land. The caller (lead session) computes the worktree path and passes it here; binding the adapter to that path is upstream work, so for now `worktreePath` is informational only and the worker runs in the adapter's allocated state dir.",
     inputSchema: {
       type: "object",
       required: ["repo", "prompt", "workerSlug", "githubToken", "worktreePath"],
@@ -172,7 +172,8 @@ export function describeRequestWorkerSpawnTool(): RequestWorkerSpawnToolDescript
         githubToken: { type: "string" },
         worktreePath: {
           type: "string",
-          description: "absolute path to the per-worker git worktree",
+          description:
+            "absolute path to the per-worker git worktree (computed by the lead session; informational only — the adapter does not yet bind cwd to it)",
         },
       },
     },

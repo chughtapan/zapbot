@@ -63,6 +63,24 @@ export interface TurnEndpointContract {
   readonly response: TurnResponse;
 }
 
+/**
+ * Discriminated union for `POST /turn` 200 responses (wire shape; the
+ * runner's `TurnResponse` is the in-process Effect-channel sibling).
+ *
+ * - `Replied`: lead session resumed and produced output. `newSessionId`
+ *   is the new claude session id; `durationMs` is wall-clock turn time.
+ * - `DuplicateDelivery`: the incoming `deliveryId` matched the
+ *   persisted `lastDeliveryId`; idempotency short-circuits the run
+ *   without re-invoking claude. `priorSessionId` echoes the existing
+ *   session.
+ *
+ * `writeTurnExit` projects `TurnResponse` into this shape; the bridge
+ * decodes the same union on the receiving end.
+ */
+export type TurnSuccessResponse =
+  | { readonly tag: "Replied"; readonly newSessionId: string; readonly durationMs: number }
+  | { readonly tag: "DuplicateDelivery"; readonly priorSessionId: string };
+
 export interface SpawnEndpointContract {
   readonly request: SpawnWorkerRequest;
   readonly response: SpawnWorkerResponse;
@@ -268,6 +286,21 @@ export function renderErrorResponse(error: OrchestratorError): {
       };
     case "OrchestratorUnreachable":
       return { status: 503, body: { error: error._tag, url: error.url, cause: error.cause } };
+    case "BootConfigInvalid":
+      // Boot-time errors are fatal at process start; the entrypoint
+      // exits non-zero before the listener binds. If one ever reaches
+      // the HTTP renderer (e.g. a future runtime-config-reload path),
+      // surface it as 503 so the bridge maps it through
+      // OrchestratorUnreachable's existing diagnostic chain.
+      return {
+        status: 503,
+        body: {
+          error: error._tag,
+          source: error.source,
+          path: error.path,
+          reason: error.reason,
+        },
+      };
     default:
       return absurd(error);
   }

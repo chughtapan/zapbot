@@ -5,6 +5,19 @@
  * env handoff, top-level fatal catch, all heavy lifting in
  * `src/orchestrator/*`.
  *
+ * On first run, auto-creates `~/.zapbot/config.json` (mints
+ * `orchestratorSecret` if missing) and treats `~/.zapbot/projects.json`
+ * as empty if absent. Operators do not need to pre-stage these files;
+ * `bin/zapbot-team-init` (sub-issue #9) will populate `projects.json`
+ * with project entries.
+ *
+ * `~/.zapbot/projects.json` shape:
+ *   {
+ *     "<slug>": { "repo": "owner/name", "defaultBranch": "main" }
+ *   }
+ * Sub-issue #9 (zapbot-team-init) writes this; the orchestrator only
+ * reads it.
+ *
  * Boot sequence (implemented by `runOrchestratorProcess`):
  *   1. Decode `~/.zapbot/config.json` (webhookSecret, apiKey,
  *      orchestratorSecret).
@@ -223,10 +236,10 @@ function resolveMoltzapPaths(): Effect.Effect<MoltzapPaths, OrchestratorError, n
       return { repoRoot, claudeBin, channelDistDir };
     },
     catch: (cause): OrchestratorError => ({
-      _tag: "ProjectCheckoutFailed",
-      projectSlug: "(boot)",
-      stage: "clone",
-      stderrTail: `moltzap path resolution failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      _tag: "BootConfigInvalid",
+      source: "moltzap-paths",
+      path: "vendor/moltzap",
+      reason: cause instanceof Error ? cause.message : String(cause),
     }),
   });
 }
@@ -269,13 +282,11 @@ function loadOrMintSecret(
       return minted;
     },
     catch: (cause): OrchestratorError => ({
-      _tag: "OrchestratorAuthFailed",
-      reason: "secret-mismatch",
-      // Reusing the auth tag here is intentional: this happens before the
-      // server is up; the operator-visible signal matches "the secret is
-      // wrong / unreadable" semantics that the auth tag already encodes.
-      ...(cause instanceof Error ? { _detail: cause.message } : {}),
-    }) as OrchestratorError,
+      _tag: "BootConfigInvalid",
+      source: "config.json",
+      path: configPath,
+      reason: cause instanceof Error ? cause.message : String(cause),
+    }),
   });
 }
 
@@ -297,10 +308,10 @@ function loadProjects(
       return Schema.decodeUnknownSync(ProjectsFileSchema)(parsed);
     },
     catch: (cause): OrchestratorError => ({
-      _tag: "ProjectCheckoutFailed",
-      projectSlug: "(boot)",
-      stage: "clone",
-      stderrTail: cause instanceof Error ? cause.message : String(cause),
+      _tag: "BootConfigInvalid",
+      source: "projects.json",
+      path: projectsPath,
+      reason: cause instanceof Error ? cause.message : String(cause),
     }),
   });
 }
@@ -542,15 +553,36 @@ function productionAcquireLock(
     const deadline = Date.now() + waitMs;
     let fd: number | null = null;
     while (fd === null) {
+      // Local copy of the fd so a write failure after a successful
+      // open does not leak the descriptor — `fs.closeSync` runs in
+      // the catch's `finally` regardless of the write outcome.
+      let opened: number | null = null;
       try {
-        fd = fs.openSync(
+        opened = fs.openSync(
           lockPath,
           fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR,
           0o644,
         );
-        fs.writeSync(fd, `${process.pid}\n`);
+        fs.writeSync(opened, `${process.pid}\n`);
+        fd = opened;
+        opened = null;
       } catch (cause) {
         const code = (cause as NodeJS.ErrnoException).code;
+        if (opened !== null) {
+          // openSync succeeded but writeSync threw — close the fd
+          // before classifying the error so we don't leak.
+          try {
+            fs.closeSync(opened);
+          } catch (closeCause) {
+            void closeCause;
+          }
+          return yield* Effect.fail<OrchestratorError>({
+            _tag: "BootConfigInvalid",
+            source: "config.json",
+            path: lockPath,
+            reason: `lockfile write failed after open: ${cause instanceof Error ? cause.message : String(cause)}`,
+          });
+        }
         if (code !== "EEXIST") {
           return yield* Effect.fail<OrchestratorError>({
             _tag: "LockTimeout",

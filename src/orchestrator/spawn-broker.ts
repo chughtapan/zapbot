@@ -151,21 +151,27 @@ export function createStubRuntimeServerHandle(deps: {
 /**
  * Project the SpawnWorkerRequest into the workspace files the
  * ClaudeCodeAdapter copies into the per-agent state dir under
- * `<stateDir>/workspace/`. The worker reads `TASK.md` for instructions
- * (including the worktree path it should `cd` into and the issue
- * context) and `.env` for `GH_TOKEN`. ClaudeCodeAdapter forwards `--add-dir
- * <stateDir>/workspace` to the claude CLI so these files are visible
- * to the worker.
+ * `<stateDir>/workspace/`. The worker reads `TASK.md` for prompt +
+ * issue context and `.env` for `GH_TOKEN`. ClaudeCodeAdapter forwards
+ * `--add-dir <stateDir>/workspace` to the claude CLI so these files
+ * are visible to the worker.
  *
- * Note on worktree handling: the architect's design doc § 7 specifies
- * one git worktree per spawned worker at
+ * Worktree binding (architect doc § 7 vs. reality): the design doc
+ * specifies one git worktree per spawned worker at
  * `~/.zapbot/projects/<slug>/workers/<workerSlug>/`. ClaudeCodeAdapter
- * does not yet accept an external worktree path — it creates its own
- * `mkdtempSync`-allocated state dir for each spawn. Until the adapter
- * grows that contract, the worktree path is recorded in TASK.md so
- * the worker can `cd` to it explicitly. The runner already pre-creates
- * the worktree via `ensureProjectCheckout`'s sibling provisioning, so
- * the path is real even though the adapter does not bind it.
+ * does not currently bind to an external worktree — it allocates its
+ * own `mkdtempSync` state dir for each spawn. We do NOT materialize
+ * the worktree here and we do NOT direct the worker to `cd` into a
+ * path the adapter has not bound. The `worktreePath` field stays on
+ * the wire (the lead session passes whatever value it computed) but
+ * is informational only until upstream `ClaudeCodeAdapter` grows a
+ * `cwd`/`worktreePath` option (out-of-scope sub-issue). When it does,
+ * a follow-up swaps in adapter binding + worktree provisioning at
+ * the same time.
+ *
+ * The token rides `.env` rather than being inlined in `TASK.md` so
+ * `TASK.md` stays scrubbable in logs without leaking installation
+ * tokens.
  */
 function renderWorkspaceFiles(
   request: SpawnWorkerRequest,
@@ -175,7 +181,7 @@ function renderWorkspaceFiles(
     "",
     `repo: ${request.repo}`,
     `issue: ${request.issue ?? "(none)"}`,
-    `worktreePath: ${request.worktreePath}`,
+    `worktreePath (informational): ${request.worktreePath}`,
     "",
     "## Instructions",
     "",
@@ -184,13 +190,11 @@ function renderWorkspaceFiles(
     "## Tooling",
     "",
     "- `gh` is authenticated via `$GH_TOKEN` in the environment block.",
-    "- `cd ${worktreePath}` to operate on the project checkout.",
+    "- The worker runs in the adapter's allocated state dir; the",
+    "  worktree path above is recorded for reference, not bound as cwd.",
     "",
   ].join("\n");
 
-  // The token rides on `.env` rather than being inlined in TASK.md so
-  // the prompt itself stays scrubbable in logs without leaking
-  // installation tokens.
   const envBody = `GH_TOKEN=${request.githubToken}\n`;
 
   return [

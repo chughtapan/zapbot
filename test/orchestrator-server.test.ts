@@ -75,8 +75,16 @@ function makeRunnerDeps(turn: TurnRunner): RunnerDeps {
     readSessionFile: () => Effect.succeed(null),
     writeSessionFile: () => Effect.void,
     stashCorruptSession: () => Effect.void,
-    acquireProjectLock: () =>
-      Effect.succeed<ProjectLock>({ release: () => Effect.void }),
+    acquireProjectLock: () => {
+      // Pre-spawn errors (LockTimeout) must surface from this step
+      // rather than spawnClaude — runTurn sequences lock → session →
+      // spawn, and tests want the failing tag observed at the right
+      // point in the flow.
+      if ("error" in turn.result && turn.result.error._tag === "LockTimeout") {
+        return Effect.fail<OrchestratorError>(turn.result.error);
+      }
+      return Effect.succeed<ProjectLock>({ release: () => Effect.void });
+    },
     gitFetch: () => Effect.void,
     provisionCheckout: () => Effect.void,
     writeMcpConfig: () => Effect.void,
@@ -262,6 +270,42 @@ describe("server endpoints", () => {
     expect(res.status).toBe(422);
   });
 
+  it("POST /turn returns 429 LockTimeout when runner reports the lock is held", async () => {
+    harness = await startTestServer(
+      {
+        error: {
+          _tag: "LockTimeout",
+          projectSlug: "acme-app",
+          waitedMs: 30000,
+        },
+      },
+      { _tag: "Spawned", agentId: "a" as SpawnWorkerResponse["agentId"], worktreePath: "/x" },
+    );
+
+    const res = await fetch(`${harness.baseUrl}/turn`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `${AUTH_HEADER_PREFIX}${SECRET}`,
+      },
+      body: JSON.stringify({
+        projectSlug: "acme-app",
+        deliveryId: "delivery-1",
+        message: "hi",
+        githubToken: "ghs_xxx",
+      }),
+    });
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as {
+      error: string;
+      projectSlug: string;
+      waitedMs: number;
+    };
+    expect(body.error).toBe("LockTimeout");
+    expect(body.projectSlug).toBe("acme-app");
+    expect(body.waitedMs).toBe(30000);
+  });
+
   it("POST /spawn returns 503 FleetSpawnFailed when broker fails", async () => {
     harness = await startTestServer(
       {
@@ -374,6 +418,15 @@ describe("renderErrorResponse", () => {
       },
       {
         error: { _tag: "OrchestratorUnreachable", url: "http://x", cause: "y" },
+        status: 503,
+      },
+      {
+        error: {
+          _tag: "BootConfigInvalid",
+          source: "config.json",
+          path: "/x",
+          reason: "y",
+        },
         status: 503,
       },
     ];
