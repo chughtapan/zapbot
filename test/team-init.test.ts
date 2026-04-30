@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -47,18 +47,23 @@ exit 1
     rmSync(fakeHome, { recursive: true, force: true });
   });
 
-  it("writes config and env into the current project directory", () => {
+  it("registers the repo in ~/.zapbot/projects.json with the orchestrator schema", () => {
     execTeamInit(["owner/example-repo"], projectDir, fakeBinDir, fakeHome);
 
-    const configPath = join(projectDir, "agent-orchestrator.yaml");
+    const projectsJsonPath = join(fakeHome, ".zapbot", "projects.json");
     const configJsonPath = join(fakeHome, ".zapbot", "config.json");
 
-    expect(existsSync(configPath)).toBe(true);
+    expect(existsSync(projectsJsonPath)).toBe(true);
     expect(existsSync(configJsonPath)).toBe(true);
 
-    const config = readFileSync(configPath, "utf8");
-    expect(config).toContain("repo: owner/example-repo");
-    expect(config).toContain(`path: ${realpathSync(projectDir)}`);
+    const projects = JSON.parse(readFileSync(projectsJsonPath, "utf8")) as Record<
+      string,
+      { repo: string; defaultBranch: string }
+    >;
+    expect(projects["example-repo"]).toEqual({
+      repo: "owner/example-repo",
+      defaultBranch: "main",
+    });
 
     const configJson = JSON.parse(readFileSync(configJsonPath, "utf8")) as Record<string, unknown>;
     expect(typeof configJson.webhookSecret).toBe("string");
@@ -67,13 +72,37 @@ exit 1
     expect((configJson.apiKey as string).length).toBeGreaterThan(0);
   });
 
-  it("appends add-repo entries to the project-local config file", () => {
+  it("appends add-repo entries to ~/.zapbot/projects.json", () => {
     execTeamInit(["owner/example-repo"], projectDir, fakeBinDir, fakeHome);
     execTeamInit(["--add-repo", "owner/second-repo"], projectDir, fakeBinDir, fakeHome);
 
-    const config = readFileSync(join(projectDir, "agent-orchestrator.yaml"), "utf8");
-    expect(config).toContain("repo: owner/example-repo");
-    expect(config).toContain("repo: owner/second-repo");
+    const projects = JSON.parse(
+      readFileSync(join(fakeHome, ".zapbot", "projects.json"), "utf8"),
+    ) as Record<string, { repo: string; defaultBranch: string }>;
+
+    expect(projects["example-repo"]).toEqual({
+      repo: "owner/example-repo",
+      defaultBranch: "main",
+    });
+    expect(projects["second-repo"]).toEqual({
+      repo: "owner/second-repo",
+      defaultBranch: "main",
+    });
+  });
+
+  it("rejects --add-repo when the slug is already registered", () => {
+    execTeamInit(["owner/example-repo"], projectDir, fakeBinDir, fakeHome);
+
+    let stderr = "";
+    try {
+      execTeamInit(["--add-repo", "owner/example-repo"], projectDir, fakeBinDir, fakeHome);
+    } catch (error) {
+      stderr =
+        String((error as { stdout?: unknown; stderr?: unknown }).stdout ?? "") +
+        String((error as { stdout?: unknown; stderr?: unknown }).stderr ?? "");
+    }
+
+    expect(stderr).toContain("already registered");
   });
 });
 

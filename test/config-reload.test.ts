@@ -8,11 +8,9 @@ import type { CanonicalConfig } from "../src/config/canonical.js";
 import { buildStartupReceipt, renderStartupReceipt } from "../src/startup/receipt.js";
 import { readConfigFiles, type ConfigDiskReader } from "../src/config/disk.js";
 import type { IngressPolicy } from "../src/config/ingress.js";
-import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { parse as parseYaml } from "yaml";
 import type { ConfigDiskError } from "../src/config/types.js";
 import type { Result } from "../src/types.js";
 
@@ -144,11 +142,11 @@ describe("deriveConfigSourcePaths", () => {
   });
 
   it("falls back to $HOME/.zapbot/config.json when no override is set", () => {
-    const paths = deriveConfigSourcePaths("/tmp/agent-orchestrator.yaml", {
+    const paths = deriveConfigSourcePaths("/tmp/projects.json", {
       HOME: "/home/alice",
     });
     expect(paths.canonicalConfigPath).toBe(path.join("/home/alice", ".zapbot", "config.json"));
-    expect(paths.projectConfigPath).toBe("/tmp/agent-orchestrator.yaml");
+    expect(paths.projectConfigPath).toBe("/tmp/projects.json");
   });
 
   it("trims whitespace-only ZAPBOT_CONFIG_JSON to the default", () => {
@@ -336,20 +334,20 @@ describe("reloadBridgeRuntimeConfig", () => {
   });
 
   it("returns only projectConfigText when reading config files", () => {
-    const configPath = path.join(tmpDir, "agent-orchestrator.yaml");
-    fs.writeFileSync(configPath, "projects: {}\n");
+    const configPath = path.join(tmpDir, "projects.json");
+    fs.writeFileSync(configPath, "{}\n");
 
     const result = expectOk(readConfigFiles({
       projectConfigPath: configPath as never,
       canonicalConfigPath: path.join(tmpDir, "config.json") as never,
     }, nodeDiskReader));
 
-    expect(result.projectConfigText).toContain("projects:");
+    expect(result.projectConfigText).toContain("{}");
   });
 
   it("returns a disk error when the project config file does not exist", () => {
     const result = readConfigFiles({
-      projectConfigPath: path.join(tmpDir, "missing.yaml") as never,
+      projectConfigPath: path.join(tmpDir, "missing.json") as never,
       canonicalConfigPath: path.join(tmpDir, "config.json") as never,
     }, nodeDiskReader);
 
@@ -392,6 +390,12 @@ describe("systemd integration: setup --server service generation", () => {
 });
 
 describe("systemd integration: start.sh guard", () => {
+  // The four AO-coupled boot integration tests that previously lived here
+  // (claude-moltzap plugin injection, duplicate-session retry, local-only
+  // bridge URL handling, github-demo URL failure) were removed in #379
+  // when AO startup left start.sh. The new orchestrator + moltzap-server
+  // boot path is covered by sub-issue #10's end-to-end smoke test.
+
   it("guard pattern matches systemctl exit codes correctly", () => {
     const startSh = fs.readFileSync(
       path.join(__dirname, "../start.sh"),
@@ -417,516 +421,31 @@ describe("systemd integration: start.sh guard", () => {
     expect(startSh).not.toContain('source "$PROJECT_DIR/.env"');
   });
 
-  it("only forces claude-moltzap for the project path being bootstrapped", () => {
-    const repoRoot = path.join(__dirname, "..");
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-local-agent-"));
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-local-agent-home-"));
-    const projectDir = path.join(tempRoot, "project");
-    const otherProjectDir = path.join(tempRoot, "other-project");
-    const fakeBinDir = path.join(tempRoot, "bin");
-    const capturedAoConfigPath = path.join(tempRoot, "captured-ao-config.yaml");
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.mkdirSync(otherProjectDir, { recursive: true });
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
+  it("boots moltzap-server, orchestrator, and bridge with /healthz gates", () => {
+    const startSh = fs.readFileSync(
+      path.join(__dirname, "../start.sh"),
+      "utf-8"
+    );
 
-    try {
-      writeFile(
-        path.join(projectDir, "agent-orchestrator.yaml"),
-        [
-          "port: 3000",
-          "",
-          "defaults:",
-          "  runtime: tmux",
-          "  agent: claude-code",
-          "  workspace: worktree",
-          "",
-          "projects:",
-          "  local-project:",
-          "    repo: owner/local",
-          `    path: ${projectDir}`,
-          "    defaultBranch: main",
-          "    scm:",
-          "      plugin: github",
-          "      webhook:",
-          "        path: /api/webhooks/github",
-          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
-          "        signatureHeader: x-hub-signature-256",
-          "        eventHeader: x-github-event",
-          "  remote-project:",
-          "    repo: owner/remote",
-          `    path: ${otherProjectDir}`,
-          "    agent: claude-code",
-          "    defaultBranch: main",
-          "    scm:",
-          "      plugin: github",
-          "      webhook:",
-          "        path: /api/webhooks/github",
-          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
-          "        signatureHeader: x-hub-signature-256",
-          "        eventHeader: x-github-event",
-          "",
-        ].join("\n"),
-      );
-      writeFile(
-        path.join(tempHome, ".zapbot", "config.json"),
-        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
-      );
+    // Boot order: moltzap-server → orchestrator → bridge.
+    const moltzapIdx = startSh.indexOf("Starting moltzap-server");
+    const orchestratorIdx = startSh.indexOf("Starting zapbot-orchestrator");
+    const bridgeIdx = startSh.indexOf("Starting webhook bridge");
+    expect(moltzapIdx).toBeGreaterThan(-1);
+    expect(orchestratorIdx).toBeGreaterThan(-1);
+    expect(bridgeIdx).toBeGreaterThan(-1);
+    expect(moltzapIdx).toBeLessThan(orchestratorIdx);
+    expect(orchestratorIdx).toBeLessThan(bridgeIdx);
 
-      writeExecutable(
-        path.join(fakeBinDir, "systemctl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "ao"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = "start" ]; then
-  cp "$AO_CONFIG_PATH" "$CAPTURED_AO_CONFIG"
-  echo "Dashboard starting on http://localhost:3002"
-  trap 'exit 0' TERM INT
-  sleep 2
-  exit 0
-fi
-if [ "$1" = "status" ]; then
-  echo '[]'
-  exit 0
-fi
-echo "unexpected ao args: $@" >&2
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "bun"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-trap 'exit 0' TERM INT
-sleep 2
-exit 0
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "curl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-url="\${!#}"
-case "$url" in
-  http://localhost:3002/api/observability)
-    echo '{"overallStatus":"ok"}'
-    exit 0
-    ;;
-  http://localhost:3000/healthz)
-    exit 0
-    ;;
-  *)
-    echo "unexpected curl url: $url" >&2
-    exit 1
-    ;;
-esac
-`,
-      );
+    // Each phase has a /health(z) readiness gate.
+    expect(startSh).toMatch(/curl[^\n]*\/health\b/);
+    expect(startSh).toContain("/healthz");
 
-      execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
-        cwd: projectDir,
-        env: {
-          ...process.env,
-          CAPTURED_AO_CONFIG: capturedAoConfigPath,
-          HOME: tempHome,
-          PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-          ZAPBOT_SKIP_ORCHESTRATOR: "1",
-        },
-        encoding: "utf8",
-      });
-
-      const runtimeConfig = parseYaml(fs.readFileSync(capturedAoConfigPath, "utf8")) as {
-        defaults: { agent: string };
-        plugins: Array<{ name?: string; path?: string }>;
-        projects: Record<string, { agent?: string }>;
-      };
-
-      expect(runtimeConfig.defaults.agent).toBe("claude-code");
-      expect(runtimeConfig.plugins).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ name: "claude-moltzap" }),
-        ]),
-      );
-      expect(runtimeConfig.projects["local-project"]?.agent).toBe("claude-moltzap");
-      expect(runtimeConfig.projects["remote-project"]?.agent).toBe("claude-code");
-    } finally {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-      fs.rmSync(tempHome, { recursive: true, force: true });
-    }
-  }, 15000);
-
-  it("retries once after a duplicate orchestrator session is reported", () => {
-    const repoRoot = path.join(__dirname, "..");
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-retry-"));
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-start-home-"));
-    const projectDir = path.join(tempRoot, "project");
-    const fakeBinDir = path.join(tempRoot, "bin");
-    const tmuxLog = path.join(tempRoot, "tmux.log");
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
-
-    try {
-      writeFile(
-        path.join(projectDir, "agent-orchestrator.yaml"),
-        [
-          "projects:",
-          "  demo:",
-          "    repo: owner/repo",
-          "    path: " + projectDir,
-          "    defaultBranch: main",
-          "    scm:",
-          "      plugin: github",
-          "      webhook:",
-          "        path: /api/webhooks/github",
-          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
-          "        signatureHeader: x-hub-signature-256",
-          "        eventHeader: x-github-event",
-          "",
-        ].join("\n"),
-      );
-      writeFile(
-        path.join(tempHome, ".zapbot", "config.json"),
-        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
-      );
-
-      writeExecutable(
-        path.join(fakeBinDir, "gh"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then
-  echo "fake-user"
-  exit 0
-fi
-echo "unexpected gh args: $@" >&2
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "systemctl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = "is-active" ]; then
-  exit 1
-fi
-exit 0
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "tmux"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-echo "$*" >> "\${TMUX_LOG}"
-if [ "$1" = "kill-session" ]; then
-  exit 0
-fi
-exit 0
-`,
-      );
-writeExecutable(
-        path.join(fakeBinDir, "ao"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-STATE_FILE="\${AO_CONFIG_PATH}.count"
-COUNT=0
-if [ -f "$STATE_FILE" ]; then
-  COUNT=$(cat "$STATE_FILE")
-fi
-if [ "$1" = "start" ]; then
-  COUNT=$((COUNT + 1))
-  echo "$COUNT" > "$STATE_FILE"
-  if [ "$COUNT" -eq 1 ]; then
-    echo "Failed to setup orchestrator: duplicate session: stale-orchestrator-1"
-    exit 1
-  fi
-  echo "Dashboard starting on http://localhost:3002"
-  trap 'exit 0' TERM INT
-  sleep 2
-  exit 0
-fi
-if [ "$1" = "status" ]; then
-  echo '[]'
-  exit 0
-fi
-echo "unexpected ao args: $@" >&2
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "bun"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-trap 'exit 0' TERM INT
-sleep 2
-exit 0
-`,
-      );
-writeExecutable(
-        path.join(fakeBinDir, "curl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-url="\${!#}"
-case "$url" in
-  *"/api/observability")
-    echo '{"overallStatus":"ok"}'
-    exit 0
-    ;;
-  *"/healthz")
-    exit 0
-    ;;
-esac
-exit 0
-`,
-      );
-
-      const output = execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
-        cwd: projectDir,
-        env: {
-          ...process.env,
-          HOME: tempHome,
-          PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-          TMUX_LOG: tmuxLog,
-        },
-        encoding: "utf8",
-      });
-
-      expect(output).toContain("Detected stale AO tmux session stale-orchestrator-1; removing and retrying startup...");
-      expect(output).toContain("AO ready on port 3002");
-      expect(output).toContain("Bridge ready on port 3000");
-      expect(fs.readFileSync(tmuxLog, "utf8")).toContain("kill-session -t stale-orchestrator-1");
-      expect(fs.readFileSync(path.join(projectDir, "agent-orchestrator.yaml"), "utf8")).toContain("repo: owner/repo");
-    } finally {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-      fs.rmSync(tempHome, { recursive: true, force: true });
-    }
-  }, 15000);
-
-  it("keeps local-only startup running even if a stale bridge url is present", () => {
-    const repoRoot = path.join(__dirname, "..");
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-explicit-"));
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-home-"));
-    const projectDir = path.join(tempRoot, "project");
-    const fakeBinDir = path.join(tempRoot, "bin");
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
-
-    try {
-      writeFile(
-        path.join(projectDir, "agent-orchestrator.yaml"),
-        [
-          "projects:",
-          "  demo:",
-          "    repo: owner/repo",
-          "    path: " + projectDir,
-          "    defaultBranch: main",
-          "    scm:",
-          "      plugin: github",
-          "      webhook:",
-          "        path: /api/webhooks/github",
-          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
-          "        signatureHeader: x-hub-signature-256",
-          "        eventHeader: x-github-event",
-          "",
-        ].join("\n"),
-      );
-      writeFile(
-        path.join(tempHome, ".zapbot", "config.json"),
-        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
-      );
-
-      writeExecutable(
-        path.join(fakeBinDir, "gh"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then
-  echo "fake-user"
-  exit 0
-fi
-echo "unexpected gh args: $@" >&2
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "systemctl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "ao"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = "start" ]; then
-  echo "Dashboard starting on http://localhost:3002"
-  trap 'exit 0' TERM INT
-  sleep 2
-  exit 0
-fi
-if [ "$1" = "status" ]; then
-  echo '[]'
-  exit 0
-fi
-echo "unexpected ao args: $@" >&2
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "bun"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-trap 'exit 0' TERM INT
-sleep 2
-exit 0
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "curl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-url="\${!#}"
-case "$url" in
-  http://localhost:3002/api/observability)
-    echo '{"overallStatus":"ok"}'
-    exit 0
-    ;;
-  http://localhost:3000/healthz)
-    exit 0
-    ;;
-  http://dead.example:3000/healthz)
-    exit 7
-    ;;
-  *)
-    echo "unexpected curl url: $url" >&2
-    exit 1
-    ;;
-esac
-`,
-      );
-
-      const output = execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
-        cwd: projectDir,
-        env: {
-          ...process.env,
-          HOME: tempHome,
-          PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-          ZAPBOT_GATEWAY_URL: "   ",
-          ZAPBOT_BRIDGE_URL: "http://dead.example:3000",
-          ZAPBOT_SKIP_ORCHESTRATOR: "1",
-        },
-        encoding: "utf8",
-      });
-
-      expect(output).toContain("Mode:      local-only");
-      expect(output).toContain("Gateway:   (local-only)");
-      expect(output).toContain("Public:    (local-only)");
-    } finally {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-      fs.rmSync(tempHome, { recursive: true, force: true });
-    }
-  }, 15000);
-
-  it("fails closed in github demo mode when the public bridge url is dead", () => {
-    const repoRoot = path.join(__dirname, "..");
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-demo-"));
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "zapbot-bridge-demo-home-"));
-    const projectDir = path.join(tempRoot, "project");
-    const fakeBinDir = path.join(tempRoot, "bin");
-    fs.mkdirSync(projectDir, { recursive: true });
-    fs.mkdirSync(fakeBinDir, { recursive: true });
-    fs.mkdirSync(path.join(tempHome, ".zapbot"), { recursive: true });
-
-    try {
-      writeFile(
-        path.join(projectDir, "agent-orchestrator.yaml"),
-        [
-          "projects:",
-          "  demo:",
-          "    repo: owner/repo",
-          "    path: " + projectDir,
-          "    defaultBranch: main",
-          "    scm:",
-          "      plugin: github",
-          "      webhook:",
-          "        path: /api/webhooks/github",
-          "        secretEnvVar: ZAPBOT_WEBHOOK_SECRET",
-          "        signatureHeader: x-hub-signature-256",
-          "        eventHeader: x-github-event",
-          "",
-        ].join("\n"),
-      );
-      writeFile(
-        path.join(tempHome, ".zapbot", "config.json"),
-        JSON.stringify({ webhookSecret: "project-webhook-secret", apiKey: "project-api-key" }, null, 2),
-      );
-
-      writeExecutable(
-        path.join(fakeBinDir, "gh"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-if [ "$1" = "api" ] && [ "$2" = "user" ]; then
-  echo "fake-user"
-  exit 0
-fi
-echo "unexpected gh args: $@" >&2
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "systemctl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-exit 1
-`,
-      );
-      writeExecutable(
-        path.join(fakeBinDir, "curl"),
-        `#!/usr/bin/env bash
-set -euo pipefail
-url="\${!#}"
-case "$url" in
-  http://dead.example:3000/healthz)
-    exit 7
-    ;;
-  *)
-    echo "unexpected curl url: $url" >&2
-    exit 1
-    ;;
-esac
-`,
-      );
-
-      let output = "";
-      try {
-        execFileSync("bash", [path.join(repoRoot, "start.sh"), "."], {
-          cwd: projectDir,
-          env: {
-            ...process.env,
-            HOME: tempHome,
-            PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-            ZAPBOT_GATEWAY_URL: "https://gateway.example",
-            ZAPBOT_BRIDGE_URL: "http://dead.example:3000",
-          },
-          encoding: "utf8",
-        });
-      } catch (error) {
-        output = String((error as { stdout?: unknown; stderr?: unknown }).stdout ?? "") +
-          String((error as { stdout?: unknown; stderr?: unknown }).stderr ?? "");
-      }
-
-      expect(output).toContain("ERROR: ZAPBOT_BRIDGE_URL is unreachable: http://dead.example:3000");
-      expect(output).toContain("FIX: Do not rely on host-derived fallback; set ZAPBOT_BRIDGE_URL to a live public URL.");
-    } finally {
-      fs.rmSync(tempRoot, { recursive: true, force: true });
-      fs.rmSync(tempHome, { recursive: true, force: true });
-    }
+    // AO surface must be gone.
+    expect(startSh).not.toContain("ao start");
+    expect(startSh).not.toContain("AO_LOG_FILE");
+    expect(startSh).not.toContain("AO_DATA_DIR");
+    expect(startSh).not.toContain("agent-orchestrator.yaml");
   });
 });
 
@@ -948,7 +467,7 @@ describe("systemd integration: team-init reload", () => {
     );
 
     expect(teamInit).toContain("Bridge is running (systemd)");
-    expect(teamInit).toContain("start.sh . to start the bridge");
+    expect(teamInit).toContain("start.sh . to start");
   });
 });
 
@@ -998,12 +517,3 @@ describe("SIGHUP handler: lifecycle module owns signal handlers", () => {
     expect(lineCount).toBeLessThanOrEqual(30);
   });
 });
-
-function writeFile(filePath: string, content: string): void {
-  fs.writeFileSync(filePath, content, "utf8");
-}
-
-function writeExecutable(filePath: string, content: string): void {
-  writeFile(filePath, content);
-  fs.chmodSync(filePath, 0o755);
-}
