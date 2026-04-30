@@ -817,18 +817,29 @@ export function buildFetchHandler(
 }
 
 /**
- * Default `mintToken` implementation — delegates to the v1 singleton
- * `getInstallationToken` and maps `null`/throw into `DispatchError`.
+ * Default `mintToken` implementation — tries GitHub App auth first
+ * (`getInstallationToken`), then falls back to `ZAPBOT_GITHUB_TOKEN` (PAT
+ * mode). PAT mode is the supported single-operator path; without the
+ * fallback dispatch fails with `no installation token available` even
+ * when the bridge's other GitHub API calls (reactions, comments) work
+ * fine via the PAT. Mirrors the App-then-PAT priority in
+ * `createGitHubClient`.
  */
 export async function defaultMintToken(): Promise<Result<InstallationToken, DispatchError>> {
   try {
     const t = await getInstallationToken();
-    if (!t) return err({ _tag: "TokenMintFailed", cause: "no installation token available" });
-    return ok(t.token as unknown as InstallationToken);
+    if (t) return ok(t.token as unknown as InstallationToken);
   } catch (e) {
     const cause = e instanceof Error ? e.message : String(e);
     return err({ _tag: "TokenMintFailed", cause });
   }
+  const pat = process.env.ZAPBOT_GITHUB_TOKEN?.trim();
+  if (pat) return ok(pat as unknown as InstallationToken);
+  return err({
+    _tag: "TokenMintFailed",
+    cause:
+      "no installation token available — set GITHUB_APP_ID + GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY for App auth, or ZAPBOT_GITHUB_TOKEN for PAT mode",
+  });
 }
 
 export async function startBridge(config: BridgeConfig): Promise<RunningBridge> {
