@@ -546,8 +546,8 @@ export function createRosterManager(deps: RosterManagerDeps): RosterManager {
 
     // sbd#201: client-side allowlist binding is gone. Admission lives
     // server-side: the spawn dep calls `createBridgeSession` with
-    // `invitedAgentIds: [thisWorkerSenderId]` BEFORE each `ao spawn`, so
-    // the bridge's `apps/create` invite admits the worker on every
+    // `invitedAgentIds: [thisWorkerSenderId]` before each worker spawn,
+    // so the bridge's `apps/create` invite admits the worker on every
     // conversation key in the union manifest. Role-pair topology is
     // dissolved into role-pair conversation keys (`conversation-keys.ts`).
 

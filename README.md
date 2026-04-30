@@ -1,29 +1,33 @@
 # Zapbot
 
-Zapbot is a thin GitHub webhook control bridge for `ao`.
+Zapbot is a thin GitHub webhook control bridge that dispatches `@zapbot ...`
+mentions into a persistent zapbot orchestrator process.
 
 GitHub keeps the durable task record. Zapbot verifies webhooks, checks repo
-permissions, and forwards control events into a persistent AO orchestrator
-session for each configured project.
+permissions, and POSTs `/turn` requests into the orchestrator, which resumes
+the project's lead Claude Code session and dispatches workers via the
+`@moltzap/runtimes` ClaudeCodeAdapter.
 
 ## Plain-language terms
 
-- `ao` is the CLI/runtime zapbot uses to start and keep agent sessions alive.
-- An orchestrator session is the always-on AO session for one project. It reads
-  GitHub events, chooses what to do next, and delegates work.
-- Worker sessions are short-lived AO sessions spawned for one issue or task.
-- MoltZap is the live messaging layer attached to an AO session. Zapbot uses
-  it so the orchestrator and workers can coordinate in real time.
+- The zapbot orchestrator is a long-lived HTTP process that owns one Claude
+  Code lead session per configured project (resumed via `claude -p --resume`).
+- Worker sessions are short-lived Claude Code processes spawned by the lead
+  session through the `request_worker_spawn` MCP tool, dispatched by
+  `@moltzap/runtimes`.
+- MoltZap is the live messaging layer; the lead and worker sessions coordinate
+  in real time over MoltZap channels backed by the moltzap-server.
 
 ## Runtime flow
 
 1. GitHub sends `issue_comment` webhooks to `/api/webhooks/github`.
 2. Zapbot verifies the HMAC and parses a literal `@zapbot ...` command.
 3. Zapbot checks that the commenter has write access.
-4. Zapbot ensures the project's AO orchestrator session is running.
-5. Zapbot forwards the GitHub control event into that orchestrator session.
-6. The orchestrator decides whether to spawn worker sessions with
-   `bun run bin/ao-spawn-with-moltzap.ts <issue-number>`.
+4. The bridge POSTs `/turn` to the persistent zapbot orchestrator process.
+5. The orchestrator resumes the project's lead Claude Code session inside
+   `~/.zapbot/projects/<slug>/checkout/`.
+6. The lead session calls the `request_worker_spawn` MCP tool to dispatch
+   ephemeral workers via `@moltzap/runtimes` ClaudeCodeAdapter.
 
 ## Canonical commands
 
@@ -35,8 +39,9 @@ Run this from the zapbot checkout on the bridge host:
 ./setup --server
 ```
 
-This installs zapbot's repo dependencies and the AO runtime needed on the
-server side. If Bun is missing, setup installs it too.
+This installs zapbot's repo dependencies and verifies the server-side
+prerequisites (claude CLI, tmux, jq, node) used by the orchestrator and
+moltzap-server. If Bun is missing, setup installs it too.
 
 ### `zapbot-team-init`
 
@@ -46,8 +51,11 @@ Use this from the project checkout zapbot should operate on:
 /path/to/zapbot/bin/zapbot-team-init owner/repo
 ```
 
-That creates `agent-orchestrator.yaml` and `.env` in the current project
-directory. To add another repo later, use:
+That registers the project in `~/.zapbot/projects.json` (the orchestrator's
+project loader source) and mints the shared secrets in `~/.zapbot/config.json`.
+The bridge separately reads `agent-orchestrator.yaml` from the project
+directory for its repo-routing table; create or maintain that file alongside
+the project's `.env` when running the bridge. To add another repo later, use:
 
 ```bash
 /path/to/zapbot/bin/zapbot-team-init --add-repo owner/other-repo
@@ -62,9 +70,13 @@ local config:
 /path/to/zapbot/start.sh .
 ```
 
-`start.sh` expects `agent-orchestrator.yaml` and `.env` in the project
-directory. It starts AO on `ZAPBOT_AO_PORT` or `3001`, then the webhook bridge
-on `ZAPBOT_PORT` or `3000`.
+`start.sh` sources the project's `.env` for non-secret operator settings,
+loads shared secrets from `~/.zapbot/config.json`, and (when running the
+bridge) expects `ZAPBOT_CONFIG` to point at the project's
+`agent-orchestrator.yaml` so the bridge can route webhooks. It launches the
+moltzap-server, the zapbot orchestrator (which reads
+`~/.zapbot/projects.json`), and the webhook bridge on `ZAPBOT_PORT` or
+`3000`.
 
 ### Supported GitHub comment commands
 
@@ -96,14 +108,15 @@ now requires a registration secret whenever a server URL is set.
 
 Worker env posture:
 
-- Zapbot forwards the GitHub installation token (`GH_TOKEN`) into AO sessions so
-  spawned workers can use GitHub on behalf of the repo. That token stays inside
-  the local trust boundary: the bridge process and its AO child processes on the
-  operator machine. It is not meant to cross into GitHub, MoltZap messages, or
-  published artifacts.
+- Zapbot forwards the GitHub installation token (`GH_TOKEN`) into the
+  orchestrator's spawned Claude lead and worker sessions so they can use
+  GitHub on behalf of the repo. That token stays inside the local trust
+  boundary on the operator machine. It is not meant to cross into GitHub,
+  MoltZap messages, or published artifacts.
 - Zapbot forwards `MOLTZAP_*` only when MoltZap is configured.
-- Zapbot does **not** forward `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`, or
-  `GITHUB_APP_PRIVATE_KEY` into AO child processes.
+- Zapbot does **not** forward `ZAPBOT_API_KEY`, `ZAPBOT_WEBHOOK_SECRET`,
+  `ZAPBOT_ORCHESTRATOR_SECRET`, or `GITHUB_APP_PRIVATE_KEY` into the
+  spawned child processes.
 
 ## Bridge host setup
 
@@ -125,19 +138,21 @@ cd /path/to/zapbot
 ./setup --server
 ```
 
-2. Change into the project checkout AO should operate in, then generate the
-   local zapbot config for that repo:
+2. Change into the project checkout zapbot should operate on, then
+   register the project with zapbot:
 
 ```bash
 cd /path/to/your-project
 /path/to/zapbot/bin/zapbot-team-init owner/repo
 ```
 
-This creates these files in the current project directory:
-
-- `agent-orchestrator.yaml` - repo routing + AO project config
-- `.env` - generated webhook secret and local broker bearer, plus commented
-  placeholders for the remaining operator-managed settings
+This writes the project entry into `~/.zapbot/projects.json` (the
+orchestrator's project loader source) and mints shared secrets in
+`~/.zapbot/config.json`. The bridge reads `agent-orchestrator.yaml` from
+the project directory for repo routing; create that file plus a project
+`.env` alongside it (a generated `.env` may already be present from older
+zapbot versions; the values it contained — webhook secret, api key — are
+now centralised in `~/.zapbot/config.json`).
 
 3. Edit the generated `.env` and add GitHub auth plus any optional gateway or
    MoltZap config you need:
@@ -164,8 +179,11 @@ GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
 # ZAPBOT_MOLTZAP_REGISTRATION_SECRET=...
 ```
 
-`start.sh` automatically points `ZAPBOT_CONFIG` at `./agent-orchestrator.yaml`,
-so normal startup does not require setting that variable by hand.
+Set `ZAPBOT_CONFIG` (typically in the project `.env`) to the absolute or
+relative path of `agent-orchestrator.yaml` so the bridge process can load
+its repo-routing table at boot. `start.sh` sources the project `.env`
+before launching the bridge, so exporting `ZAPBOT_CONFIG=./agent-orchestrator.yaml`
+in `.env` is sufficient.
 
 4. Start the operator stack from the same project checkout:
 
@@ -181,26 +199,34 @@ When startup succeeds, you should see output like this:
 ```text
 === Starting Zapbot ===
 Project: /path/to/your-project
-Repos:   owner/repo
-AO ready on port 3001
+Mode:    local-only
+
+moltzap-server ready on port 3100
+Orchestrator ready on port 3002
 Bridge ready on port 3000
 
 ================================================
   Zapbot is running!
 ================================================
-  Bridge:    http://localhost:3000
-  Dashboard: http://localhost:3001
-  Gateway:   https://gateway.example.com
-  Public:    https://bridge.example.com
+  Project:       /path/to/your-project
+  Mode:          local-only
+  Bridge:        http://localhost:3000
+  Orchestrator:  http://localhost:3002
+  MoltZap:       http://127.0.0.1:3100
+  Gateway:       (local-only)
+  Public:        (local-only)
+
   Publish:   bash /path/to/zapbot/bin/zapbot-publish.sh <plan-file>
-  Logs: /tmp/zapbot-{ao,bridge}.log
+
+  Logs: /tmp/zapbot-{moltzap,orchestrator,bridge}.log
   Press Ctrl+C to stop everything.
 ================================================
 ```
 
-If `ZAPBOT_GATEWAY_URL` is unset, the `Gateway:` and `Public:` lines do not
-appear. If the readiness lines do not appear earlier in the shell output, check
-`/tmp/zapbot-ao.log` and `/tmp/zapbot-bridge.log`.
+If `ZAPBOT_GATEWAY_URL` is set, the `Gateway:` and `Public:` lines show the
+configured public URLs instead of `(local-only)`. If readiness lines do not
+appear, check `/tmp/zapbot-moltzap.log`, `/tmp/zapbot-orchestrator.log`, or
+`/tmp/zapbot-bridge.log`.
 
 ## Dummy-project demo
 
@@ -267,8 +293,8 @@ Minimum GitHub App config:
 Permissions:
 
 - Issues read/write: zapbot reacts to comments and posts status/feedback
-- Pull requests read/write and Contents read/write: spawned AO workers use the
-  installation token to edit branches and open PRs
+- Pull requests read/write and Contents read/write: spawned worker sessions
+  use the installation token to edit branches and open PRs
 - Checks read: worker automation reads repo check state
 
 ## Development
@@ -285,16 +311,19 @@ Useful entrypoints:
 
 - `bun run bridge` - run only the webhook bridge; expects config/env to already
   be present
-- `./start.sh .` - run the bridge and AO together from a project checkout
+- `./start.sh .` - run the moltzap-server, orchestrator, and bridge together
+  from a project checkout
 
 ## Repo map
 
-- `src/` - current runtime: webhook intake, config load/reload, GitHub helpers,
-  orchestrator forwarding, MoltZap session support
-- `worker/` - repo-local AO plugin and Claude/MoltZap worker launcher
+- `src/` - current runtime: webhook intake, config load/reload, GitHub
+  helpers, orchestrator forwarding, MoltZap session support, and the
+  `orchestrator/` HTTP server + claude-runner + spawn-broker
 - `gateway/` - optional bridge registry / webhook proxy
 - `bin/webhook-bridge.ts` - bridge entrypoint
-- `bin/ao-spawn-with-moltzap.ts` - worker spawn helper that preserves the
-  MoltZap control link
+- `bin/zapbot-orchestrator.ts` - orchestrator entrypoint (HTTP `/turn`
+  listener + Claude session resumption + spawn broker)
+- `bin/zapbot-spawn-mcp.ts` - MCP server backing the
+  `request_worker_spawn` tool used by lead Claude sessions
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the current module layout.

@@ -3,10 +3,8 @@
  *
  * This module owns two boundaries only:
  *   1. Decode zapbot env/config into a typed MoltZap runtime config.
- *   2. Materialize the `MOLTZAP_*` env a spawned `ao` session should receive.
- *
- * Implementation lands in the implement-* phase. Architect stage exports the
- * public shape only.
+ *   2. Materialize the `MOLTZAP_*` env a spawned worker session should
+ *      receive.
  */
 
 import { absurd, err, ok } from "../types.ts";
@@ -89,9 +87,9 @@ export async function buildMoltzapSpawnEnv(
 }
 
 /**
- * Materialize the MoltZap-related parent-process env that `ao start` / `ao spawn`
- * should inherit before the session-local Claude channel server provisions its
- * own runtime identity.
+ * Materialize the MoltZap-related parent-process env that the orchestrator
+ * passes through to spawned Claude lead/worker sessions before each
+ * session-local Claude channel server provisions its own runtime identity.
  */
 export function buildMoltzapProcessEnv(
   config: MoltzapRuntimeConfig,

@@ -24,7 +24,9 @@ automatically.
 Bridge operators also need:
 
 - `gh` authenticated
-- `ao` installed
+- `claude` CLI on `PATH` (the orchestrator resumes Claude Code sessions via
+  `claude -p --resume`)
+- `tmux` and `jq` on `PATH`
 - a GitHub App or PAT-based auth configuration
 
 Operator bootstrap flow:
@@ -53,19 +55,16 @@ bun run bridge
 bin/
   webhook-bridge.ts        bridge entrypoint
   zapbot-team-init         repo onboarding helper
-  ao-spawn-with-moltzap.ts worker spawn helper
+  zapbot-orchestrator.ts   orchestrator entrypoint (HTTP /turn listener)
+  zapbot-spawn-mcp.ts      MCP server backing request_worker_spawn
 
 src/
-  bridge.ts                webhook handling + orchestrator forwarding
+  bridge.ts                webhook handling + /turn dispatch
   config/                  YAML + .env load/reload support
   github/                  GitHub auth/API wrapper
   http/                    HMAC verification and JSON error helpers
-  orchestrator/            persistent AO orchestrator control path
+  orchestrator/            HTTP server + claude-runner + spawn-broker
   moltzap/                 MoltZap runtime/session support
-
-worker/
-  ao-plugin-agent-claude-moltzap/
-                           repo-local Claude/MoltZap AO agent plugin
 
 gateway/
   optional webhook proxy / bridge registry
@@ -79,13 +78,16 @@ test/
 Do not add back:
 
 - SQLite-backed workflow state
-- internal agent team abstractions on top of `ao`
+- internal agent team abstractions on top of the orchestrator
 - workflow/history HTTP APIs that are no longer part of the shipped surface
 - docs that describe deleted state-machine behavior as current
+- AO (`@aoagents/ao`) as a worker spawn channel — the orchestrator +
+  `@moltzap/runtimes` is the only worker spawn path
 
 ## Updating the bridge
 
-1. Make the runtime change in `src/` or `worker/`, whichever owns the live path.
+1. Make the runtime change in `src/` (the bridge, orchestrator, and
+   moltzap-side modules — `worker/` no longer exists).
 2. Add or update tests under `test/`.
 3. Run `bun run test`, `bun run lint`, and `bun run build`.
 4. Keep README, ARCHITECTURE, and onboarding scripts aligned with the shipped path.
