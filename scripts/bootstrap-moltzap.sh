@@ -58,9 +58,10 @@ REWRITE_SCRIPT='
   const fs = require("fs");
   const [pkgsDir, effectVer] = process.argv.slice(1);
   const SIBLING = {
-    "@moltzap/client":      "file:../client",
-    "@moltzap/protocol":    "file:../protocol",
-    "@moltzap/server-core": null,  // drop — not needed outside the moltzap monorepo
+    "@moltzap/client":              "file:../client",
+    "@moltzap/protocol":            "file:../protocol",
+    "@moltzap/claude-code-channel": "file:../claude-code-channel",
+    "@moltzap/server-core":         null,  // drop — not needed outside the moltzap monorepo
   };
   const pkgs = fs.readdirSync(pkgsDir, { withFileTypes: true })
     .filter(d => d.isDirectory() && fs.existsSync(`${pkgsDir}/${d.name}/package.json`))

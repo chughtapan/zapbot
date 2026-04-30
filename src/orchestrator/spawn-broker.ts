@@ -6,21 +6,32 @@
  *
  * Owns: the SpawnBroker handle (per orchestrator process; one fleet),
  * the SpawnWorkerRequest / SpawnWorkerResponse schema-decoded shapes,
- * the stub RuntimeServerHandle ("first poll empty, then auth=fake")
- * that satisfies `claude-code-adapter.ts:waitUntilReady`'s sync poll
- * loop until upstream `awaitAgentReady` (sub-issue #371) lands and
- * sub-issue #8 swaps the stub for the real WS-presence implementation.
+ * the stub `RuntimeServerHandle` used until upstream WS-presence
+ * subscription lands and sub-issue #8 swaps the stub for the real
+ * implementation.
  *
  * Does not own: HTTP transport (server.ts), MCP transport
  * (bin/zapbot-spawn-mcp.ts), claude-runner subprocess (runner.ts), or
  * worktree provisioning beyond passing the worktree path to the adapter
  * (the runner pre-creates the worktree before calling the broker).
+ *
+ * Note on stub design: the architect's design doc § 3 described the
+ * stub for the pre-refactor `RuntimeServerHandle.connections.getByAgent`
+ * shape. The submodule pin used here (b218de7) carries the post-refactor
+ * `awaitAgentReady(agentId, timeoutMs)` API, so the stub implements that
+ * method directly with a deterministic delay-then-Ready pattern. The
+ * failure-mode analysis from the design doc still applies: no real auth
+ * verification, no agent-side auth-failure detection. Sub-issue #8 lands
+ * the WS-presence-backed implementation.
  */
 
 import { Effect } from "effect";
-import type {
-  RuntimeConnection,
-  RuntimeServerHandle,
+import {
+  startRuntimeAgent,
+  type ReadyOutcome,
+  type RuntimeFleetAgent,
+  type RuntimeServerHandle,
+  type Runtime,
 } from "@moltzap/runtimes";
 import type { RepoFullName } from "../types.ts";
 import type { OrchestratorError } from "./errors.ts";
@@ -34,15 +45,6 @@ export type GithubInstallationToken = string & {
 
 // ── Public shapes ───────────────────────────────────────────────────
 
-/**
- * MCP tool input. Decoded at the bin/zapbot-spawn-mcp.ts boundary; the
- * broker assumes a validated value.
- *
- * `issue` is null for free-form workers (e.g., a long-running indexer).
- * `worktreePath` is the absolute path the runner pre-created for this
- * worker (`~/.zapbot/projects/<slug>/workers/<workerSlug>/`); the broker
- * does NOT create or destroy it.
- */
 export interface SpawnWorkerRequest {
   readonly repo: RepoFullName;
   readonly issue: number | null;
@@ -58,39 +60,17 @@ export interface SpawnWorkerResponse {
   readonly worktreePath: string;
 }
 
-/**
- * Per-orchestrator-process handle. Holds the moltzap RuntimeFleet so
- * `stopAll` can be called on shutdown. One broker per orchestrator
- * process; agents accumulate across many `requestWorkerSpawn` calls
- * until the orchestrator exits.
- */
 export interface SpawnBrokerHandle {
-  /**
-   * Spawn one worker. Effect resolves with `Spawned` when the runtime
-   * adapter's `waitUntilReady` returns Ready. On Timeout / ProcessExited
-   * the broker has already torn down the partial spawn; the Effect fails
-   * with `FleetSpawnFailed`.
-   */
   readonly requestWorkerSpawn: (
     request: SpawnWorkerRequest,
   ) => Effect.Effect<SpawnWorkerResponse, OrchestratorError, never>;
-
-  /**
-   * Idempotent. Tears down every spawned agent (SIGTERM → 10s → SIGKILL
-   * via the adapter's own `teardown`) and removes per-agent state dirs.
-   * Called from the orchestrator entrypoint's SIGINT/SIGTERM handler.
-   */
   readonly stopAll: () => Effect.Effect<void, never, never>;
+  /** Snapshot of currently-tracked agents (used by /healthz and tests). */
+  readonly listAgents: () => ReadonlyArray<RuntimeFleetAgent>;
 }
 
 // ── DI seam ─────────────────────────────────────────────────────────
 
-/**
- * Dependencies for the spawn broker. Mirrors the dependency-injection
- * shape used by `FixWorkspaceDeps` in the launcher: every effectful
- * primitive the broker needs is named here so tests can substitute
- * deterministic doubles without a process spawn.
- */
 export interface SpawnBrokerDeps {
   readonly server: RuntimeServerHandle;
   readonly clock: () => number;
@@ -100,77 +80,190 @@ export interface SpawnBrokerDeps {
     msg: string,
     extra?: Record<string, unknown>,
   ) => void;
-  /**
-   * Read-only resolved paths the broker hands to the ClaudeCodeAdapter
-   * via `claudeCode: { claudeBin, channelDistDir, repoRoot }`. The
-   * orchestrator entrypoint resolves these once at boot from the
-   * vendored moltzap workspace.
-   */
   readonly claudeBin: string;
   readonly channelDistDir: string;
   readonly moltzapRepoRoot: string;
-  /** Default ready-timeout for `waitUntilReady`. */
+  /** moltzap-server URL the worker should authenticate against. */
+  readonly moltzapServerUrl: string;
+  /** moltzap api key minted for the worker; same key is supplied to the runtime spec. */
+  readonly moltzapApiKey: string;
   readonly readyTimeoutMs: number;
+  /**
+   * Optional override for `startRuntimeAgent`. Tests pass a stub that
+   * returns a hand-built `Runtime` so the broker exercises the
+   * Effect/error wiring without spawning a real claude process.
+   */
+  readonly startRuntimeAgent?: typeof startRuntimeAgent;
 }
 
 // ── Stub RuntimeServerHandle ────────────────────────────────────────
 
 /**
- * Stub `RuntimeServerHandle` used until upstream `awaitAgentReady`
- * (sub-issue #371) lands and zapbot sub-issue #8 swaps in the real
- * WS-presence implementation.
+ * Stub `RuntimeServerHandle.awaitAgentReady` used until the WS-presence-
+ * backed implementation lands (sub-issue #8). Resolves Ready after
+ * `fakeReadyDelayMs` from the first call for a given agentId, and
+ * sticks Ready for subsequent calls. Returns Timeout if `timeoutMs`
+ * expires before the delay elapses.
  *
- * Pattern ("first poll empty, then auth=fake"): the first
- * `getByAgent(agentId)` call returns `[]`. Subsequent calls within
- * `fakeReadyDelayMs` of the first call also return `[]`. After the
- * delay elapses, `getByAgent` returns a single connection with a
- * non-null `auth` so `claude-code-adapter.waitUntilReady`'s poll loop
- * resolves Ready (it tests `length > 0 && conns[0].auth !== null`).
- *
- * Why this works: the adapter never inspects what `auth` actually
- * contains; it only checks non-null. The polling loop runs at 250 ms
- * intervals, so a `fakeReadyDelayMs` of 1500 ms means roughly six
- * polls return empty before one returns ready. The adapter's
- * separate `pollExitCode` path still detects subprocess crashes
- * before the fake-ready interval elapses, so a worker that crashes
- * on launch still surfaces as `ProcessExited`, not `Ready`.
- *
- * What we lose: no actual auth verification, so a runtime that spawns
- * but never connects to a moltzap server is reported Ready anyway.
- * No detection of agent-side authentication failures (the runtime
- * adapter would normally see a missing/invalid auth and surface it;
- * the stub never sees auth at all). This is acceptable because the
- * lead session is the only consumer of worker output; if a worker
- * silently failed to authenticate, its GitHub-side artifact would
- * never appear and the user retries via `@zapbot`. Sub-issue #8
- * removes the stub once upstream `awaitAgentReady` lands.
+ * Limitations (mirrors design doc § 3):
+ *   - no real auth verification
+ *   - no agent-side auth-failure detection
+ *   - the delay is heuristic
+ * Adapter-layer `pollExitCode` still surfaces a crashing process as
+ * `ProcessExited` because the adapter races `awaitAgentReady` against
+ * its own exit poll.
  */
 export function createStubRuntimeServerHandle(deps: {
   readonly clock: () => number;
   readonly fakeReadyDelayMs: number;
 }): RuntimeServerHandle {
-  void deps;
-  throw new Error("not implemented: createStubRuntimeServerHandle");
+  const firstSeenAt = new Map<string, number>();
+  return {
+    awaitAgentReady(
+      agentId: string,
+      timeoutMs: number,
+    ): Effect.Effect<ReadyOutcome, never, never> {
+      return Effect.suspend(() => {
+        const now = deps.clock();
+        const seenAt = firstSeenAt.get(agentId);
+        if (seenAt === undefined) {
+          firstSeenAt.set(agentId, now);
+        }
+        const baseline = seenAt ?? now;
+        const elapsed = now - baseline;
+        const remaining = Math.max(0, deps.fakeReadyDelayMs - elapsed);
+        if (timeoutMs < remaining) {
+          return Effect.succeed<ReadyOutcome>({
+            _tag: "Timeout",
+            timeoutMs,
+          });
+        }
+        return Effect.sleep(`${remaining} millis`).pipe(
+          Effect.zipRight(Effect.succeed<ReadyOutcome>({ _tag: "Ready" })),
+        );
+      });
+    },
+  };
 }
 
-// Reference imports above are intentional: the implementer threads
-// `RuntimeConnection` through the closure returned by
-// `createStubRuntimeServerHandle`.
-type _StubConnection = RuntimeConnection;
-const _stubConnRef: _StubConnection | null = null;
-void _stubConnRef;
+// ── Spawn record (forward-compat seam) ──────────────────────────────
+
+interface SpawnRecord {
+  readonly agentId: AgentId;
+  readonly workerSlug: string;
+  readonly worktreePath: string;
+  readonly startedAt: number;
+  readonly runtime: Runtime;
+}
 
 // ── Constructor ─────────────────────────────────────────────────────
 
-/**
- * Construct a SpawnBrokerHandle bound to the given deps. Holds an
- * internal `RuntimeFleet` (lazily initialized on first
- * `requestWorkerSpawn`) and a `Map<AgentId, SpawnRecord>` so future
- * status-query endpoints (out-of-scope forward-compat seam for
- * worker→lead notifications, epic #369 § "Open architectural questions"
- * Q5) can be added without changing the spawn API.
- */
 export function createSpawnBroker(deps: SpawnBrokerDeps): SpawnBrokerHandle {
-  void deps;
-  throw new Error("not implemented: createSpawnBroker");
+  const records = new Map<AgentId, SpawnRecord>();
+  const startAgent = deps.startRuntimeAgent ?? startRuntimeAgent;
+
+  const requestWorkerSpawn = (
+    request: SpawnWorkerRequest,
+  ): Effect.Effect<SpawnWorkerResponse, OrchestratorError, never> =>
+    Effect.gen(function* () {
+      // Validate worktree path is non-empty (Schema-decode boundary at the
+      // server; defense-in-depth here catches direct in-process callers).
+      if (request.worktreePath.length === 0) {
+        return yield* Effect.fail<OrchestratorError>({
+          _tag: "SpawnRequestInvalid",
+          reason: "worktreePath is empty",
+        });
+      }
+
+      const agentId = (`worker-${request.workerSlug}-${deps.randomHex(8)}`) as AgentId;
+      const agentName = `${request.workerSlug}-${request.repo.replace("/", "_")}`;
+
+      deps.log("info", "spawn-broker: starting worker", {
+        agentId,
+        agentName,
+        worktreePath: request.worktreePath,
+      });
+
+      const launch = startAgent({
+        kind: "claude-code",
+        server: deps.server,
+        agent: {
+          agentName,
+          apiKey: deps.moltzapApiKey,
+          agentId,
+          serverUrl: deps.moltzapServerUrl,
+        },
+        readyTimeoutMs: deps.readyTimeoutMs,
+        claudeCode: {
+          claudeBin: deps.claudeBin,
+          channelDistDir: deps.channelDistDir,
+          repoRoot: deps.moltzapRepoRoot,
+        },
+      });
+
+      const runtime = yield* launch.pipe(
+        Effect.mapError((cause): OrchestratorError => {
+          const tag = cause._tag;
+          if (tag === "RuntimeReadyTimedOut") {
+            return {
+              _tag: "FleetSpawnFailed",
+              agentName,
+              cause: "ready-timeout",
+              detail: `agent did not become ready within ${deps.readyTimeoutMs}ms`,
+            };
+          }
+          if (tag === "RuntimeExitedBeforeReady") {
+            return {
+              _tag: "FleetSpawnFailed",
+              agentName,
+              cause: "process-exited",
+              detail: `exit=${cause.exitCode ?? "null"} stderr=${cause.stderr.slice(-200)}`,
+            };
+          }
+          // SpawnFailed
+          return {
+            _tag: "FleetSpawnFailed",
+            agentName,
+            cause: "config-invalid",
+            detail: cause.cause instanceof Error ? cause.cause.message : String(cause.cause),
+          };
+        }),
+      );
+
+      records.set(agentId, {
+        agentId,
+        workerSlug: request.workerSlug,
+        worktreePath: request.worktreePath,
+        startedAt: deps.clock(),
+        runtime,
+      });
+
+      return {
+        _tag: "Spawned" as const,
+        agentId,
+        worktreePath: request.worktreePath,
+      };
+    });
+
+  const stopAll = (): Effect.Effect<void, never, never> =>
+    Effect.gen(function* () {
+      const snapshot = Array.from(records.values()).reverse();
+      records.clear();
+      yield* Effect.forEach(snapshot, (record) => record.runtime.teardown(), {
+        discard: true,
+      });
+    });
+
+  const listAgents = (): ReadonlyArray<RuntimeFleetAgent> =>
+    Array.from(records.values()).map((record) => ({
+      name: record.workerSlug,
+      agentId: record.agentId,
+    }));
+
+  return {
+    requestWorkerSpawn,
+    stopAll,
+    listAgents,
+  };
 }
+

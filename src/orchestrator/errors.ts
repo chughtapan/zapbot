@@ -20,6 +20,8 @@
  * stay orchestrator-internal and never leak to the bridge.
  */
 
+import { absurd } from "../types.ts";
+
 export type OrchestratorError =
   // ── bridge-visible (mirror to LauncherError when launcher branch lands) ──
   | { readonly _tag: "OrchestratorUnreachable"; readonly url: string; readonly cause: string }
@@ -70,13 +72,94 @@ export type OrchestratorError =
  * `cause` / `diagnose` / `fix` block. Mirrors `describeLauncherError`'s
  * shape so operator output is consistent across the bridge → orchestrator
  * boundary.
- *
- * Implementer (sub-issue #3): switch on `error._tag` and end the switch
- * with `default: return absurd(error);` (import `absurd` from `../types.ts`).
- * Each branch returns the 4-line summary/cause/diagnose/fix block; the
- * reference wording lives in the design doc § "Errors" on epic #369.
  */
 export function describeOrchestratorError(error: OrchestratorError): string {
-  void error;
-  throw new Error("not implemented: describeOrchestratorError");
+  switch (error._tag) {
+    case "OrchestratorUnreachable":
+      return [
+        `OrchestratorUnreachable: ${error.url}`,
+        `  cause:    ${error.cause}`,
+        `  diagnose: curl -v ${error.url}/healthz`,
+        `  fix:      ensure 'bun run bin/zapbot-orchestrator.ts' is running and ZAPBOT_ORCHESTRATOR_URL is correct`,
+      ].join("\n");
+    case "OrchestratorAuthFailed":
+      return [
+        `OrchestratorAuthFailed: ${error.reason}`,
+        `  cause:    bridge → orchestrator auth rejected (${error.reason})`,
+        `  diagnose: jq .orchestratorSecret ~/.zapbot/config.json`,
+        `  fix:      regenerate orchestratorSecret and restart both bridge and orchestrator`,
+      ].join("\n");
+    case "FleetSpawnFailed":
+      return [
+        `FleetSpawnFailed: agent='${error.agentName}' cause=${error.cause}`,
+        `  cause:    ${error.detail}`,
+        `  diagnose: tail -50 ~/.zapbot/projects/<slug>/logs/worker-<agentId>.log`,
+        `  fix:      check moltzap server is running, check claude CLI is on PATH`,
+      ].join("\n");
+    case "LeadSessionCorrupted":
+      return [
+        `LeadSessionCorrupted: ${error.projectSlug}`,
+        `  cause:    ${error.reason}`,
+        `  diagnose: jq . ${error.sessionPath}`,
+        `  fix:      session.json moved aside as ${error.sessionPath}.corrupt-<unix-ms>; next webhook starts fresh`,
+      ].join("\n");
+    case "TurnRequestInvalid":
+      return [
+        `TurnRequestInvalid`,
+        `  cause:    ${error.reason}`,
+        `  diagnose: inspect the bridge → /turn JSON body for missing or wrong-typed fields`,
+        `  fix:      align bridge encoder with TurnRequest schema in src/orchestrator/server.ts`,
+      ].join("\n");
+    case "SpawnRequestInvalid":
+      return [
+        `SpawnRequestInvalid`,
+        `  cause:    ${error.reason}`,
+        `  diagnose: inspect MCP request_worker_spawn input against SpawnWorkerRequest schema`,
+        `  fix:      align lead-session tool call with the inputSchema published by zapbot-spawn-mcp`,
+      ].join("\n");
+    case "ProjectDirMissing":
+      return [
+        `ProjectDirMissing: ${error.projectSlug}`,
+        `  cause:    expected directory not present at ${error.path}`,
+        `  diagnose: ls -la ${error.path}`,
+        `  fix:      ensure ~/.zapbot/projects.json declares this slug; restart orchestrator (SIGHUP)`,
+      ].join("\n");
+    case "LeadProcessFailed":
+      return [
+        `LeadProcessFailed: ${error.projectSlug} exit=${error.exitCode ?? "null"}`,
+        `  cause:    claude subprocess exited non-zero`,
+        `  diagnose: tail -50 ~/.zapbot/projects/${error.projectSlug}/logs/turn-*.log`,
+        `  fix:      ${error.stderrTail || "(no stderr captured)"}`,
+      ].join("\n");
+    case "LockTimeout":
+      return [
+        `LockTimeout: ${error.projectSlug} waited=${error.waitedMs}ms`,
+        `  cause:    another webhook still holds the per-project lock`,
+        `  diagnose: ls -la ~/.zapbot/projects/${error.projectSlug}/lock`,
+        `  fix:      retry — GitHub redelivers in 30-60s`,
+      ].join("\n");
+    case "GitFetchFailed":
+      return [
+        `GitFetchFailed: ${error.projectSlug}`,
+        `  cause:    git fetch against bare clone failed`,
+        `  diagnose: cd ~/.zapbot/clones/${error.projectSlug}.git && git fetch`,
+        `  fix:      ${error.stderrTail || "(no stderr captured)"}`,
+      ].join("\n");
+    case "ProjectCheckoutFailed":
+      return [
+        `ProjectCheckoutFailed: ${error.projectSlug} stage=${error.stage}`,
+        `  cause:    ${error.stderrTail || "(no stderr captured)"}`,
+        `  diagnose: inspect ~/.zapbot/clones/${error.projectSlug}.git and ~/.zapbot/projects/${error.projectSlug}/checkout`,
+        `  fix:      remove the partial state and re-run orchestrator boot (idempotent)`,
+      ].join("\n");
+    case "McpConfigWriteFailed":
+      return [
+        `McpConfigWriteFailed: ${error.projectSlug}`,
+        `  cause:    ${error.cause}`,
+        `  diagnose: ls -la ${error.path}`,
+        `  fix:      check filesystem permissions on the parent directory`,
+      ].join("\n");
+    default:
+      return absurd(error);
+  }
 }

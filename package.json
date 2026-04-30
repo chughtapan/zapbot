@@ -29,6 +29,7 @@
     "@moltzap/claude-code-channel": "file:./vendor/moltzap/packages/claude-code-channel",
     "@moltzap/client": "file:./vendor/moltzap/packages/client",
     "@moltzap/protocol": "file:./vendor/moltzap/packages/protocol",
+    "@moltzap/runtimes": "file:./vendor/moltzap/packages/runtimes",
     "@octokit/auth-app": "^8.2.0",
     "@octokit/rest": "^22.0.1",
     "effect": "3.21.0",
@@ -39,6 +40,7 @@
     "@moltzap/client": "file:./vendor/moltzap/packages/client",
     "@moltzap/protocol": "file:./vendor/moltzap/packages/protocol",
     "@moltzap/claude-code-channel": "file:./vendor/moltzap/packages/claude-code-channel",
+    "@moltzap/runtimes": "file:./vendor/moltzap/packages/runtimes",
     "@moltzap/server-core": "file:./vendor/moltzap/packages/server"
   }
 }
