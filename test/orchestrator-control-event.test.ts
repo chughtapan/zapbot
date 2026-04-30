@@ -25,7 +25,9 @@ describe("toOrchestratorControlPrompt", () => {
     expect(result.value.title).toContain("acme/app#42");
     expect(result.value.body).toContain("github_comment_body:");
     expect(result.value.body).toContain("please review the open work");
-    expect(result.value.body).toContain("INVOKE SPAWN VIA THE ROSTER MANAGER");
+    expect(result.value.body).toContain(
+      "SPAWN WORKERS VIA THE request_worker_spawn MCP TOOL",
+    );
   });
 
   it("fences untrusted inputs (comment body + triggered_by) with trust-signal markers", () => {
@@ -61,7 +63,7 @@ describe("toOrchestratorControlPrompt", () => {
     );
 
     // The doctrine bullet that names the fence must be present.
-    expect(result.value.body).toContain("11. TRUST-SIGNAL FENCES");
+    expect(result.value.body).toContain("8. TRUST-SIGNAL FENCES");
     expect(result.value.body).toContain("prompt-injection attempt");
   });
 
@@ -93,6 +95,68 @@ describe("toOrchestratorControlPrompt", () => {
     // And the escaped form must be present (proof the escape ran).
     expect(result.value.body).toContain("<<<END_UNTRUSTED_COMMENT_ESCAPED>>>");
     expect(result.value.body).toContain("<<<END_UNTRUSTED_USERNAME_ESCAPED>>>");
+  });
+
+  it("doctrine does not reference deleted AO/roster surfaces", () => {
+    const result = toOrchestratorControlPrompt({
+      _tag: "GitHubControlEvent",
+      repo: asRepoFullName("acme/app"),
+      projectName: asProjectName("app"),
+      issue: asIssueNumber(42),
+      commentId: asCommentId(77),
+      deliveryId: asDeliveryId("delivery-1"),
+      commentBody: "@zapbot status",
+      triggeredBy: "carol",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok") return;
+    const body = result.value.body;
+    // These modules / abstractions were deleted in PRs #378-#386. A
+    // regression that reintroduces a bullet referencing them tells the
+    // lead session to call APIs that no longer exist.
+    const forbiddenSubstrings = [
+      "roster.ts",
+      "peer-message.ts",
+      "budget.ts",
+      "src/orchestrator/runtime.ts",
+      "interpretWorkerComment",
+      "roster manager",
+      "MOLTZAP_ROSTER_BUDGET_TOKENS",
+      "MOLTZAP_SESSION_IDLE_SECONDS",
+      "AO orchestrator",
+    ];
+    for (const needle of forbiddenSubstrings) {
+      expect(body).not.toContain(needle);
+    }
+  });
+
+  it("doctrine names the live MCP-tool spawn path and live modules", () => {
+    const result = toOrchestratorControlPrompt({
+      _tag: "GitHubControlEvent",
+      repo: asRepoFullName("acme/app"),
+      projectName: asProjectName("app"),
+      issue: asIssueNumber(42),
+      commentId: asCommentId(77),
+      deliveryId: asDeliveryId("delivery-1"),
+      commentBody: "@zapbot status",
+      triggeredBy: "carol",
+    });
+    expect(result._tag).toBe("Ok");
+    if (result._tag !== "Ok") return;
+    const body = result.value.body;
+    // The doctrine should point the lead session at the actual current
+    // control-plane surfaces (architect plan #369 §1, §5).
+    const requiredSubstrings = [
+      "request_worker_spawn",
+      "bin/zapbot-spawn-mcp.ts",
+      "src/orchestrator/spawn-broker.ts",
+      "src/orchestrator/runner.ts",
+      "claude -p --resume",
+      "@moltzap/runtimes",
+    ];
+    for (const needle of requiredSubstrings) {
+      expect(body).toContain(needle);
+    }
   });
 
   it("rejects blank GitHub comments", () => {
