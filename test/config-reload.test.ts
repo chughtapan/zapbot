@@ -536,6 +536,7 @@ esac
           CAPTURED_AO_CONFIG: capturedAoConfigPath,
           HOME: tempHome,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+          ZAPBOT_SKIP_ORCHESTRATOR: "1",
         },
         encoding: "utf8",
       });
@@ -818,6 +819,7 @@ esac
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
           ZAPBOT_GATEWAY_URL: "   ",
           ZAPBOT_BRIDGE_URL: "http://dead.example:3000",
+          ZAPBOT_SKIP_ORCHESTRATOR: "1",
         },
         encoding: "utf8",
       });

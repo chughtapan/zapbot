@@ -67,6 +67,8 @@ export ZAPBOT_WEBHOOK_SECRET ZAPBOT_API_KEY
 
 BRIDGE_PORT="${ZAPBOT_PORT:-3000}"
 AO_PORT="${ZAPBOT_AO_PORT:-3001}"
+ORCHESTRATOR_PORT="${ZAPBOT_ORCHESTRATOR_PORT:-3002}"
+ORCHESTRATOR_LOG_FILE="/tmp/zapbot-orchestrator.log"
 AO_LOG_FILE="/tmp/zapbot-ao.log"
 AO_CONFIG_FILE_RAW="$(mktemp "${TMPDIR:-/tmp}/zapbot-ao-config.XXXXXX")"
 AO_CONFIG_FILE="${AO_CONFIG_FILE_RAW}.yaml"
@@ -274,9 +276,45 @@ for i in $(seq 1 20); do
 done
 echo "AO ready on port ${AO_DASHBOARD_PORT}"
 
+# Start the zapbot orchestrator (Claude-Code-as-lead, epic #369). Boots
+# after AO/moltzap-server and before the bridge so the bridge's
+# `POST /turn` calls land on a ready listener.
+#
+# Set `ZAPBOT_SKIP_ORCHESTRATOR=1` to opt out — used by start.sh
+# integration tests that mock `bun` and don't simulate orchestrator
+# startup. Production deployments leave it unset.
+if [ "${ZAPBOT_SKIP_ORCHESTRATOR:-0}" != "1" ]; then
+  echo "Starting zapbot-orchestrator on port ${ORCHESTRATOR_PORT}..."
+  : > "$ORCHESTRATOR_LOG_FILE"
+  ZAPBOT_ORCHESTRATOR_PORT="$ORCHESTRATOR_PORT" \
+    ZAPBOT_ORCHESTRATOR_URL="http://127.0.0.1:${ORCHESTRATOR_PORT}" \
+    bun "$ZAPBOT_DIR/bin/zapbot-orchestrator.ts" \
+    > "$ORCHESTRATOR_LOG_FILE" 2>&1 &
+  ORCHESTRATOR_PID=$!
+
+  for i in $(seq 1 10); do
+    if curl -fsS "http://127.0.0.1:${ORCHESTRATOR_PORT}/healthz" >/dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$ORCHESTRATOR_PID" 2>/dev/null; then
+      echo "ERROR: orchestrator exited before /healthz responded. Check $ORCHESTRATOR_LOG_FILE"
+      kill "$AO_PID" 2>/dev/null || true
+      exit 1
+    fi
+    [ "$i" -eq 10 ] && {
+      echo "ERROR: orchestrator did not become ready within 10s. Check $ORCHESTRATOR_LOG_FILE"
+      kill "$ORCHESTRATOR_PID" "$AO_PID" 2>/dev/null || true
+      exit 1
+    }
+    sleep 1
+  done
+  echo "Orchestrator ready on port ${ORCHESTRATOR_PORT}"
+fi
+
 echo "Starting webhook bridge on port ${BRIDGE_PORT}..."
 export ZAPBOT_API_KEY
 export ZAPBOT_WEBHOOK_SECRET
+export ZAPBOT_ORCHESTRATOR_URL="http://127.0.0.1:${ORCHESTRATOR_PORT}"
 export ZAPBOT_CONFIG="$PROJECT_DIR/agent-orchestrator.yaml"
 export ZAPBOT_AO_CONFIG_PATH="$AO_CONFIG_FILE"
 export AO_CONFIG_PATH="$AO_CONFIG_FILE"
@@ -297,7 +335,7 @@ echo "Bridge ready on port ${BRIDGE_PORT}"
 cleanup() {
   echo ""
   echo "Shutting down..."
-  for pid in ${BRIDGE_PID:-} ${AO_PID:-}; do
+  for pid in ${BRIDGE_PID:-} ${ORCHESTRATOR_PID:-} ${AO_PID:-}; do
     [ -n "$pid" ] && pkill -P "$pid" 2>/dev/null || true
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
@@ -316,8 +354,9 @@ echo "  Mode:      $INGRESS_MODE"
 for repo in "${ZAPBOT_REPOS[@]}"; do
 echo "  Repo:      https://github.com/${repo}"
 done
-echo "  Bridge:    http://localhost:${BRIDGE_PORT}"
-echo "  Dashboard: http://localhost:${AO_DASHBOARD_PORT}"
+echo "  Bridge:        http://localhost:${BRIDGE_PORT}"
+echo "  Orchestrator:  http://localhost:${ORCHESTRATOR_PORT}"
+echo "  Dashboard:     http://localhost:${AO_DASHBOARD_PORT}"
 if [ "$INGRESS_MODE" = "github-demo" ]; then
   echo "  Gateway:   ${ZAPBOT_GATEWAY_URL}"
   echo "  Public:    ${ZAPBOT_BRIDGE_URL}"
@@ -328,7 +367,7 @@ fi
 echo ""
 echo "  Publish:   bash $ZAPBOT_DIR/bin/zapbot-publish.sh <plan-file>"
 echo ""
-echo "  Logs: /tmp/zapbot-{ao,bridge}.log"
+echo "  Logs: /tmp/zapbot-{ao,orchestrator,bridge}.log"
 echo "  Press Ctrl+C to stop everything."
 echo "================================================"
 
