@@ -140,6 +140,8 @@ function makeConfig(): BridgeConfig {
     webhookSecret: "wh-secret",
     moltzap: null,
     repos: new Map(),
+    orchestratorUrl: "http://127.0.0.1:3002",
+    orchestratorSecret: "test-orch-secret",
   };
 }
 
@@ -301,7 +303,7 @@ describe("installBridgeProcessLifecycle: reload state machine", () => {
     mkdirSync(join(tempHome, ".zapbot"), { recursive: true });
     writeFileSync(
       join(tempHome, ".zapbot", "config.json"),
-      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
+      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key", orchestratorSecret: "test-orch-secret" }),
     );
     env = { HOME: tempHome, ZAPBOT_BOT_USERNAME: "test-bot" };
   });
@@ -433,7 +435,7 @@ describe("prepareReload: pure validation", () => {
   it("returns Ok with a ReloadPlan when inputs validate", async () => {
     writeFileSync(
       join(tempHome, ".zapbot", "config.json"),
-      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
+      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key", orchestratorSecret: "test-orch-secret" }),
     );
     const env: NodeJS.ProcessEnv = {
       HOME: tempHome,
@@ -517,7 +519,7 @@ describe("installBridgeProcessLifecycle: signal-wins-over-rollback-failure (rev 
     mkdirSync(join(tempHome, ".zapbot"), { recursive: true });
     writeFileSync(
       join(tempHome, ".zapbot", "config.json"),
-      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
+      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key", orchestratorSecret: "test-orch-secret" }),
     );
     env = { HOME: tempHome, ZAPBOT_BOT_USERNAME: "test-bot" };
   });

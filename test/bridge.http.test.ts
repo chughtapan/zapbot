@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { Effect } from "effect";
 import {
   buildFetchHandler,
   defaultMintToken,
@@ -7,15 +8,15 @@ import {
   type GhAdapter,
   type RepoRoute,
 } from "../src/bridge.ts";
+import type { OrchestratorError } from "../src/orchestrator/errors.ts";
+import type { TurnSuccessResponse } from "../src/orchestrator/server.ts";
+import type { DispatchTurnRequest } from "../src/orchestrator/dispatcher.ts";
 import {
-  asAoSessionName,
   asBotUsername,
   asProjectName,
   asRepoFullName,
   ok,
 } from "../src/types.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
-import type { AoControlHost } from "../src/orchestrator/runtime.ts";
 import type { RepoFullName } from "../src/types.ts";
 
 // Routes covered here are the HTTP-layer routing of the bridge fetch
@@ -60,6 +61,8 @@ function makeConfig(
     webhookSecret: overrides.webhookSecret ?? WEBHOOK_SECRET,
     moltzap: { _tag: "MoltzapDisabled" },
     repos: overrides.repos ?? defaultRepos,
+    orchestratorUrl: "http://127.0.0.1:3002",
+    orchestratorSecret: "test-orchestrator-secret",
   };
 }
 
@@ -71,24 +74,22 @@ function fakeGh(): GhAdapter {
   };
 }
 
-function fakeAo(): AoControlHost {
-  return {
-    ensureStarted: async () => ok(undefined),
-    resolveReady: async () =>
-      ok({
-        session: asAoSessionName("app-orchestrator"),
-        senderId: asMoltzapSenderId("orch-1"),
-        mode: "reused",
-      }),
-    sendPrompt: async () => ok(undefined),
-  };
+function fakeDispatchTurn(): (
+  req: DispatchTurnRequest,
+) => Effect.Effect<TurnSuccessResponse, OrchestratorError, never> {
+  return () =>
+    Effect.succeed<TurnSuccessResponse>({
+      tag: "Replied",
+      newSessionId: "fake-session-id",
+      durationMs: 0,
+    });
 }
 
 function makeHandler(cfg: BridgeConfig = makeConfig()): (req: Request) => Promise<Response> {
   const ctx: BridgeHandlerContext = {
     mintToken: defaultMintToken,
     gh: fakeGh(),
-    aoControlHost: fakeAo(),
+    dispatchTurn: fakeDispatchTurn(),
     config: cfg,
   };
   return buildFetchHandler(() => cfg, ctx);

@@ -12,11 +12,12 @@
  */
 
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join as pathJoin } from "node:path";
 import { verifyAndClassify, registerBridge, deregisterBridge, startHeartbeat } from "./gateway.ts";
 import type { GatewayClientConfig, GatewayWebhookEnvelope, ClassifiedWebhook } from "./gateway.ts";
 import { getIssue } from "./github-state.ts";
 import {
-  buildMoltzapProcessEnv,
   loadMoltzapRuntimeConfig,
   type MoltzapRuntimeConfig,
 } from "./moltzap/runtime.ts";
@@ -35,29 +36,14 @@ import type {
   ConfigReloadError,
 } from "./config/types.ts";
 import type { IngressPolicy } from "./config/ingress.ts";
-import {
-  createAoCliControlHost,
-  createAoCliRosterManagerDeps,
-  createRosterBudgetCoordinator,
-  forwardControlPrompt,
-  type AoControlHost,
-  type ForwardControlError,
-  type RosterBudgetCoordinator,
-} from "./orchestrator/runtime.ts";
-import { createRosterManager, type RosterManager } from "./orchestrator/roster.ts";
+import { runTurn as dispatchTurnEffect, type DispatchTurnRequest } from "./orchestrator/dispatcher.ts";
+import type { OrchestratorError } from "./orchestrator/errors.ts";
+import type { TurnSuccessResponse } from "./orchestrator/server.ts";
 import { toOrchestratorControlPrompt, type ControlEventShapeError, type OrchestratorControlEvent } from "./orchestrator/control-event.ts";
-import { asMoltzapSenderId } from "./moltzap/types.ts";
-import {
-  bootBridgeApp,
-  bridgeAgentId,
-  shutdownBridgeApp,
-  drainBridgeSessions,
-  type BridgeAppBootError,
-} from "./moltzap/bridge-app.ts";
-import { bridgeAgentIdAsSenderId } from "./moltzap/bridge-identity.ts";
 import { Effect } from "effect";
 import {
   absurd,
+  asAoSessionName,
   asDeliveryId,
   asIssueNumber,
   asRepoFullName,
@@ -124,6 +110,18 @@ export interface BridgeConfig {
   readonly webhookSecret: string;
   readonly moltzap: MoltzapRuntimeConfig;
   readonly repos: ReadonlyMap<RepoFullName, RepoRoute>;
+  /**
+   * Base URL of the orchestrator process (epic #369 D2). Default:
+   * `http://127.0.0.1:3002`. Webhook turns POST to `<url>/turn`.
+   */
+  readonly orchestratorUrl: string;
+  /**
+   * Shared bearer secret for `POST /turn`. Loaded from
+   * `~/.zapbot/config.json`'s `orchestratorSecret` (or
+   * `ZAPBOT_ORCHESTRATOR_SECRET` env override). Must match the value the
+   * orchestrator process minted on its first boot.
+   */
+  readonly orchestratorSecret: string;
 }
 
 export interface RepoRoute {
@@ -142,16 +140,14 @@ export interface RunningBridge {
 export interface BridgeHandlerContext {
   readonly mintToken: () => Promise<Result<InstallationToken, DispatchError>>;
   readonly gh: GhAdapter;
-  readonly aoControlHost: AoControlHost;
   /**
-   * WS2 MVP (sbd#149) budget enforcement seam: the RosterManager tracks
-   * spawned worker sessions per-roster; the coordinator folds ingress +
-   * tick events into its two-gate budget state machine (SPEC §5(g)).
-   * Production handlers invoke the coordinator's observe* methods; the
-   * boot-time periodic tick drives stepBudget across all active rosters.
+   * Webhook → orchestrator dispatch seam (epic #369 D3, sub-issue #375).
+   * One `Effect.runPromise` at the handler call site forwards the turn;
+   * `OrchestratorError` is the typed failure channel.
    */
-  readonly roster: RosterManager;
-  readonly rosterBudgetCoordinator: RosterBudgetCoordinator;
+  readonly dispatchTurn: (
+    request: DispatchTurnRequest,
+  ) => Effect.Effect<TurnSuccessResponse, OrchestratorError, never>;
   readonly config: BridgeConfig;
 }
 
@@ -164,8 +160,9 @@ export interface GhAdapter {
 export type { HandleOutcome } from "./types.ts";
 type BridgeHotPathError =
   | { readonly _tag: "ProjectNotConfigured"; readonly repo: RepoFullName }
+  | { readonly _tag: "TokenMintFailed"; readonly cause: string }
   | ControlEventShapeError
-  | ForwardControlError;
+  | OrchestratorError;
 type IssueEventSource = {
   readonly type?: string | null;
   readonly pull_request?: {
@@ -254,24 +251,36 @@ async function handleMention(
       if (prompt._tag === "Err") {
         return err(prompt.error);
       }
-      const forwarded = await forwardControlPrompt(route.projectName, prompt.value, ctx.aoControlHost);
-      if (forwarded._tag === "Err") {
-        return err(forwarded.error);
+      const tokenResult = await ctx.mintToken();
+      if (tokenResult._tag === "Err") {
+        return err({
+          _tag: "TokenMintFailed",
+          cause: describeMintFailure(tokenResult.error),
+        });
       }
-      const session = forwarded.value.session;
-      // SPEC §5(g) wiring: a forwarded control prompt is a peer event
-      // on the orchestrator's session; fold it into the coordinator's
-      // idle-clock state via observeInboundPeerMessage. Budget-trip
-      // evaluation runs on the periodic tick set up in `runBridge`
-      // (30s interval); firing tick synchronously per-event would
-      // stack async work under load without changing correctness.
-      ctx.rosterBudgetCoordinator.observeInboundPeerMessage({
-        session,
-        atMs: Date.now(),
-      });
+      const dispatchRequest: DispatchTurnRequest = {
+        projectSlug: route.projectName as unknown as string,
+        deliveryId: c.deliveryId as unknown as string,
+        message: `# ${prompt.value.title}\n\n${prompt.value.body}`,
+        githubToken: tokenResult.value as unknown as string,
+      };
+      const dispatchExit = await Effect.runPromise(
+        ctx.dispatchTurn(dispatchRequest).pipe(Effect.either),
+      );
+      if (dispatchExit._tag === "Left") {
+        return err(dispatchExit.left);
+      }
+      const success = dispatchExit.right;
+      const sessionId =
+        success.tag === "Replied" ? success.newSessionId : success.priorSessionId;
+      const session = asAoSessionName(sessionId);
+      const summary =
+        success.tag === "Replied"
+          ? `Dispatched control event for @${c.triggeredBy}. Lead session: \`${sessionId}\` (turn ${success.durationMs}ms).`
+          : `Duplicate delivery for @${c.triggeredBy}; lead session \`${sessionId}\` already advanced.`;
       await postDurableStatusComment(
         { repo: c.repo, issue: c.issue },
-        `Forwarded control event for @${c.triggeredBy}. Session: \`${session as unknown as string}\`.`,
+        summary,
         ctx,
       );
       return ok({ kind: "dispatched", repo: c.repo, session });
@@ -762,19 +771,39 @@ export function buildFetchHandler(
       const outcome = await handleClassifiedWebhook(classified.value, ctx);
       if (outcome._tag === "Err") {
         const e = outcome.error;
-      switch (e._tag) {
-          case "AoStartFailed":
-            return errorResponse(503, "dispatch_unavailable", `ao start failed: ${e.cause}.`);
-          case "OrchestratorNotFound":
-            return errorResponse(503, "dispatch_unavailable", `No orchestrator found for ${e.projectName as unknown as string}.`);
-          case "OrchestratorNotReady":
-            return errorResponse(503, "dispatch_unavailable", `Orchestrator for ${e.projectName as unknown as string} is not ready: ${e.reason}.`);
-          case "AoSendFailed":
-            return errorResponse(502, "dispatch_failed", `ao send failed: ${e.cause}.`);
+        switch (e._tag) {
           case "PromptShapeInvalid":
             return errorResponse(400, "invalid_request", `Orchestrator prompt invalid: ${e.reason}.`);
           case "ProjectNotConfigured":
             return errorResponse(403, "configuration_error", `Repo '${e.repo as unknown as string}' not routed.`);
+          case "TokenMintFailed":
+            return errorResponse(502, "dispatch_failed", `Installation token mint failed: ${e.cause}.`);
+          case "OrchestratorUnreachable":
+            return errorResponse(503, "dispatch_unavailable", `Orchestrator at ${e.url} is unreachable: ${e.cause}.`);
+          case "OrchestratorAuthFailed":
+            return errorResponse(502, "dispatch_failed", `Orchestrator auth failed: ${e.reason}.`);
+          case "FleetSpawnFailed":
+            return errorResponse(503, "dispatch_unavailable", `Worker spawn '${e.agentName}' failed (${e.cause}): ${e.detail}.`);
+          case "LeadSessionCorrupted":
+            return errorResponse(503, "dispatch_unavailable", `Lead session for '${e.projectSlug}' is corrupt: ${e.reason}.`);
+          case "TurnRequestInvalid":
+            return errorResponse(400, "invalid_request", `Turn request rejected: ${e.reason}.`);
+          case "SpawnRequestInvalid":
+            return errorResponse(400, "invalid_request", `Spawn request rejected: ${e.reason}.`);
+          case "LockTimeout":
+            return errorResponse(429, "dispatch_unavailable", `Project '${e.projectSlug}' lock timeout after ${e.waitedMs}ms.`);
+          case "LeadProcessFailed":
+            return errorResponse(503, "dispatch_failed", `Lead process for '${e.projectSlug}' exited (code=${e.exitCode ?? "null"}).`);
+          case "ProjectDirMissing":
+            return errorResponse(503, "configuration_error", `Project dir missing for '${e.projectSlug}': ${e.path}.`);
+          case "GitFetchFailed":
+            return errorResponse(503, "dispatch_unavailable", `Git fetch failed for '${e.projectSlug}': ${e.stderrTail}.`);
+          case "ProjectCheckoutFailed":
+            return errorResponse(503, "dispatch_unavailable", `Project checkout failed for '${e.projectSlug}' at stage ${e.stage}: ${e.stderrTail}.`);
+          case "McpConfigWriteFailed":
+            return errorResponse(503, "configuration_error", `MCP config write failed for '${e.projectSlug}': ${e.cause}.`);
+          case "BootConfigInvalid":
+            return errorResponse(503, "configuration_error", `Orchestrator boot config invalid (${e.source}): ${e.reason}.`);
           default:
             return absurd(e);
         }
@@ -846,78 +875,24 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
   }
 
   const ghAdapter = buildDefaultGhAdapter();
-  let aoControlHost = createAoCliControlHost({
-    configPath: current.aoConfigPath,
-    env: {
-      ...process.env,
-      AO_CALLER_TYPE: "orchestrator",
-      ...buildMoltzapProcessEnv(current.moltzap),
-    },
-  });
-  // WS2 MVP (sbd#149) + sbd#200 rev 4: instantiate the RosterManager +
-  // budget coordinator at boot. The manager tracks spawned worker
-  // sessions; the coordinator folds MoltZap inbound events (via the
-  // onInbound observer below) and a periodic tick (startPeriodicTick)
-  // into the two-gate budget state machine. This is the production
-  // wiring required by SPEC §5(g): stepBudget and record* are actually
-  // invoked by ingress + the tick, not just in tests.
-  //
-  // Bridge identity (sbd#199 rev 4 §2 A+C(2)): when MoltZap is
-  // registration-backed, boot the bridge's MoltZapApp before the roster
-  // so `bridgeAgentId()` resolves to the just-registered id. The
-  // literal `"zapbot-orchestrator"` fallback is gone — it only ever
-  // matched when operators hand-set MOLTZAP_ORCHESTRATOR_SENDER_ID, and
-  // registration-backed deployments cannot predict that value.
-  //
-  // MoltzapDisabled: no MoltZap at all. Keep a fixed senderId for the
-  // few roster tests that run disabled; production never hits this path.
-  if (current.moltzap._tag === "MoltzapRegistration") {
-    const boot = await Effect.runPromise(
-      bootBridgeApp({ serverUrl: current.moltzap.serverUrl }).pipe(
-        Effect.either,
-      ),
-    );
-    if (boot._tag === "Left") {
-      throw new Error(`[bridge] bootBridgeApp failed: ${formatBridgeBootError(boot.left)}`);
-    }
-  }
-  const orchestratorSenderId: ReturnType<typeof asMoltzapSenderId> = (() => {
-    const registered = bridgeAgentId();
-    if (registered !== null) return bridgeAgentIdAsSenderId(registered);
-    return asMoltzapSenderId("zapbot-orchestrator");
-  })();
-  // sbd#201: when MoltZap is registration-backed, plumb auth into the
-  // roster manager so the spawn dep can mint per-worker creds and call
-  // `createBridgeSession({invitedAgentIds: [thisWorkerSenderId]})` BEFORE
-  // each `ao spawn` (architect rev 4 §4.3).
-  const moltzapAuth =
-    current.moltzap._tag === "MoltzapRegistration" ? current.moltzap : null;
-  const rosterManagerDeps = createAoCliRosterManagerDeps(
-    {
-      configPath: current.aoConfigPath,
-      env: {
-        ...process.env,
-        AO_CALLER_TYPE: "orchestrator",
-        ...buildMoltzapProcessEnv(current.moltzap),
+  // SIGHUP reload visibility: read URL + secret from `current` per call so
+  // a rotated secret takes effect without rebuilding the handler.
+  const boundFetch = globalThis.fetch.bind(globalThis);
+  const dispatchTurn = (
+    request: DispatchTurnRequest,
+  ): Effect.Effect<TurnSuccessResponse, OrchestratorError, never> =>
+    dispatchTurnEffect(
+      {
+        orchestratorUrl: current.orchestratorUrl,
+        orchestratorSecret: current.orchestratorSecret,
+        fetch: boundFetch,
       },
-    },
-    {
-      orchestratorSenderId,
-      moltzapAuth,
-    },
-  );
-  const rosterManager = createRosterManager(rosterManagerDeps);
-  const rosterBudgetCoordinator = createRosterBudgetCoordinator(rosterManager);
-  const BUDGET_TICK_MS = 30_000; // 30s tick — idle gate resolution.
-  const stopBudgetTick = rosterBudgetCoordinator.startPeriodicTick(BUDGET_TICK_MS);
+      request,
+    );
   const ctx: BridgeHandlerContext = {
     mintToken: defaultMintToken,
     gh: ghAdapter,
-    get aoControlHost() {
-      return aoControlHost;
-    },
-    roster: rosterManager,
-    rosterBudgetCoordinator,
+    dispatchTurn,
     get config() {
       return current;
     },
@@ -934,24 +909,8 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
         stopHeartbeat();
         stopHeartbeat = null;
       }
-      // Stop the budget tick so the process exits cleanly (SPEC §5(g)
-      // periodic stepBudget runner).
-      stopBudgetTick();
       await deregisterAll(current);
       server.stop();
-      // sbd#200 rev 4 §4.6 SIGTERM drain: close active bridge sessions
-      // under a bounded budget, then tear down the MoltZapApp. Order
-      // matters — drain BEFORE shutdown so the SDK's unconditional
-      // close-all does not pre-empt the budgeted close.
-      if (current.moltzap._tag === "MoltzapRegistration") {
-        const leaked = await drainBridgeSessions({ timeoutMs: 60_000 });
-        if (leaked.length > 0) {
-          console.warn(
-            `[bridge] SIGTERM drain leaked ${leaked.length} session(s) (moltzap#230): ${leaked.join(",")}`,
-          );
-        }
-        await Effect.runPromise(shutdownBridgeApp());
-      }
     },
     async reload(nextConfig: BridgeConfig): Promise<void> {
       // Stop stale heartbeat when ingress mode flips github-demo → local-only.
@@ -963,38 +922,24 @@ export async function startBridge(config: BridgeConfig): Promise<RunningBridge> 
       }
       await deregisterAll(current);
       current = nextConfig;
-      aoControlHost = createAoCliControlHost({
-        configPath: current.aoConfigPath,
-        env: {
-          ...process.env,
-          AO_CALLER_TYPE: "orchestrator",
-          ...buildMoltzapProcessEnv(current.moltzap),
-        },
-      });
       await registerAll(current);
     },
   };
   return running;
 }
 
-function formatBridgeBootError(e: BridgeAppBootError): string {
-  switch (e._tag) {
-    case "BridgeAppAlreadyBooted":
-      return "BridgeAppAlreadyBooted (singleton violated)";
-    case "BridgeAppEnvInvalid":
-      return `BridgeAppEnvInvalid: ${e.reason}`;
-    case "BridgeAppRegistrationFailed":
-      return `BridgeAppRegistrationFailed: ${e.cause._tag} (${JSON.stringify(e.cause)})`;
-    case "BridgeAppManifestInvalid":
-      return `BridgeAppManifestInvalid: ${e.cause.message}`;
-    case "BridgeAppConnectFailed":
-      return `BridgeAppConnectFailed: ${e.cause.message}`;
-    case "BridgeAppSessionFailed":
-      return `BridgeAppSessionFailed: ${e.cause.message}`;
-    case "BridgeAppBootInterrupted":
-      return `Bridge boot interrupted: ${e.reason}. Retry will start fresh.`;
+function describeMintFailure(error: DispatchError): string {
+  switch (error._tag) {
+    case "TokenMintFailed":
+      return error.cause;
+    case "AoSpawnFailed":
+      return `${error._tag} (exit=${error.exitCode}): ${error.stderr}`;
+    case "MoltzapProvisionFailed":
+      return `${error._tag}: ${error.cause}`;
+    case "ProjectNotConfigured":
+      return `${error._tag}: ${error.repo as unknown as string}`;
     default:
-      return absurd(e);
+      return absurd(error);
   }
 }
 
@@ -1101,7 +1046,16 @@ export async function loadBridgeInputs(
 
 /**
  * Build the boot-ready `BridgeConfig` from a resolved `BridgeRuntimeConfig`.
- * Folds in the Moltzap runtime decode (env-sourced) and projects routes.
+ * Folds in the Moltzap runtime decode (env-sourced), projects routes, and
+ * the orchestrator URL/secret used by the `/turn` dispatcher.
+ *
+ * Orchestrator URL precedence: `ZAPBOT_ORCHESTRATOR_URL` env var (if set
+ * and non-empty) → default `http://127.0.0.1:3002`.
+ *
+ * Orchestrator secret precedence: `ZAPBOT_ORCHESTRATOR_SECRET` env var (if
+ * set and non-empty) → `orchestratorSecret` in `~/.zapbot/config.json`
+ * (the same file `bin/zapbot-orchestrator.ts` mints into on first boot).
+ * Missing in both is a fatal config error.
  */
 export function buildBridgeConfig(
   env: NodeJS.ProcessEnv,
@@ -1110,6 +1064,12 @@ export function buildBridgeConfig(
   const moltzap = loadMoltzapRuntimeConfig(env);
   if (moltzap._tag === "Err") {
     return err({ reason: moltzap.error.reason });
+  }
+
+  const orchestratorUrl = trimOrNull(env.ZAPBOT_ORCHESTRATOR_URL) ?? "http://127.0.0.1:3002";
+  const orchestratorSecret = resolveOrchestratorSecret(env);
+  if (orchestratorSecret._tag === "Err") {
+    return err({ reason: orchestratorSecret.error.reason });
   }
 
   return ok({
@@ -1124,7 +1084,58 @@ export function buildBridgeConfig(
     webhookSecret: runtime.webhookSecret,
     moltzap: moltzap.value,
     repos: buildRepos(runtime),
+    orchestratorUrl,
+    orchestratorSecret: orchestratorSecret.value,
   });
+}
+
+function trimOrNull(value: string | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveOrchestratorSecret(
+  env: NodeJS.ProcessEnv,
+): Result<string, { readonly reason: string }> {
+  const fromEnv = trimOrNull(env.ZAPBOT_ORCHESTRATOR_SECRET);
+  if (fromEnv !== null) return ok(fromEnv);
+
+  // Prefer the canonical config path (`ZAPBOT_CONFIG_JSON`, set by
+  // `src/config/load.ts`); fall back to `~/.zapbot/config.json` so the
+  // bridge boots cleanly in operator-installed deployments that haven't
+  // exported the env override.
+  const configPath =
+    trimOrNull(env.ZAPBOT_CONFIG_JSON) ??
+    pathJoin(trimOrNull(env.HOME) ?? homedir(), ".zapbot", "config.json");
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch (cause) {
+    return err({
+      reason: `orchestratorSecret unavailable: ${configPath} not readable (${stringifyCause(cause)}); set ZAPBOT_ORCHESTRATOR_SECRET or run zapbot-orchestrator to mint one.`,
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (cause) {
+    return err({ reason: `orchestratorSecret unavailable: ${configPath} is not valid JSON (${stringifyCause(cause)}).` });
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    return err({ reason: `orchestratorSecret unavailable: ${configPath} did not decode to an object.` });
+  }
+  const fromFile = (parsed as { orchestratorSecret?: unknown }).orchestratorSecret;
+  if (typeof fromFile !== "string" || fromFile.trim().length === 0) {
+    return err({
+      reason: `orchestratorSecret missing from ${configPath}; start zapbot-orchestrator to mint one or set ZAPBOT_ORCHESTRATOR_SECRET.`,
+    });
+  }
+  return ok(fromFile.trim());
+}
+
+function stringifyCause(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function buildRepos(runtime: BridgeRuntimeConfig): ReadonlyMap<RepoFullName, RepoRoute> {

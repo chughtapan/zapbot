@@ -103,7 +103,7 @@ describe("bridge-process: loadBridgeInputs", () => {
   it("loads a valid canonical config in local-only mode", async () => {
     writeFileSync(
       join(tempHome, ".zapbot", "config.json"),
-      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
+      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key", orchestratorSecret: "test-orch-secret" }),
     );
     const result = await loadBridgeInputs(
       {
@@ -162,7 +162,7 @@ describe("bridge-process: runBridgeProcess (DI smoke test)", () => {
     mkdirSync(join(tempHome, ".zapbot"), { recursive: true });
     writeFileSync(
       join(tempHome, ".zapbot", "config.json"),
-      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key" }),
+      JSON.stringify({ webhookSecret: "wh-secret", apiKey: "api-key", orchestratorSecret: "test-orch-secret" }),
     );
     originalEnv = { ...process.env };
     // Snapshot existing signal listeners (e.g. Vitest's own) so afterEach

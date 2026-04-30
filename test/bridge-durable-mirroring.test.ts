@@ -6,6 +6,7 @@ vi.mock("../src/github-state.ts", () => ({
   getIssue: getIssueMock,
 }));
 
+import { Effect } from "effect";
 import {
   handleClassifiedWebhook,
   type BridgeConfig,
@@ -14,10 +15,10 @@ import {
   type RepoRoute,
 } from "../src/bridge.ts";
 import type { ClassifiedWebhook } from "../src/gateway.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
-import type { AoControlHost } from "../src/orchestrator/runtime.ts";
+import type { OrchestratorError } from "../src/orchestrator/errors.ts";
+import type { TurnSuccessResponse } from "../src/orchestrator/server.ts";
+import type { DispatchTurnRequest } from "../src/orchestrator/dispatcher.ts";
 import {
-  asAoSessionName,
   asBotUsername,
   asCommentId,
   asDeliveryId,
@@ -65,16 +66,15 @@ function makeGh(): { gh: GhAdapter; calls: FakeGhCalls } {
   return { gh, calls };
 }
 
-function makeAoHost(): AoControlHost {
-  return {
-    ensureStarted: async () => ok(undefined),
-    resolveReady: async () => ok({
-      session: asAoSessionName("app-orchestrator"),
-      senderId: asMoltzapSenderId("orch-1"),
-      mode: "reused",
-    }),
-    sendPrompt: async () => ok(undefined),
-  };
+function makeDispatchTurn(): (
+  req: DispatchTurnRequest,
+) => Effect.Effect<TurnSuccessResponse, OrchestratorError, never> {
+  return () =>
+    Effect.succeed<TurnSuccessResponse>({
+      tag: "Replied",
+      newSessionId: "fake-session-id",
+      durationMs: 0,
+    });
 }
 
 function makeConfig(): BridgeConfig {
@@ -95,6 +95,8 @@ function makeConfig(): BridgeConfig {
     webhookSecret: "test-webhook-secret",
     moltzap: { _tag: "MoltzapDisabled" },
     repos,
+    orchestratorUrl: "http://127.0.0.1:3002",
+    orchestratorSecret: "test-orchestrator-secret",
   };
 }
 
@@ -102,7 +104,7 @@ function makeCtx(gh: GhAdapter): BridgeHandlerContext {
   return {
     mintToken: async () => ok("fake-token" as unknown as InstallationToken),
     gh,
-    aoControlHost: makeAoHost(),
+    dispatchTurn: makeDispatchTurn(),
     config: makeConfig(),
   };
 }
