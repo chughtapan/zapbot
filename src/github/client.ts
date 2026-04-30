@@ -201,10 +201,10 @@ let _authInstance: ReturnType<typeof createAppAuth> | null = null;
 
 /**
  * Installation token plus the real `expiresAt` returned by
- * `@octokit/auth-app`. Callers that need the raw token (legacy v1 paths,
- * `ao spawn` env) can destructure `.token`; callers that broker the token
- * across a trust boundary (HTTP) propagate `.expiresAt` so downstream
- * caches refresh on the real GitHub expiry, not a wall-clock guess.
+ * `@octokit/auth-app`. Callers that need the raw token (worker-spawn env)
+ * can destructure `.token`; callers that broker the token across a trust
+ * boundary (HTTP) propagate `.expiresAt` so downstream caches refresh on
+ * the real GitHub expiry, not a wall-clock guess.
  */
 export interface InstallationTokenPair {
   readonly token: string;

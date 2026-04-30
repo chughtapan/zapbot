@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Modes:
 #   ./setup            Teammate install (skill only, no server deps)
-#   ./setup --server   Server install (adds ngrok, agent-orchestrator, tmux/jq/node prereqs)
+#   ./setup --server   Server install (adds orchestrator/moltzap-server prereqs: claude CLI, tmux, jq, node)
 #   ./setup --help     Show usage
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +20,7 @@ for arg in "$@"; do
       echo "Usage: ./setup [--server]"
       echo ""
       echo "  (no flags)   Teammate install — skill + minimal deps"
-      echo "  --server     Server install — adds orchestrator deps (ao, tmux, jq, node)"
+      echo "  --server     Server install — adds orchestrator deps (claude CLI, tmux, jq, node)"
       echo "  --help       Show this help"
       exit 0
       ;;
@@ -48,6 +48,7 @@ if $SERVER_MODE; then
   command -v node >/dev/null 2>&1 || MISSING="$MISSING node"
   command -v tmux >/dev/null 2>&1 || MISSING="$MISSING tmux"
   command -v jq >/dev/null 2>&1 || MISSING="$MISSING jq"
+  command -v claude >/dev/null 2>&1 || MISSING="$MISSING claude"
 fi
 
 if [ -n "$MISSING" ]; then
@@ -67,27 +68,6 @@ echo "Installing dependencies..."
 
 # --- Server-only installs ---
 if $SERVER_MODE; then
-  # Install agent-orchestrator (if missing)
-  if ! command -v ao >/dev/null 2>&1; then
-    echo "Installing agent-orchestrator..."
-    if command -v npm >/dev/null 2>&1; then
-      npm install -g @aoagents/ao
-    elif command -v bun >/dev/null 2>&1; then
-      bun install -g @aoagents/ao
-    else
-      echo "WARNING: Neither npm nor bun found. Install @aoagents/ao manually."
-    fi
-  fi
-
-  # Validate server installs
-  echo ""
-  echo "Validating server dependencies..."
-  if command -v ao >/dev/null 2>&1; then
-    echo "  agent-orchestrator: $(ao --version 2>&1 || echo 'installed')"
-  else
-    echo "  WARNING: ao not found after install"
-  fi
-
   # Generate systemd service file
   echo ""
   echo "--- Systemd service ---"

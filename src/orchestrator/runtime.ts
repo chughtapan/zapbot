@@ -3,12 +3,10 @@
  * ingress events and a periodic tick into the RosterManager's two-gate
  * budget state machine (SPEC §5(g)).
  *
- * The previous AO send/ensure surface (persistent AO orchestrator
- * session, `ao spawn` / `ao kill` plumbing) was deleted in sub-issue #375
- * when the bridge stopped routing through AO and started talking to the
- * orchestrator process via `POST /turn`. Roster budget enforcement is
- * preserved so downstream code that observes ingress events keeps
- * compiling; once roster-spawn is gone too the whole module retires.
+ * The bridge dispatches to the persistent zapbot orchestrator process via
+ * `POST /turn`. Roster budget enforcement is preserved so downstream code
+ * that observes ingress events keeps compiling; once roster-spawn is gone
+ * too the whole module retires.
  */
 
 import type { AoSessionName } from "../types.ts";
