@@ -389,15 +389,29 @@ function makeProductionRunnerDeps(input: ProductionRunnerDepsInput): RunnerDeps 
         }),
       }),
     acquireProjectLock: productionAcquireLock,
-    gitFetch: (projectSlug: ProjectSlug, cloneDir: string) =>
-      Effect.tryPromise({
-        try: () => execFileAsync("git", ["--git-dir", cloneDir, "fetch", "--quiet"]),
-        catch: (cause): OrchestratorError => ({
+    gitFetch: (projectSlug: ProjectSlug, cloneDir: string, worktreePath: string) =>
+      Effect.gen(function* () {
+        const wrap = (cause: unknown): OrchestratorError => ({
           _tag: "GitFetchFailed",
           projectSlug,
           stderrTail: cause instanceof Error ? cause.message : String(cause),
-        }),
-      }).pipe(Effect.asVoid),
+        });
+        // Refresh the bare clone first; the lead worktree shares its
+        // object DB so the subsequent fast-forward sees the new commits.
+        yield* Effect.tryPromise({
+          try: () => execFileAsync("git", ["--git-dir", cloneDir, "fetch", "--quiet"]),
+          catch: wrap,
+        });
+        // Fast-forward the lead worktree to the latest origin/<branch>.
+        // `--ff-only` fails closed on diverged history; the orchestrator
+        // surfaces that as `GitFetchFailed` and the bridge retries on the
+        // next webhook.
+        yield* Effect.tryPromise({
+          try: () =>
+            execFileAsync("git", ["-C", worktreePath, "pull", "--ff-only", "--quiet"]),
+          catch: wrap,
+        });
+      }),
     provisionCheckout: ({
       projectSlug,
       cloneUrl,
@@ -455,6 +469,9 @@ function makeProductionRunnerDeps(input: ProductionRunnerDepsInput): RunnerDeps 
             },
             catch: (cause): OrchestratorError => checkoutFailure(cause, "worktree-add"),
           });
+          // Create the worktree on a tracking branch so subsequent
+          // `git pull --ff-only` against the worktree picks up new
+          // commits without needing the branch name explicitly.
           yield* Effect.tryPromise({
             try: () =>
               execFileAsync("git", [
@@ -463,6 +480,9 @@ function makeProductionRunnerDeps(input: ProductionRunnerDepsInput): RunnerDeps 
                 "worktree",
                 "add",
                 "--quiet",
+                "--track",
+                "-b",
+                defaultBranch,
                 worktreePath,
                 `origin/${defaultBranch}`,
               ]),
@@ -505,6 +525,14 @@ function extractSlugFromPath(filePath: string): string {
 
 const LOCK_POLL_MS = 100;
 
+/**
+ * Acquire an advisory project lock via the O_CREAT|O_EXCL pattern. Bun
+ * does not expose flock(2); the open-with-EXCL pattern is portable
+ * across Bun/Node and serializes contenders correctly. Stale-lock
+ * recovery: when EEXIST is hit, read the PID stamped in the lockfile;
+ * if the recorded PID is not alive (via `kill -0`), assume the prior
+ * owner crashed and steal the lock.
+ */
 function productionAcquireLock(
   lockPath: string,
   waitMs: number,
@@ -515,32 +543,42 @@ function productionAcquireLock(
     let fd: number | null = null;
     while (fd === null) {
       try {
-        fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_RDWR, 0o644);
-        // POSIX exclusive lock via flock(2); on macOS bun maps to flock,
-        // on Linux this is the same syscall. Node has no public flock;
-        // fall back to file existence + LOCK_EX-on-fd via the optional
-        // `fs.flockSync` shim if the runtime exposes it.
-        try {
-          const fsAny = fs as unknown as {
-            readonly flockSync?: (fd: number, mode: string, nb: boolean) => void;
-          };
-          if (typeof fsAny.flockSync === "function") {
-            fsAny.flockSync(fd, "ex", true);
-          }
-        } catch (cause) {
-          fs.closeSync(fd);
-          fd = null;
-          if ((cause as NodeJS.ErrnoException).code !== "EAGAIN") throw cause;
-        }
+        fd = fs.openSync(
+          lockPath,
+          fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_RDWR,
+          0o644,
+        );
+        fs.writeSync(fd, `${process.pid}\n`);
       } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code === "EEXIST") {
-          // pure file existence is not the lock — keep going
-        } else {
+        const code = (cause as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST") {
           return yield* Effect.fail<OrchestratorError>({
             _tag: "LockTimeout",
             projectSlug: extractSlugFromPath(lockPath),
             waitedMs: waitMs,
           });
+        }
+        // Stale-lock recovery: if the PID stamped in the lockfile is
+        // not alive, steal the lock by unlinking and retrying.
+        try {
+          const stamped = fs.readFileSync(lockPath, "utf8").trim();
+          const pid = parseInt(stamped, 10);
+          if (Number.isFinite(pid) && pid > 0) {
+            try {
+              process.kill(pid, 0);
+              // Owner alive; fall through to wait
+            } catch (killCause) {
+              if ((killCause as NodeJS.ErrnoException).code === "ESRCH") {
+                fs.unlinkSync(lockPath);
+                continue;
+              }
+            }
+          }
+        } catch (readCause) {
+          // Lock file vanished between EEXIST and read; retry.
+          if ((readCause as NodeJS.ErrnoException).code === "ENOENT") {
+            continue;
+          }
         }
       }
       if (fd === null) {

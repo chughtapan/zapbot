@@ -81,10 +81,17 @@ export interface RunnerDeps {
     lockPath: string,
     waitMs: number,
   ) => Effect.Effect<ProjectLock, OrchestratorError, never>;
-  /** Fetch the bare clone before invoking claude. */
+  /**
+   * Fetch the bare clone and fast-forward the lead worktree before
+   * invoking claude. Implementation: `git fetch` against `cloneDir`
+   * (the bare clone), then `git -C <worktreePath> pull --ff-only`. The
+   * worktree must have a tracking branch (set up by `provisionCheckout`
+   * via `git worktree add -b <branch> ...`).
+   */
   readonly gitFetch: (
     projectSlug: ProjectSlug,
     cloneDir: string,
+    worktreePath: string,
   ) => Effect.Effect<void, OrchestratorError, never>;
   /** Provision bare clone + worktree. Idempotent. */
   readonly provisionCheckout: (input: {
@@ -237,6 +244,7 @@ export function runTurn(
         yield* deps.gitFetch(
           request.projectSlug,
           clonePath(deps, request.projectSlug),
+          checkoutPath(deps, request.projectSlug),
         );
 
         const env: Record<string, string> = {
@@ -363,12 +371,19 @@ export function ensureProjectCheckout(
       worktreePath: checkoutPath(deps, projectSlug),
     });
 
+    // The lead session invokes `bun bin/zapbot-spawn-mcp.ts` rather
+    // than `bin/zapbot-spawn-mcp.ts` directly. The shebang `#!/usr/bin/env
+    // bun` would let `claude` exec the file as long as the executable
+    // bit is set, but the bin file ships from a git checkout that does
+    // not preserve mode 0755 across all extraction paths (PR diffs,
+    // tarball reproductions, fresh worktrees). Going through `bun`
+    // makes the exec mode-independent.
     const mcpBody = JSON.stringify(
       {
         mcpServers: {
           "zapbot-spawn": {
-            command: deps.spawnMcpBinPath,
-            args: [],
+            command: "bun",
+            args: [deps.spawnMcpBinPath],
             env: {
               ZAPBOT_ORCHESTRATOR_URL: deps.orchestratorUrl,
               ZAPBOT_SPAWN_SECRET: deps.orchestratorSecret,

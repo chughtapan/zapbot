@@ -146,6 +146,59 @@ export function createStubRuntimeServerHandle(deps: {
   };
 }
 
+// ── Workspace seeding ───────────────────────────────────────────────
+
+/**
+ * Project the SpawnWorkerRequest into the workspace files the
+ * ClaudeCodeAdapter copies into the per-agent state dir under
+ * `<stateDir>/workspace/`. The worker reads `TASK.md` for instructions
+ * (including the worktree path it should `cd` into and the issue
+ * context) and `.env` for `GH_TOKEN`. ClaudeCodeAdapter forwards `--add-dir
+ * <stateDir>/workspace` to the claude CLI so these files are visible
+ * to the worker.
+ *
+ * Note on worktree handling: the architect's design doc § 7 specifies
+ * one git worktree per spawned worker at
+ * `~/.zapbot/projects/<slug>/workers/<workerSlug>/`. ClaudeCodeAdapter
+ * does not yet accept an external worktree path — it creates its own
+ * `mkdtempSync`-allocated state dir for each spawn. Until the adapter
+ * grows that contract, the worktree path is recorded in TASK.md so
+ * the worker can `cd` to it explicitly. The runner already pre-creates
+ * the worktree via `ensureProjectCheckout`'s sibling provisioning, so
+ * the path is real even though the adapter does not bind it.
+ */
+function renderWorkspaceFiles(
+  request: SpawnWorkerRequest,
+): ReadonlyArray<{ readonly relativePath: string; readonly content: string }> {
+  const taskBody = [
+    `# Worker task — ${request.workerSlug}`,
+    "",
+    `repo: ${request.repo}`,
+    `issue: ${request.issue ?? "(none)"}`,
+    `worktreePath: ${request.worktreePath}`,
+    "",
+    "## Instructions",
+    "",
+    request.prompt,
+    "",
+    "## Tooling",
+    "",
+    "- `gh` is authenticated via `$GH_TOKEN` in the environment block.",
+    "- `cd ${worktreePath}` to operate on the project checkout.",
+    "",
+  ].join("\n");
+
+  // The token rides on `.env` rather than being inlined in TASK.md so
+  // the prompt itself stays scrubbable in logs without leaking
+  // installation tokens.
+  const envBody = `GH_TOKEN=${request.githubToken}\n`;
+
+  return [
+    { relativePath: "TASK.md", content: taskBody },
+    { relativePath: ".env", content: envBody },
+  ];
+}
+
 // ── Spawn record (forward-compat seam) ──────────────────────────────
 
 interface SpawnRecord {
@@ -184,6 +237,13 @@ export function createSpawnBroker(deps: SpawnBrokerDeps): SpawnBrokerHandle {
         worktreePath: request.worktreePath,
       });
 
+      // Seed task context into the worker's workspace so the spawned
+      // claude has the prompt, GitHub token, and target worktree path
+      // available when it boots. ClaudeCodeAdapter creates its own
+      // tmpdir for state and copies workspaceFiles in; the lead session
+      // continues to send turns over the moltzap channel after spawn.
+      const workspaceFiles = renderWorkspaceFiles(request);
+
       const launch = startAgent({
         kind: "claude-code",
         server: deps.server,
@@ -192,6 +252,7 @@ export function createSpawnBroker(deps: SpawnBrokerDeps): SpawnBrokerHandle {
           apiKey: deps.moltzapApiKey,
           agentId,
           serverUrl: deps.moltzapServerUrl,
+          workspaceFiles,
         },
         readyTimeoutMs: deps.readyTimeoutMs,
         claudeCode: {
