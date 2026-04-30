@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # zapbot-team-init — Configure a GitHub repo for the zapbot workflow.
-# Creates the plan label and generates agent-orchestrator config.
+# Creates the plan label and registers the project in
+# ~/.zapbot/projects.json (the orchestrator's project loader source).
 #
 # Usage:
 #   zapbot-team-init <owner/repo>              — full init (first repo)
@@ -10,6 +11,7 @@ set -euo pipefail
 
 ZAPBOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 GITHUB_USER=$(gh api user --jq '.login' 2>/dev/null || echo "")
+PROJECTS_JSON="$HOME/.zapbot/projects.json"
 
 # ── Parse args ──────────────────────────────────────────────────────
 
@@ -46,8 +48,12 @@ if [ -z "$GITHUB_USER" ]; then
   exit 1
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required. Install jq (e.g. brew install jq or apt install jq)"
+  exit 1
+fi
+
 REPO_NAME=$(basename "$ZAPBOT_REPO")
-PROJECT_DIR=$(pwd -P)
 
 LABELS=(
   "zapbot-plan:0E8A16:Plan published via zapbot"
@@ -66,18 +72,43 @@ create_labels() {
   done
 }
 
-# ── Add-repo mode: append project to existing config ────────────────
+# Atomically merge a project entry into ~/.zapbot/projects.json. Schema
+# matches `bin/zapbot-orchestrator.ts`'s `ProjectsFileSchema`:
+#   { "<slug>": { "repo": "owner/name", "defaultBranch": "main" } }
+upsert_project_entry() {
+  local slug="$1"
+  local repo="$2"
+  local default_branch="${3:-main}"
+
+  mkdir -p "$(dirname "$PROJECTS_JSON")"
+  if [ ! -f "$PROJECTS_JSON" ]; then
+    echo "{}" > "$PROJECTS_JSON"
+    chmod 600 "$PROJECTS_JSON"
+  fi
+
+  local tmp
+  tmp="$(mktemp "${PROJECTS_JSON}.XXXXXX")"
+  jq \
+    --arg slug "$slug" \
+    --arg repo "$repo" \
+    --arg branch "$default_branch" \
+    '.[$slug] = { repo: $repo, defaultBranch: $branch }' \
+    "$PROJECTS_JSON" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$PROJECTS_JSON"
+}
+
+# ── Add-repo mode: append project to projects.json ──────────────────
 
 if [ "$ADD_REPO_MODE" = true ]; then
-  CONFIG_FILE="$PROJECT_DIR/agent-orchestrator.yaml"
-  if [ ! -f "$CONFIG_FILE" ]; then
-    echo "ERROR: No agent-orchestrator.yaml found in $PROJECT_DIR"
-    echo "Run zapbot-team-init <owner/repo> in this project first."
+  if [ ! -f "$PROJECTS_JSON" ]; then
+    echo "ERROR: No $PROJECTS_JSON found."
+    echo "Run zapbot-team-init <owner/repo> first."
     exit 1
   fi
 
-  if grep -q "repo: ${ZAPBOT_REPO}" "$CONFIG_FILE" 2>/dev/null; then
-    echo "ERROR: ${ZAPBOT_REPO} is already configured in agent-orchestrator.yaml"
+  if jq -e --arg slug "$REPO_NAME" '.[$slug]' "$PROJECTS_JSON" >/dev/null 2>&1; then
+    echo "ERROR: ${REPO_NAME} is already registered in $PROJECTS_JSON"
     exit 1
   fi
 
@@ -87,22 +118,8 @@ if [ "$ADD_REPO_MODE" = true ]; then
   create_labels "$ZAPBOT_REPO"
 
   echo ""
-  echo "--- Adding project to agent-orchestrator.yaml ---"
-
-  PROJECT_BLOCK="
-  ${REPO_NAME}:
-    repo: ${ZAPBOT_REPO}
-    path: ${PROJECT_DIR}
-    defaultBranch: main
-    scm:
-      plugin: github
-      webhook:
-        path: /api/webhooks/github
-        secretEnvVar: ZAPBOT_WEBHOOK_SECRET
-        signatureHeader: x-hub-signature-256
-        eventHeader: x-github-event"
-
-  echo "$PROJECT_BLOCK" >> "$CONFIG_FILE"
+  echo "--- Registering project in $PROJECTS_JSON ---"
+  upsert_project_entry "$REPO_NAME" "$ZAPBOT_REPO" "main"
   echo "  Added project: $REPO_NAME (${ZAPBOT_REPO})"
 
   echo ""
@@ -110,7 +127,7 @@ if [ "$ADD_REPO_MODE" = true ]; then
   echo "  Added $ZAPBOT_REPO to zapbot!"
   echo "================================================"
   echo ""
-  echo "Reload the bridge to pick up the new project:"
+  echo "Reload the orchestrator + bridge to pick up the new project:"
   if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
     sudo systemctl reload zapbot-bridge 2>/dev/null && echo "  Bridge reloaded." || echo "  Run: sudo systemctl reload zapbot-bridge"
   else
@@ -130,27 +147,14 @@ echo "--- Creating labels ---"
 create_labels "$ZAPBOT_REPO"
 
 echo ""
-echo "--- Generating agent-orchestrator.yaml ---"
-TEMPLATE="$ZAPBOT_DIR/templates/agent-orchestrator.yaml.tmpl"
-if [ -f "$TEMPLATE" ]; then
-  sed \
-    -e "s|{{REPO}}|$ZAPBOT_REPO|g" \
-    -e "s|{{REPO_PATH}}|$PROJECT_DIR|g" \
-    -e "s|{{REPO_NAME}}|$REPO_NAME|g" \
-    "$TEMPLATE" > "$PROJECT_DIR/agent-orchestrator.yaml"
-  echo "  Generated $PROJECT_DIR/agent-orchestrator.yaml"
-else
-  echo "  Template not found at $TEMPLATE, skipping"
-fi
+echo "--- Registering project in $PROJECTS_JSON ---"
+upsert_project_entry "$REPO_NAME" "$ZAPBOT_REPO" "main"
+echo "  Registered $REPO_NAME (${ZAPBOT_REPO})"
 
 echo ""
 echo "--- Environment setup ---"
 CONFIG_JSON="$HOME/.zapbot/config.json"
 mkdir -p "$HOME/.zapbot"
-if ! command -v jq >/dev/null 2>&1; then
-  echo "ERROR: jq is required. Install jq (e.g. brew install jq or apt install jq)"
-  exit 1
-fi
 GENERATED_API_KEY=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p | tr -d '\n')
 GENERATED_WEBHOOK_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p | tr -d '\n')
 if [ -f "$CONFIG_JSON" ]; then
@@ -193,12 +197,11 @@ echo "Next steps:"
 if systemctl is-active zapbot-bridge >/dev/null 2>&1; then
   echo "  1. Bridge is running (systemd). Config was auto-reloaded."
 else
-  echo "  1. Run $ZAPBOT_DIR/start.sh . to start the bridge"
+  echo "  1. Run $ZAPBOT_DIR/start.sh . to start moltzap-server + orchestrator + bridge"
 fi
 echo "  2. Mention @zapbot on an issue to kick off a plan or investigation"
-echo "     zapbot will dispatch a direct ao session; optional MoltZap env is forwarded if configured"
+echo "     The orchestrator resumes the project's lead Claude session and dispatches workers"
 echo ""
 echo "To add another repo later:"
-echo "  cd ~/other-project"
 echo "  $ZAPBOT_DIR/bin/zapbot-team-init --add-repo <owner/other-repo>"
 echo ""
