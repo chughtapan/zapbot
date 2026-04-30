@@ -1,7 +1,7 @@
 {
   "name": "zapbot",
-  "version": "0.5.4",
-  "description": "Thin GitHub webhook bridge that dispatches direct ao sessions, with optional MoltZap session provisioning",
+  "version": "0.6.0",
+  "description": "Thin GitHub webhook bridge that dispatches turns to a per-project Claude Code lead session via the zapbot orchestrator, with MoltZap-brokered worker spawns",
   "main": "dist/index.js",
   "scripts": {
     "test": "vitest run",
