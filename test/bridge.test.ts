@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { Effect } from "effect";
 import {
   handleClassifiedWebhook,
   type BridgeConfig,
@@ -7,10 +8,10 @@ import {
   type RepoRoute,
 } from "../src/bridge.ts";
 import type { ClassifiedWebhook } from "../src/gateway.ts";
-import { asMoltzapSenderId } from "../src/moltzap/types.ts";
-import type { AoControlHost } from "../src/orchestrator/runtime.ts";
+import type { OrchestratorError } from "../src/orchestrator/errors.ts";
+import type { TurnSuccessResponse } from "../src/orchestrator/server.ts";
+import type { DispatchTurnRequest } from "../src/orchestrator/dispatcher.ts";
 import {
-  asAoSessionName,
   asBotUsername,
   asCommentId,
   asDeliveryId,
@@ -40,10 +41,8 @@ interface FakeGhCalls {
   postComment: Array<{ repo: RepoFullName; issue: IssueNumber; body: string }>;
 }
 
-interface FakeAoCalls {
-  ensureStarted: Array<string>;
-  resolveReady: Array<string>;
-  sendPrompt: Array<{ session: string; title: string; body: string }>;
+interface FakeDispatchCalls {
+  turns: Array<DispatchTurnRequest>;
 }
 
 function makeGh(opts: {
@@ -68,31 +67,30 @@ function makeGh(opts: {
   return { gh, calls };
 }
 
-function makeAoHost(): { host: AoControlHost; calls: FakeAoCalls } {
-  const calls: FakeAoCalls = { ensureStarted: [], resolveReady: [], sendPrompt: [] };
-  const host: AoControlHost = {
-    ensureStarted: async (projectName) => {
-      calls.ensureStarted.push(projectName as unknown as string);
-      return ok(undefined);
-    },
-    resolveReady: async (projectName) => {
-      calls.resolveReady.push(projectName as unknown as string);
-      return ok({
-        session: asAoSessionName(`${projectName as unknown as string}-orchestrator`),
-        senderId: asMoltzapSenderId("orch-1"),
-        mode: "reused",
-      });
-    },
-    sendPrompt: async (session, prompt) => {
-      calls.sendPrompt.push({
-        session: session as unknown as string,
-        title: prompt.title,
-        body: prompt.body,
-      });
-      return ok(undefined);
-    },
-  };
-  return { host, calls };
+type DispatchTurnFn = (
+  req: DispatchTurnRequest,
+) => Effect.Effect<TurnSuccessResponse, OrchestratorError, never>;
+
+function makeDispatchTurn(opts: {
+  response?: TurnSuccessResponse;
+  fail?: OrchestratorError;
+} = {}): { dispatchTurn: DispatchTurnFn; calls: FakeDispatchCalls } {
+  const calls: FakeDispatchCalls = { turns: [] };
+  const dispatchTurn: DispatchTurnFn = (req) =>
+    Effect.gen(function* () {
+      calls.turns.push(req);
+      if (opts.fail !== undefined) {
+        return yield* Effect.fail(opts.fail);
+      }
+      return (
+        opts.response ?? {
+          tag: "Replied",
+          newSessionId: "session-from-orchestrator",
+          durationMs: 42,
+        }
+      );
+    });
+  return { dispatchTurn, calls };
 }
 
 function makeConfig(withRoute = true): BridgeConfig {
@@ -115,6 +113,8 @@ function makeConfig(withRoute = true): BridgeConfig {
     webhookSecret: "test-webhook-secret",
     moltzap: { _tag: "MoltzapDisabled" },
     repos,
+    orchestratorUrl: "http://127.0.0.1:3002",
+    orchestratorSecret: "test-orchestrator-secret",
   };
 }
 
@@ -123,26 +123,14 @@ function makeCtx(
   opts: {
     mintToken?: () => Promise<Result<InstallationToken, DispatchError>>;
     withRoute?: boolean;
-    aoControlHost?: AoControlHost;
+    dispatchTurn?: DispatchTurnFn;
   } = {}
 ): BridgeHandlerContext {
   return {
     mintToken: opts.mintToken ?? (async () => ok("fake-token" as unknown as InstallationToken)),
     gh,
-    aoControlHost: opts.aoControlHost ?? makeAoHost().host,
+    dispatchTurn: opts.dispatchTurn ?? makeDispatchTurn().dispatchTurn,
     config: makeConfig(opts.withRoute ?? true),
-    roster: {
-      createWorkerSession: async () => ({ _tag: "Ok" as const, value: "fake-session" as any }),
-      lookupWorkerSession: async () => ({ _tag: "Ok" as const, value: undefined }),
-      recordWorkerTokenConsumption: async () => ({ _tag: "Ok" as const, value: undefined }),
-      getActiveRostersSnapshot: () => [],
-    } as any,
-    rosterBudgetCoordinator: {
-      observeInboundPeerMessage: () => {},
-      observeTokensConsumed: () => {},
-      tickAllBudgets: async () => [],
-      startPeriodicTick: () => () => {},
-    },
   };
 }
 
@@ -227,25 +215,30 @@ describe("handleClassifiedWebhook — plan_this / investigate_this", () => {
     if (out._tag === "Err") expect(out.error._tag).toBe("ProjectNotConfigured");
   });
 
-  it("forwards control to the persistent orchestrator and preserves raw metadata", async () => {
+  it("dispatches a turn to the orchestrator and preserves raw metadata", async () => {
     const { gh, calls: ghCalls } = makeGh({});
-    const { host, calls } = makeAoHost();
-    const out = await handleClassifiedWebhook(asMention("investigate_this", "please investigate this"), makeCtx(gh, { aoControlHost: host }));
+    const { dispatchTurn, calls } = makeDispatchTurn();
+    const out = await handleClassifiedWebhook(
+      asMention("investigate_this", "please investigate this"),
+      makeCtx(gh, { dispatchTurn }),
+    );
     expect(out._tag).toBe("Ok");
     if (out._tag === "Ok") {
       expect(out.value.kind).toBe("dispatched");
       if (out.value.kind === "dispatched") {
-        expect(out.value.session).toBe("app-orchestrator");
+        expect(out.value.session).toBe("session-from-orchestrator");
       }
     }
-    expect(calls.ensureStarted).toEqual(["app"]);
-    expect(calls.resolveReady).toEqual(["app"]);
-    expect(calls.sendPrompt).toHaveLength(1);
-    expect(calls.sendPrompt[0].title).toContain("GitHub control for acme/app#42");
-    expect(calls.sendPrompt[0].body).toContain("delivery_id: delivery-1");
-    expect(calls.sendPrompt[0].body).toContain("github_comment_body:");
-    expect(calls.sendPrompt[0].body).toContain("please investigate this");
-    expect(ghCalls.postComment[0].body).toContain("Forwarded control event");
+    expect(calls.turns).toHaveLength(1);
+    const turn = calls.turns[0];
+    expect(turn.projectSlug).toBe("app");
+    expect(turn.deliveryId).toBe("delivery-1");
+    expect(turn.githubToken).toBe("fake-token");
+    expect(turn.message).toContain("GitHub control for acme/app#42");
+    expect(turn.message).toContain("delivery_id: delivery-1");
+    expect(turn.message).toContain("github_comment_body:");
+    expect(turn.message).toContain("please investigate this");
+    expect(ghCalls.postComment[0].body).toContain("Dispatched control event");
   });
 });
 
