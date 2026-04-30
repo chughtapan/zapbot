@@ -94,7 +94,10 @@ Zapbot does not splice raw comment text into a shell command.
 
 ## MoltZap
 
-Zapbot can provision MoltZap credentials for orchestrator and worker sessions.
+MoltZap is the channel layer between the Claude Code lead session and any
+workers it spawns via `request_worker_spawn`. Zapbot mints fresh per-session
+MoltZap credentials at boot (for the bridge) and at spawn time (for each
+worker), so neither component sees a long-lived API key.
 
 Required env (when MoltZap is enabled):
 
@@ -102,9 +105,10 @@ Required env (when MoltZap is enabled):
 |---|---|
 | `ZAPBOT_MOLTZAP_SERVER_URL` + `ZAPBOT_MOLTZAP_REGISTRATION_SECRET` | register a fresh MoltZap agent for the bridge at every boot, then mint per-worker creds at spawn time (architect rev 4 §4.3) |
 
-If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap. The
-static `ZAPBOT_MOLTZAP_API_KEY` mode was removed in sbd#199 — `loadMoltzapRuntimeConfig`
-now requires a registration secret whenever a server URL is set.
+If `ZAPBOT_MOLTZAP_SERVER_URL` is unset, zapbot runs without MoltZap and the
+lead cannot spawn workers. The static `ZAPBOT_MOLTZAP_API_KEY` mode was
+removed in sbd#199 — `loadMoltzapRuntimeConfig` now requires a registration
+secret whenever a server URL is set.
 
 Worker env posture:
 
@@ -257,20 +261,23 @@ gh issue comment "$ISSUE_B" --repo owner/zapbot-demo --body '@zapbot investigate
 
 3. What you should see:
 
-- one persistent orchestrator session handling both GitHub events
-- one MoltZap-linked worker session for `ISSUE_A`
-- one MoltZap-linked worker session for `ISSUE_B`
-- the orchestrator talking to each worker over MoltZap, then writing durable
-  output back to GitHub
+- the bridge accepting both webhook deliveries and dispatching them to the
+  orchestrator's `/turn` endpoint
+- one persistent Claude Code lead session per project, resumed across turns
+  (`~/.zapbot/projects/<slug>/session.json` carries `currentSessionId`)
+- the lead invoking the `request_worker_spawn` MCP tool when a comment asks
+  for follow-up work; each spawn boots a `@moltzap/runtimes`
+  `ClaudeCodeAdapter` worker linked back to the lead over MoltZap
+- workers committing/pushing branches and posting their output to GitHub via
+  the forwarded installation token
 
 4. A simple communication sketch:
 
 ```text
-orchestrator -> worker #1: inspect src/ and report the risky path
-orchestrator -> worker #2: inspect test/ and report missing coverage
-worker #1 -> orchestrator: findings for src/
-worker #2 -> orchestrator: findings for test/
-orchestrator -> GitHub: consolidated summary
+github webhook  -> bridge   -> orchestrator /turn -> claude lead (resumed)
+claude lead     -> request_worker_spawn (MCP)     -> @moltzap/runtimes worker
+worker          -> MoltZap channel                -> claude lead
+claude lead     -> gh issue/pr api                -> GitHub
 ```
 
 ## Add another repo later

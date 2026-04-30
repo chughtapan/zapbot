@@ -9,13 +9,20 @@ bun install
 
 `scripts/bootstrap-moltzap.sh` initialises the `vendor/moltzap` git
 submodule, runs `pnpm install --prefer-frozen-lockfile` + `pnpm --filter
-"@moltzap/claude-code-channel..." --filter "@moltzap/app-sdk..." build`
-inside it, and rewrites `workspace:*` specifiers so bun can resolve the
-`file:./vendor/moltzap/packages/*` deps at `bun install` time. It is
-idempotent: the build step skips if every required `dist/index.js`
-already exists. The sbd#200 MoltZap rework added `@moltzap/app-sdk` to
-the build set — the bridge owns `MoltZapApp` lifecycle and imports the
-SDK directly.
+"@moltzap/claude-code-channel..." --filter "@moltzap/app-sdk..." --filter
+"@moltzap/runtimes..." build` inside it, and rewrites `workspace:*`
+specifiers so bun can resolve the `file:./vendor/moltzap/packages/*` deps
+at `bun install` time. It is idempotent: the build step skips if every
+required `dist/index.js` already exists. The build set covers
+`@moltzap/claude-code-channel` (lead↔orchestrator transport),
+`@moltzap/app-sdk` (bridge-owned `MoltZapApp` lifecycle), and
+`@moltzap/runtimes` (the `ClaudeCodeAdapter` + `startRuntimeAgent` worker
+spawn surface that replaced AO).
+
+After `bun install`, the `postinstall` hook runs
+`scripts/prune-vendor-symlinks.sh` to remove broken pnpm symlinks under
+`node_modules/@moltzap/*/node_modules/` that would otherwise crash bun's
+runtime resolver.
 
 Prerequisites: `pnpm` on `PATH` (install once via `npm i -g pnpm` or
 `corepack enable`). CI invokes the bootstrap script before `bun install`
@@ -71,6 +78,9 @@ gateway/
 
 test/
   unit and property tests for the current runtime
+  integration/   end-to-end webhook → orchestrator → claude tests
+                 (excluded from the default `bun run test` run; opt in
+                 with `bunx vitest run test/integration/`)
 ```
 
 ## What not to reintroduce

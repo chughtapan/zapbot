@@ -88,11 +88,16 @@ GitHub @zapbot mention             ┌──────────────
 ├── clones/<slug>.git/       # bare clone (object DB shared with worktree)
 └── projects/<slug>/
     ├── checkout/            # working tree, fast-forwarded each turn
-    ├── session.json         # current claude session id (resumed each turn)
+    ├── session.json         # { currentSessionId, lastTurnAt, lastDeliveryId }
     ├── .mcp.json            # spawn-worker MCP server config for the lead
     ├── lock                 # advisory file lock (stamped with PID)
-    └── lead.log             # captured claude -p stdout/stderr per turn
+    └── logs/turn-<deliveryId>.log   # captured claude -p stdout/stderr per turn
 ```
+
+`session.json` is schema-validated by `SessionFileSchema` in
+`src/orchestrator/runner.ts`; on a parse failure the runner moves it aside as
+`session.json.corrupt-<unix-ms>` and the next turn starts fresh. `lastDeliveryId`
+makes redelivery of the same GitHub `X-GitHub-Delivery` header idempotent.
 
 `projects.json` is written by `bin/zapbot-team-init` and read by
 `bin/zapbot-orchestrator.ts`'s `ProjectsFileSchema`. The shape is:

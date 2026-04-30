@@ -6,14 +6,36 @@ Finish the AO removal sweep started in epic #369. The bridge now talks to a
 dedicated `zapbot-orchestrator` process that hosts the lead Claude Code session
 for each project; AO is no longer in the runtime.
 
+### Added
+
+- **End-to-end webhook integration smoke test** at
+  `test/integration/end-to-end-webhook.integration.test.ts`. Boots
+  moltzap-server + orchestrator + bridge in-process, sends an HMAC-signed
+  `@zapbot plan this` webhook, asserts dispatch body shape + auth + runner-stub
+  args + `session.json` persistence + redelivery idempotency.
+- **`scripts/prune-vendor-symlinks.sh` postinstall hook** removes broken
+  pnpm symlinks under `node_modules/@moltzap/*/node_modules/` after every
+  `bun install`. Without this, bun's runtime resolver finds the broken nested
+  symlinks first and crashes the orchestrator at boot with `ENOENT reading
+  node_modules/@moltzap/runtimes/node_modules/effect`.
+- **PAT-mode dispatch support.** `defaultMintToken` now falls back to
+  `ZAPBOT_GITHUB_TOKEN` when GitHub App env vars aren't set, mirroring the
+  App-then-PAT priority of `createGitHubClient`. Fixes "Installation token
+  mint failed" 502 on dispatch when the operator runs in PAT mode.
+
 ### Changed
 
 - **`start.sh` boots `moltzap-server` → `zapbot-orchestrator` → `bridge`** with
   a `/health(z)` readiness gate between each phase. The AO startup loop, the
   embedded Node script that mutated `agent-orchestrator.yaml`, the AO log file
   paths, the AO env exports, and the dashboard-port parsing are all gone.
-  start.sh now reads secrets exclusively from `~/.zapbot/config.json` and no
-  longer requires `agent-orchestrator.yaml`.
+  start.sh now reads secrets exclusively from `~/.zapbot/config.json`.
+- **`start.sh` mints MoltZap secrets + writes `~/.zapbot/moltzap.yaml`** on
+  first run if absent, then launches `moltzap-server` from a subshell that
+  cd's to `~/.zapbot/` so the bin finds `moltzap.yaml` in cwd. start.sh
+  exports both `MOLTZAP_SERVER_URL` (upstream convention) and
+  `ZAPBOT_MOLTZAP_SERVER_URL` (bridge convention) so neither side has to
+  translate.
 - **`bin/zapbot-team-init` writes `~/.zapbot/projects.json`** instead of
   `agent-orchestrator.yaml`. The schema (`{ "<slug>": { repo, defaultBranch } }`)
   matches `bin/zapbot-orchestrator.ts`'s `ProjectsFileSchema`. Both
@@ -24,31 +46,58 @@ for each project; AO is no longer in the runtime.
   module table reflects `src/orchestrator/{runner,server,spawn-broker,errors}`
   + `bin/zapbot-{orchestrator,spawn-mcp}.ts`. The error-model section names
   the new `OrchestratorError` tags.
+- **`ORCHESTRATOR_DOCTRINE` prompt** in `src/orchestrator/control-event.ts`
+  rewritten for the new control plane. Bullets now reference the
+  `request_worker_spawn` MCP tool, `bin/zapbot-spawn-mcp.ts`,
+  `src/orchestrator/spawn-broker.ts`, `src/orchestrator/runner.ts`, and
+  `claude -p --resume` instead of the deleted roster manager / peer-message
+  decoder / two-gate budget machinery. Defensive tests guard against
+  regression of deleted-module names.
+
+### Fixed
+
+- **`ensureProjectCheckout` no longer trips on `worktree add`.** Switched
+  from `git clone --bare` to `git init --bare` + `git remote add origin` +
+  `git fetch origin`. The clone-bare path populated `refs/heads/<branch>`
+  from the remote, which then conflicted with `git worktree add --track -b
+  <branch> ... origin/<branch>` ("a branch named '<branch>' already exists").
+- **claude subprocess args.** Two bugs in `productionSpawnClaude`:
+  `--mcp-config` is variadic so the next positional was consumed as another
+  config path (fixed by adding `--` before the message), and the default
+  `--output-format text` mode never prints `session_id` so every clean exit
+  looked like `LeadProcessFailed` (fixed by passing
+  `--output-format json`, which emits `session_id` in every event).
 
 ### Removed
 
-- **`agent-orchestrator.yaml`** as a configuration source for the bridge or
-  team-init. The orchestrator's `~/.zapbot/projects.json` is now the single
-  source of truth for project routing.
+- **`agent-orchestrator.yaml`** as a configuration source for `bin/zapbot-team-init`
+  and `start.sh`'s AO startup. The bridge process still consumes
+  `agent-orchestrator.yaml` for its own repo routing (loaded via `ZAPBOT_CONFIG`);
+  the orchestrator reads `~/.zapbot/projects.json`.
 - **AO startup logic in `start.sh`** (~170 LOC) including `start_ao_once`,
   duplicate-session retry, dashboard-ready polling, the `claude-moltzap`
   plugin injection script, and the `AO_LOG_FILE` / `AO_CONFIG_FILE` plumbing.
+- **AO worker plugin + worker channel.** Deleted
+  `worker/ao-plugin-agent-claude-moltzap/` (3 files / 574 LOC),
+  `bin/moltzap-claude-channel.ts`, and `src/moltzap/worker-channel.ts`.
+  Workers spawn through `@moltzap/runtimes.ClaudeCodeAdapter` instead of
+  the local plugin. Dropped `@aoagents/ao-plugin-agent-claude-code` from
+  `package.json` deps.
+- **Orphaned orchestrator modules.** `src/orchestrator/{peer-message,roster,
+  budget,runtime}.ts` (~1,600 LOC) — these powered the AO roster manager +
+  two-gate budget. After PR #376 wired the bridge directly to the orchestrator,
+  these had zero production consumers and were deleted.
+- **Operator-facing AO references** in `setup` (no longer installs
+  `@aoagents/ao` globally), `README.md`, `CONTRIBUTING.md`, and 6 stale code
+  comments. Final grep is clean modulo the "do not reintroduce" forbid-language
+  + 4 negative test assertions.
 - **`test/integration/moltzap-mcp-stdio-smoke.integration.test.ts`** —
-  exercised `bin/moltzap-claude-channel.ts`, deleted in PR #378. The new
-  end-to-end smoke test lands in sub-issue #10.
+  exercised `bin/moltzap-claude-channel.ts`, deleted in PR #378. Replaced by
+  the new end-to-end-webhook integration smoke test.
 - **Four AO-coupled `start.sh` integration tests** in `test/config-reload.test.ts`
   (claude-moltzap plugin injection, duplicate-session retry, local-only with a
   stale bridge URL, github-demo with a dead public URL). Replaced by a single
-  string-only assertion that the new boot order is wired correctly. Full
-  end-to-end coverage lands in sub-issue #10.
-
-### Operator migration
-
-If you currently have `agent-orchestrator.yaml` in a project directory, it is
-no longer read. Run `bin/zapbot-team-init <owner/repo>` once to seed
-`~/.zapbot/projects.json`; subsequent `--add-repo` invocations append to the
-same file. The bridge picks up project routing through the orchestrator's
-`/turn` dispatch, which loads `~/.zapbot/projects.json` on boot and on `SIGHUP`.
+  string-only assertion that the new boot order is wired correctly.
 
 ## 0.5.4 (2026-04-25)
 
