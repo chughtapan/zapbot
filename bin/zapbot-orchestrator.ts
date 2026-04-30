@@ -460,14 +460,52 @@ function makeProductionRunnerDeps(input: ProductionRunnerDepsInput): RunnerDeps 
             ),
           );
         } else {
+          // `git init --bare` + `remote add origin` + fetch. We can't use
+          // `git clone --bare` directly: it copies `refs/heads/*` from the
+          // remote into the bare clone, which then conflicts with
+          // `git worktree add --track -b <branch>` ("a branch named '<branch>'
+          // already exists"). `--mirror` has the same problem because its
+          // `+refs/*:refs/*` refspec also lands branches in `refs/heads/`.
+          // Init-bare starts the refs empty; the standard fetch refspec
+          // populates ONLY `refs/remotes/origin/*`, leaving `refs/heads/`
+          // free for worktree-add to write to.
+          yield* Effect.try({
+            try: (): void => {
+              fs.mkdirSync(bareClonePath, { recursive: true });
+            },
+            catch: (cause): OrchestratorError => checkoutFailure(cause, "clone"),
+          });
           yield* Effect.tryPromise({
             try: () =>
               execFileAsync("git", [
-                "clone",
+                "--git-dir",
+                bareClonePath,
+                "init",
                 "--bare",
                 "--quiet",
-                cloneUrl,
+              ]),
+            catch: (cause): OrchestratorError => checkoutFailure(cause, "clone"),
+          });
+          yield* Effect.tryPromise({
+            try: () =>
+              execFileAsync("git", [
+                "--git-dir",
                 bareClonePath,
+                "remote",
+                "add",
+                "origin",
+                cloneUrl,
+              ]),
+            catch: (cause): OrchestratorError => checkoutFailure(cause, "clone"),
+          });
+          yield* Effect.tryPromise({
+            try: () =>
+              execFileAsync("git", [
+                "--git-dir",
+                bareClonePath,
+                "fetch",
+                "--quiet",
+                "origin",
               ]),
             catch: (cause): OrchestratorError => checkoutFailure(cause, "clone"),
           });
@@ -650,12 +688,20 @@ function productionSpawnClaude(
 ): Effect.Effect<ClaudeSpawnResult, OrchestratorError, never> {
   return Effect.async<ClaudeSpawnResult, OrchestratorError, never>((resume) => {
     fs.mkdirSync(path.dirname(args.logFilePath), { recursive: true });
-    const claudeArgs: string[] = ["-p"];
+    // --output-format json so the runner can extract session_id (the
+    // default text mode prints only the response text, no session id —
+    // every fresh turn would then look like a session-corruption case
+    // and dispatch fails 503 even on a clean lead-session exit).
+    const claudeArgs: string[] = ["-p", "--output-format", "json"];
     if (args.resumeSessionId !== null) {
       claudeArgs.push("--resume", args.resumeSessionId);
     }
     claudeArgs.push("--mcp-config", args.mcpConfigPath);
-    claudeArgs.push(args.message);
+    // `--` ends `--mcp-config`'s variadic <configs...> consumption, so
+    // claude treats the message as the prompt positional and not as
+    // another MCP config path. Without `--`, claude swallows the message
+    // into --mcp-config and exits with "MCP config file not found".
+    claudeArgs.push("--", args.message);
 
     const child = spawn("claude", claudeArgs, {
       cwd: args.cwd,
