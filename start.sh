@@ -66,9 +66,54 @@ BRIDGE_PORT="${ZAPBOT_PORT:-3000}"
 ORCHESTRATOR_PORT="${ZAPBOT_ORCHESTRATOR_PORT:-3002}"
 MOLTZAP_PORT="${MOLTZAP_PORT:-3100}"
 MOLTZAP_SERVER_URL="${MOLTZAP_SERVER_URL:-http://127.0.0.1:${MOLTZAP_PORT}}"
+MOLTZAP_YAML="$HOME/.zapbot/moltzap.yaml"
 ORCHESTRATOR_LOG_FILE="/tmp/zapbot-orchestrator.log"
 MOLTZAP_LOG_FILE="/tmp/zapbot-moltzap.log"
 BRIDGE_LOG_FILE="/tmp/zapbot-bridge.log"
+
+# MoltZap local-server config: auto-mint secrets + write yaml on first run
+# so the operator never hand-stages config. Stored alongside the bridge's
+# webhookSecret/apiKey under ~/.zapbot/. The yaml is regenerated when missing
+# so MOLTZAP_PORT changes propagate cleanly; existing yamls are left alone.
+ZAPBOT_MOLTZAP_REGISTRATION_SECRET="$(jq -r '.moltzap.registrationSecret // empty' "$HOME/.zapbot/config.json" 2>/dev/null)"
+MOLTZAP_ENCRYPTION_SECRET="$(jq -r '.moltzap.encryptionSecret // empty' "$HOME/.zapbot/config.json" 2>/dev/null)"
+if [ -z "$ZAPBOT_MOLTZAP_REGISTRATION_SECRET" ] || [ -z "$MOLTZAP_ENCRYPTION_SECRET" ]; then
+  echo "Initialising MoltZap local-dev secrets in $HOME/.zapbot/config.json..."
+  ZAPBOT_MOLTZAP_REGISTRATION_SECRET="$(openssl rand -hex 32)"
+  MOLTZAP_ENCRYPTION_SECRET="$(openssl rand -hex 32)"
+  jq --arg reg "$ZAPBOT_MOLTZAP_REGISTRATION_SECRET" \
+     --arg enc "$MOLTZAP_ENCRYPTION_SECRET" \
+     --arg url "$MOLTZAP_SERVER_URL" \
+     '.moltzap = (.moltzap // {}) | .moltzap.registrationSecret = $reg | .moltzap.encryptionSecret = $enc | .moltzap.serverUrl = $url' \
+     "$HOME/.zapbot/config.json" > "$HOME/.zapbot/config.json.tmp"
+  mv "$HOME/.zapbot/config.json.tmp" "$HOME/.zapbot/config.json"
+fi
+if [ ! -f "$MOLTZAP_YAML" ]; then
+  echo "Writing $MOLTZAP_YAML..."
+  cat > "$MOLTZAP_YAML" <<MZ_YAML
+# Local-dev MoltZap server config managed by zapbot's start.sh.
+# - Embedded PGlite (no external Postgres needed).
+# - dev_mode bypasses external auth handshake — localhost only.
+# - registration.secret + encryption.master_secret pull from ~/.zapbot/config.json.
+server:
+  port: ${MOLTZAP_PORT}
+  cors_origins:
+    - "*"
+encryption:
+  master_secret: ${MOLTZAP_ENCRYPTION_SECRET}
+registration:
+  secret: ${ZAPBOT_MOLTZAP_REGISTRATION_SECRET}
+dev_mode:
+  enabled: true
+log_level: info
+MZ_YAML
+fi
+# The bridge consumes ZAPBOT_MOLTZAP_SERVER_URL (zapbot-namespaced); the
+# orchestrator + moltzap-server adapters consume MOLTZAP_SERVER_URL (upstream
+# convention). Export both so neither side has to translate.
+ZAPBOT_MOLTZAP_SERVER_URL="$MOLTZAP_SERVER_URL"
+export ZAPBOT_MOLTZAP_REGISTRATION_SECRET MOLTZAP_ENCRYPTION_SECRET
+export MOLTZAP_SERVER_URL ZAPBOT_MOLTZAP_SERVER_URL
 
 trim_env_value() {
   printf '%s' "${1:-}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
@@ -132,8 +177,11 @@ if [ "${ZAPBOT_SKIP_MOLTZAP_SERVER:-0}" != "1" ]; then
   fi
   echo "Starting moltzap-server on port ${MOLTZAP_PORT}..."
   : > "$MOLTZAP_LOG_FILE"
-  MOLTZAP_PORT="$MOLTZAP_PORT" \
-    "$MOLTZAP_BIN" > "$MOLTZAP_LOG_FILE" 2>&1 &
+  # cd to ~/.zapbot/ so moltzap-server finds moltzap.yaml in cwd. Embedded
+  # PGlite writes data into cwd too, so this also keeps state out of the
+  # zapbot source tree. Use a subshell so the parent's cwd stays put.
+  ( cd "$HOME/.zapbot" && MOLTZAP_PORT="$MOLTZAP_PORT" \
+    "$MOLTZAP_BIN" > "$MOLTZAP_LOG_FILE" 2>&1 ) &
   MOLTZAP_PID=$!
 
   for i in $(seq 1 20); do
