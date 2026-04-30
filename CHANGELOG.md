@@ -73,8 +73,7 @@ for each project; AO is no longer in the runtime.
 - **`agent-orchestrator.yaml`** as a configuration source for `bin/zapbot-team-init`
   and `start.sh`'s AO startup. The bridge process still consumes
   `agent-orchestrator.yaml` for its own repo routing (loaded via `ZAPBOT_CONFIG`);
-  the orchestrator reads `~/.zapbot/projects.json`. Migration of the bridge
-  config-loader to projects.json is tracked as a follow-up.
+  the orchestrator reads `~/.zapbot/projects.json`.
 - **AO startup logic in `start.sh`** (~170 LOC) including `start_ao_once`,
   duplicate-session retry, dashboard-ready polling, the `claude-moltzap`
   plugin injection script, and the `AO_LOG_FILE` / `AO_CONFIG_FILE` plumbing.
@@ -99,20 +98,6 @@ for each project; AO is no longer in the runtime.
   (claude-moltzap plugin injection, duplicate-session retry, local-only with a
   stale bridge URL, github-demo with a dead public URL). Replaced by a single
   string-only assertion that the new boot order is wired correctly.
-
-### Operator migration
-
-If you currently have `agent-orchestrator.yaml` in a project directory, the
-bridge process still reads it for repo routing (via `ZAPBOT_CONFIG`); leave
-it in place. Run `bin/zapbot-team-init <owner/repo>` once to seed
-`~/.zapbot/projects.json` (the orchestrator's project loader source);
-subsequent `--add-repo` invocations append to the same file. The orchestrator
-loads `projects.json` on boot and on `SIGHUP`.
-
-If you operate in PAT mode, set `ZAPBOT_GITHUB_TOKEN` in the project `.env`.
-Earlier versions failed dispatch in PAT mode with `Installation token mint
-failed: no installation token available`; PAT mode is now wired through
-`defaultMintToken`'s App-then-PAT fallback.
 
 ## 0.5.4 (2026-04-25)
 
