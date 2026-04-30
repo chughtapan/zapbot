@@ -40,11 +40,14 @@ fi
 if [ ! -f "$PACKAGES_DIR/protocol/dist/index.js" ] \
   || [ ! -f "$PACKAGES_DIR/client/dist/index.js" ] \
   || [ ! -f "$PACKAGES_DIR/claude-code-channel/dist/index.js" ] \
-  || [ ! -f "$PACKAGES_DIR/app-sdk/dist/index.js" ]; then
+  || [ ! -f "$PACKAGES_DIR/app-sdk/dist/index.js" ] \
+  || [ ! -f "$PACKAGES_DIR/runtimes/dist/index.js" ]; then
   echo "[bootstrap-moltzap] building @moltzap/* workspace packages..."
   (cd "$SUBMODULE_DIR" \
     && pnpm install --prefer-frozen-lockfile \
-    && pnpm --filter "@moltzap/claude-code-channel..." --filter "@moltzap/app-sdk..." build)
+    && pnpm --filter "@moltzap/claude-code-channel..." \
+            --filter "@moltzap/app-sdk..." \
+            --filter "@moltzap/runtimes..." build)
 else
   echo "[bootstrap-moltzap] dist already present — skipping build."
 fi
