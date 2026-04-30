@@ -10,7 +10,7 @@ export interface ManagedSessionTag {
   readonly projectName: ProjectName;
   readonly sessionName: AoSessionName;
   readonly scope: ManagedSessionScope;
-  readonly origin: "start.sh" | "ao-spawn-with-moltzap.ts" | "webhook-bridge.ts";
+  readonly origin: "start.sh" | "webhook-bridge.ts";
   readonly claimedAtMs: number;
 }
 

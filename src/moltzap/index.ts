@@ -17,6 +17,5 @@ export * from "./manifest.ts";
 // sbd#199 rev 4 — bridge/worker split per operator A+C(2) decision.
 export * from "./bridge-identity.ts";
 export * from "./bridge-app.ts";
-export * from "./worker-channel.ts";
 export * from "./bridge-silence.ts";
 export * from "./union-manifest.ts";
